@@ -37,15 +37,29 @@ export function seedDataIfEmpty() {
   const sampleBookings = [
     {
       pnr: "ABC123",
+      invoice_no: "INV-00001",
+      booking_date: getRelativeDate(-10),
       passenger_name: "Rahul Verma",
       pax_type: "ADT",
+      gender: "M",
+      title: "Mr",
       mobile: "+39 345 1234567",
       airline: "ITA Airways",
       ticket_no: "055-1234567890",
+      flight_no: "AZ 770",
       ow_rt: "RT",
       sector: "FCO-DEL",
       outbound_date: getRelativeDate(-2), // Departed 2 days ago
       inbound_date: getRelativeDate(10),
+      dob: "1992-05-12",
+      nationality: "Indian",
+      passport_no: "W3344556",
+      passport_expiry_date: "2032-08-02",
+      wchr: "Yes",
+      meal: "HNML",
+      fare_type: "FLEX",
+      services_incl: "2PC 23kg",
+      supplier: "SU0001 - Almate SRL",
       fare_sold: 450,
       fare_issued: 400,
       total_paid: 0,
@@ -53,18 +67,35 @@ export function seedDataIfEmpty() {
       payment_status: "UNPAID",
       ticket_status: "TICKETED",
       booked_by: "Rajesh Sharma",
+      agent_issued_by: "Peter",
+      remarks: "Wheelchair assistance requested",
+      refund_flag: false,
       created_at: getRelativeDate(-10)
     },
     {
       pnr: "DEF456",
+      invoice_no: "INV-00002",
+      booking_date: getRelativeDate(-5),
       passenger_name: "Anita Singh",
       pax_type: "ADT",
+      gender: "F",
+      title: "Mrs",
       mobile: "+39 345 9876543",
       airline: "Air India",
       ticket_no: "098-0987654321",
+      flight_no: "AI 1884, AI 123",
       ow_rt: "OW",
       sector: "DEL-FCO",
       outbound_date: getRelativeDate(5), // Departs in 5 days
+      dob: "1976-02-27",
+      nationality: "Indian",
+      passport_no: "T7453002",
+      passport_expiry_date: "2030-03-11",
+      wchr: "No",
+      meal: "VGML",
+      fare_type: "BASIC",
+      services_incl: "1PC 23kg",
+      supplier: "SU0003 - Ghai Travels SRL",
       fare_sold: 500,
       fare_issued: 420,
       total_paid: 200,
@@ -72,17 +103,34 @@ export function seedDataIfEmpty() {
       payment_status: "PARTIAL",
       ticket_status: "TICKETED",
       booked_by: "Meena Patel",
+      agent_issued_by: "Peter",
+      remarks: "Balance pending before departure",
+      refund_flag: false,
       created_at: getRelativeDate(-5)
     },
     {
       pnr: "GHI789",
+      invoice_no: "INV-00003",
+      booking_date: getRelativeDate(-2),
       passenger_name: "Vikram Mehta",
       pax_type: "ADT",
+      gender: "M",
+      title: "Mr",
       airline: "Emirates",
       ticket_no: "176-111222333",
+      flight_no: "EK 097",
       ow_rt: "RT",
       sector: "DXB-ROM",
       outbound_date: getRelativeDate(20), // Departs in 20 days
+      dob: "1985-11-15",
+      nationality: "Indian",
+      passport_no: "P8876543",
+      passport_expiry_date: "2031-02-28",
+      wchr: "No",
+      meal: "Standard",
+      fare_type: "CLASSIC",
+      services_incl: "1PC 23kg",
+      supplier: "SU0002 - Bipasha Aviation",
       fare_sold: 600,
       fare_issued: 550,
       total_paid: 600,
@@ -90,6 +138,9 @@ export function seedDataIfEmpty() {
       payment_status: "FULLY_PAID",
       ticket_status: "TICKETED",
       booked_by: "Rajesh Sharma",
+      agent_issued_by: "Admin Peter",
+      remarks: "Refund case opened",
+      refund_flag: true,
       created_at: getRelativeDate(-2)
     }
   ];
@@ -104,9 +155,11 @@ export function seedDataIfEmpty() {
     amount_paid: 200,
     payment_mode: "BANK_TRANSFER",
     receipt_ref: "TXN-001",
+    received_by: "Finance Desk",
     instalment_no: 1,
     instalment_type: "ADVANCE",
-    cumulative_paid: 200
+    cumulative_paid: 200,
+    remarks: "Initial advance"
   });
 
   savePayment({
@@ -116,9 +169,11 @@ export function seedDataIfEmpty() {
     amount_paid: 600,
     payment_mode: "CREDIT_CARD",
     receipt_ref: "CC-999",
+    received_by: "Finance Desk",
     instalment_no: 1,
     instalment_type: "FULL PAYMENT",
-    cumulative_paid: 600
+    cumulative_paid: 600,
+    remarks: "Full payment received"
   });
 
   // Seed Refund
@@ -136,9 +191,12 @@ export function seedDataIfEmpty() {
     airline_penalty: 100,
     service_fee: 50,
     eligible_refund: 450,
+    supplier_refund: 450,
     refund_status: "IN_PROCESS",
     status_date: getRelativeDate(-1),
-    processing_days: 1
+    processing_days: 1,
+    refund_mode: "BANK_TRANSFER",
+    remarks: "Awaiting airline confirmation"
   });
 
   // Seed Expenses
@@ -148,9 +206,13 @@ export function seedDataIfEmpty() {
     description: "Office Rent",
     vendor_payee: "Rome Landlord",
     amount: 1200,
+    amount_eur: 1200,
     payment_mode: "BANK_TRANSFER",
+    receipt_ref: "RENT-MAY",
     branch_office: "ROME_HQ",
-    recurring: true
+    recurring: true,
+    month: "May-26",
+    remarks: "Fixed monthly rent"
   });
 
   saveExpense({
@@ -159,9 +221,13 @@ export function seedDataIfEmpty() {
     description: "Facebook Ads",
     vendor_payee: "Meta Platforms",
     amount: 300,
+    amount_eur: 300,
     payment_mode: "CREDIT_CARD",
+    receipt_ref: "META-ADS",
     branch_office: "ROME_HQ",
-    recurring: false
+    recurring: false,
+    month: "May-26",
+    remarks: "Campaign spend"
   });
   
   console.log("Mock data seeded successfully.");

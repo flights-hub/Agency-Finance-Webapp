@@ -1,5 +1,5 @@
 import { Routes, Route, NavLink } from 'react-router-dom';
-import { LayoutDashboard, Plane, CreditCard, RefreshCcw, Receipt, Bell, FileText, Settings } from 'lucide-react';
+import { LayoutDashboard, Plane, CreditCard, RefreshCcw, Receipt, Bell, FileText, Settings, Search, ShieldCheck } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Bookings from './pages/Bookings';
 import Payments from './pages/Payments';
@@ -8,6 +8,7 @@ import Expenses from './pages/Expenses';
 import Alerts from './pages/Alerts';
 import Statements from './pages/Statements';
 import SettingsPage from './pages/Settings';
+import brandLogo from '../Fly for Sure Logo no background no tagline.png';
 
 export default function App() {
   const navItems = [
@@ -26,10 +27,11 @@ export default function App() {
       {/* Sidebar Navigation */}
       <aside className="sidebar">
         <div className="brand">
-          <div className="logo-placeholder">
-            <span>F</span>
+          <img src={brandLogo} alt="FlyForSure" />
+          <div>
+            <h2>FlyForSure</h2>
+            <span>Finance Office</span>
           </div>
-          <h2>FlyForSure</h2>
         </div>
         
         <nav className="nav-menu">
@@ -44,13 +46,24 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
+
+        <div className="sidebar-summary">
+          <span>Workspace</span>
+          <strong>Rome HQ</strong>
+          <small>Daily finance control</small>
+        </div>
       </aside>
 
       {/* Main Content Area */}
       <main className="main-content">
         <header className="top-header">
           <div className="search-bar">
+            <Search size={18} />
             <input type="text" placeholder="Search PNR, Passenger, or Ticket..." />
+          </div>
+          <div className="top-header-status">
+            <ShieldCheck size={16} />
+            Live ledger
           </div>
           <div className="user-profile">
             <div className="avatar">A</div>

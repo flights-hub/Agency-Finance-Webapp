@@ -53,7 +53,7 @@ export async function extractTextFromPDF(file) {
     
   } catch (error) {
     console.error("Error parsing PDF:", error);
-    throw new Error("Failed to extract text from PDF");
+    throw new Error("Failed to extract text from PDF", { cause: error });
   }
 }
 
@@ -68,7 +68,11 @@ export function parseTicketData(text) {
     passenger_name: { value: '', confidence: 'low' },
     ticket_no: { value: '', confidence: 'low' },
     airline: { value: '', confidence: 'low' },
-    fare_sold: { value: 0, confidence: 'low' }
+    sector: { value: '', confidence: 'low' },
+    outbound_date: { value: '', confidence: 'low' },
+    inbound_date: { value: '', confidence: 'low' },
+    fare_sold: { value: 0, confidence: 'low' },
+    fare_issued: { value: 0, confidence: 'low' }
   };
 
   // 1. Find PNR (typically 6 uppercase alphanumeric chars)
@@ -112,13 +116,33 @@ export function parseTicketData(text) {
     }
   }
 
-  // 5. Total Fare (Look for EUR, USD, INR, or €/$ near a number)
+  // 5. Sector (FCO-DEL, FCO to DEL, etc.)
+  const sectorMatch = text.match(/\b([A-Z]{3})\s*(?:-|TO|\/)\s*([A-Z]{3})\b/i);
+  if (sectorMatch) {
+    result.sector = { value: `${sectorMatch[1].toUpperCase()}-${sectorMatch[2].toUpperCase()}`, confidence: 'medium' };
+  }
+
+  // 6. ISO-style dates when available.
+  const dates = [...text.matchAll(/\b(20\d{2}[-/]\d{2}[-/]\d{2})\b/g)].map(match => match[1].replace(/\//g, '-'));
+  if (dates[0]) result.outbound_date = { value: dates[0], confidence: 'medium' };
+  if (dates[1]) result.inbound_date = { value: dates[1], confidence: 'medium' };
+
+  // 7. Total Fare (Look for EUR, USD, INR, or currency symbol near a number)
   const fareRegex = /(?:TOTAL|FARE|AMOUNT|EUR|USD|INR|€|\$)[\s:-]*([\d,]+\.?\d*)/i;
   const fareMatch = text.match(fareRegex);
   if (fareMatch) {
     const fare = parseFloat(fareMatch[1].replace(/,/g, ''));
     if (!isNaN(fare)) {
       result.fare_sold = { value: fare, confidence: 'medium' };
+    }
+  }
+
+  const issuedRegex = /(?:ISSUED|NET|COST|SUPPLIER)[\s:-]*(?:EUR|USD|INR|€|\$)?\s*([\d,]+\.?\d*)/i;
+  const issuedMatch = text.match(issuedRegex);
+  if (issuedMatch) {
+    const fareIssued = parseFloat(issuedMatch[1].replace(/,/g, ''));
+    if (!isNaN(fareIssued)) {
+      result.fare_issued = { value: fareIssued, confidence: 'medium' };
     }
   }
 

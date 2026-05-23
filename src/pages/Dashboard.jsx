@@ -1,177 +1,225 @@
-import React, { useState, useEffect } from 'react';
-import { getBookings, getPayments, getRefunds, getExpenses, getAlerts } from '../helpers/storage';
-import { calculatePnL } from '../helpers/calculations';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, BarChart, Bar } from 'recharts';
-import { Euro, Users, CreditCard, AlertCircle, TrendingUp, RefreshCcw, Clock } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { getBookings, getPayments, getRefunds, getExpenses } from '../helpers/storage';
+import { generateAlerts, getBookingLedger, getPnlAnalytics, getRefundLedger } from '../helpers/calculations';
+import { AlertCircle, ArrowRight, CreditCard, Euro, Plane, RefreshCcw, TrendingUp, Users } from 'lucide-react';
 
-export default function Dashboard() {
-  const [stats, setStats] = useState({ pnl: {}, alerts: [] });
-  const [refundStats, setRefundStats] = useState({ total: 0, pendingCount: 0, avgDays: 0, overdueCount: 0 });
+const money = new Intl.NumberFormat('en-IE', {
+  style: 'currency',
+  currency: 'EUR',
+  maximumFractionDigits: 0,
+});
 
-  useEffect(() => {
-    // Load all data
-    const bookings = getBookings();
-    const refunds = getRefunds();
-    const expenses = getExpenses();
-    const alerts = getAlerts();
+function getDashboardSummary() {
+  const bookings = getBookings();
+  const payments = getPayments();
+  const refunds = getRefunds();
+  const expenses = getExpenses();
+  const refundLedger = getRefundLedger(bookings, refunds);
+  const pendingRefunds = refundLedger.filter((refund) => (
+    refund.refund_status !== 'REFUNDED_TO_CLIENT' && refund.refund_status !== 'REJECTED'
+  ));
+  const totalRefunded = refundLedger
+    .filter((refund) => refund.refund_status === 'REFUNDED_TO_CLIENT')
+    .reduce((sum, refund) => sum + (refund.eligible_refund || 0), 0);
+  const processedRefunds = refundLedger.filter((refund) => refund.refund_status === 'REFUNDED_TO_CLIENT');
+  const avgDays = processedRefunds.length > 0
+    ? Math.round(processedRefunds.reduce((sum, refund) => sum + (refund.processing_days || 0), 0) / processedRefunds.length)
+    : 0;
 
-    const pnl = calculatePnL(bookings, refunds, expenses);
-    
-    // Calculate refund stats
-    const pendingRefunds = refunds.filter(r => r.refund_status !== 'REFUNDED_TO_CLIENT' && r.refund_status !== 'REJECTED');
-    const totalRefunded = refunds.filter(r => r.refund_status === 'REFUNDED_TO_CLIENT').reduce((sum, r) => sum + (r.eligible_refund || 0), 0);
-    
-    // Average processing days (simplified for trainee: average of all refunds)
-    const processedRefunds = refunds.filter(r => r.refund_status === 'REFUNDED_TO_CLIENT');
-    const avgDays = processedRefunds.length > 0 
-      ? Math.round(processedRefunds.reduce((sum, r) => sum + (r.processing_days || 0), 0) / processedRefunds.length)
-      : 0;
-      
-    const overdueCount = pendingRefunds.filter(r => (r.processing_days || 0) > 30).length;
-
-    setRefundStats({
+  return {
+    bookings: getBookingLedger(bookings, payments),
+    pnl: getPnlAnalytics(bookings, payments, refunds, expenses),
+    alerts: generateAlerts(bookings, payments, refunds),
+    refundStats: {
       total: totalRefunded,
       pendingCount: pendingRefunds.length,
       avgDays,
-      overdueCount
-    });
+      overdueCount: pendingRefunds.filter((refund) => (refund.processing_days || 0) > 30).length,
+    },
+  };
+}
 
-    setStats({ pnl, alerts: alerts.filter(a => a.status === 'ACTIVE') });
-  }, []);
+export default function Dashboard() {
+  const summary = getDashboardSummary();
+  const { bookings, pnl, alerts, refundStats } = summary;
+  const outstanding = pnl.outstanding;
+  const paidBookings = pnl.paidPnrs;
+  const recentBookings = [...bookings].slice(-4).reverse();
+  const margin = Math.round(pnl.grossMargin || 0);
 
-  const pnl = stats.pnl;
+  const kpis = [
+    {
+      label: 'Effective revenue',
+      value: money.format(pnl.effectiveRevenue || 0),
+      note: `${margin}% gross margin`,
+      icon: TrendingUp,
+      tone: 'coral',
+    },
+    {
+      label: 'Net profit',
+      value: money.format(pnl.netProfit || 0),
+      note: `${money.format(pnl.totalExpenses || 0)} expenses`,
+      icon: Euro,
+      tone: 'green',
+    },
+    {
+      label: 'Outstanding',
+      value: money.format(outstanding),
+      note: `${paidBookings} paid PNRs, ${pnl.partialPnrs} partial`,
+      icon: CreditCard,
+      tone: 'amber',
+    },
+    {
+      label: 'Active alerts',
+      value: alerts.length,
+      note: `${refundStats.pendingCount} refunds pending`,
+      icon: AlertCircle,
+      tone: 'blue',
+    },
+  ];
 
   return (
     <div className="page-container fade-in">
-      <header className="page-header">
-        <h1>Dashboard</h1>
-        <p>Overview of your travel agency finances.</p>
-      </header>
-
-      {/* Row 1: KPI Cards */}
-      <section className="grid-4">
-        <div className="card stat-card">
-          <div className="stat-icon" style={{background: 'rgba(230,104,84,0.1)', color: 'var(--coral)'}}>
-            <TrendingUp size={24} />
-          </div>
-          <div className="stat-content">
-            <p className="stat-label">Effective Revenue</p>
-            <h3 className="stat-value">€{pnl.effectiveRevenue?.toLocaleString() || 0}</h3>
-          </div>
+      <section className="dashboard-hero">
+        <div>
+          <span className="page-kicker">Finance command center</span>
+          <h1>Today&apos;s booking-to-cash picture</h1>
+          <p>
+            Track revenue, unsettled balances, refunds, and operating costs from one clean workspace.
+          </p>
         </div>
-
-        <div className="card stat-card">
-          <div className="stat-icon" style={{background: 'rgba(52,199,89,0.1)', color: '#34C759'}}>
-            <Euro size={24} />
-          </div>
-          <div className="stat-content">
-            <p className="stat-label">Gross Profit</p>
-            <h3 className="stat-value">€{pnl.grossProfit?.toLocaleString() || 0}</h3>
-          </div>
-        </div>
-
-        <div className="card stat-card">
-          <div className="stat-icon" style={{background: 'rgba(255,149,0,0.1)', color: '#FF9500'}}>
-            <CreditCard size={24} />
-          </div>
-          <div className="stat-content">
-            <p className="stat-label">Total Expenses</p>
-            <h3 className="stat-value">€{pnl.totalExpenses?.toLocaleString() || 0}</h3>
-          </div>
-        </div>
-
-        <div className="card stat-card">
-          <div className="stat-icon" style={{background: 'rgba(90,200,250,0.1)', color: '#5AC8FA'}}>
-            <AlertCircle size={24} />
-          </div>
-          <div className="stat-content">
-            <p className="stat-label">Net Profit</p>
-            <h3 className="stat-value">€{pnl.netProfit?.toLocaleString() || 0}</h3>
-          </div>
+        <div className="hero-actions">
+          <Link className="btn btn-secondary" to="/payments">
+            <CreditCard size={16} />
+            Record payment
+          </Link>
+          <Link className="btn btn-primary" to="/bookings">
+            <Plane size={16} />
+            New booking
+          </Link>
         </div>
       </section>
 
-      {/* Row 2: Refund Tracking Cards */}
-      <section className="grid-4" style={{marginTop: '20px'}}>
-        <div className="card stat-card">
-          <div className="stat-icon" style={{background: 'rgba(255,59,48,0.1)', color: '#FF3B30'}}>
-            <RefreshCcw size={24} />
-          </div>
-          <div className="stat-content">
-            <p className="stat-label">Total Refunds Issued</p>
-            <h3 className="stat-value">€{refundStats.total.toLocaleString()}</h3>
-          </div>
-        </div>
-
-        <div className="card stat-card">
-          <div className="stat-icon" style={{background: 'rgba(255,204,0,0.1)', color: '#FFCC00'}}>
-            <Clock size={24} />
-          </div>
-          <div className="stat-content">
-            <p className="stat-label">Pending Refunds</p>
-            <h3 className="stat-value">{refundStats.pendingCount}</h3>
-          </div>
-        </div>
-
-        <div className="card stat-card">
-          <div className="stat-icon" style={{background: 'rgba(142,142,147,0.1)', color: '#8E8E93'}}>
-            <Users size={24} />
-          </div>
-          <div className="stat-content">
-            <p className="stat-label">Avg Processing Time</p>
-            <h3 className="stat-value">{refundStats.avgDays} <span style={{fontSize:'0.5em'}}>days</span></h3>
-          </div>
-        </div>
-
-        <div className={`card stat-card ${refundStats.overdueCount > 0 ? 'alert-pulse' : ''}`} style={refundStats.overdueCount > 0 ? { border: '1px solid #FF3B30'} : {}}>
-          <div className="stat-icon" style={{background: 'rgba(255,59,48,0.1)', color: '#FF3B30'}}>
-            <AlertCircle size={24} />
-          </div>
-          <div className="stat-content">
-            <p className="stat-label">Overdue Refunds (>30d)</p>
-            <h3 className="stat-value" style={refundStats.overdueCount > 0 ? {color: '#FF3B30'} : {}}>{refundStats.overdueCount}</h3>
-          </div>
-        </div>
+      <section className="grid-4 metric-grid">
+        {kpis.map((item) => (
+          <article className="card stat-card" key={item.label}>
+            <div className={`stat-icon tone-${item.tone}`}>
+              <item.icon size={22} />
+            </div>
+            <div className="stat-content">
+              <p className="stat-label">{item.label}</p>
+              <h3 className="stat-value">{item.value}</h3>
+              <span className="stat-note">{item.note}</span>
+            </div>
+          </article>
+        ))}
       </section>
 
-      {/* Row 3: Main Charts (Placeholders for now, populated with static data to show trainee how to map) */}
-      <section className="grid-2" style={{marginTop: '20px'}}>
-        <div className="card">
-          <h3>Profit & Loss Summary</h3>
-          <div style={{ padding: '20px 0', borderBottom: '1px solid var(--border)'}}>
-            <div style={{display:'flex', justifyContent:'space-between', marginBottom:'10px'}}>
-              <span>Revenue (Sales)</span>
-              <strong>€{pnl.revenue?.toLocaleString() || 0}</strong>
+      <section className="dashboard-grid">
+        <article className="card pnl-card">
+          <div className="card-head">
+            <div>
+              <span className="page-kicker">P&L</span>
+              <h3>Profit breakdown</h3>
             </div>
-            <div style={{display:'flex', justifyContent:'space-between', marginBottom:'10px', color: 'var(--zinc-500)'}}>
-              <span>Cost of Goods Sold (Tickets)</span>
-              <span>- €{pnl.cogs?.toLocaleString() || 0}</span>
-            </div>
-            <div style={{display:'flex', justifyContent:'space-between', marginBottom:'10px', color: '#34C759'}}>
-              <span>Gross Profit</span>
-              <strong>€{pnl.grossProfit?.toLocaleString() || 0}</strong>
-            </div>
+            <span className={pnl.netProfit >= 0 ? 'badge badge-pass' : 'badge badge-fail'}>
+              {pnl.netProfit >= 0 ? 'Profitable' : 'Loss'}
+            </span>
           </div>
-          <div style={{ padding: '20px 0'}}>
-            <div style={{display:'flex', justifyContent:'space-between', marginBottom:'10px', color: 'var(--zinc-500)'}}>
-              <span>Total Expenses</span>
-              <span>- €{pnl.totalExpenses?.toLocaleString() || 0}</span>
-            </div>
-            <div style={{display:'flex', justifyContent:'space-between', fontSize: '1.2em', fontWeight: 'bold'}}>
-              <span>Net Profit</span>
-              <span style={{color: pnl.netProfit >= 0 ? '#34C759' : '#FF3B30'}}>€{pnl.netProfit?.toLocaleString() || 0}</span>
-            </div>
-          </div>
-        </div>
 
-        <div className="card">
-          <h3>Quick Actions</h3>
-          <div style={{display:'flex', flexDirection:'column', gap: '15px', marginTop:'20px'}}>
-            <button className="btn btn-primary" onClick={() => window.location.href='/bookings'}>+ New Booking</button>
-            <button className="btn btn-secondary" onClick={() => window.location.href='/payments'}>Record Payment</button>
-            <button className="btn btn-secondary" onClick={() => window.location.href='/bookings'}>Upload PDF Ticket</button>
+          <div className="ledger-list">
+            <div>
+              <span>Sales revenue</span>
+              <strong>{money.format(pnl.revenue || 0)}</strong>
+            </div>
+            <div>
+              <span>Ticket cost</span>
+              <strong>- {money.format(pnl.cogs || 0)}</strong>
+            </div>
+            <div>
+              <span>Gross profit</span>
+              <strong>{money.format(pnl.grossProfit || 0)}</strong>
+            </div>
+            <div>
+              <span>Collections</span>
+              <strong>{money.format(pnl.collections || 0)}</strong>
+            </div>
+            <div>
+              <span>Operating expenses</span>
+              <strong>- {money.format(pnl.totalExpenses || 0)}</strong>
+            </div>
+            <div>
+              <span>Cash flow</span>
+              <strong>{money.format(pnl.cashFlow || 0)}</strong>
+            </div>
+            <div className="ledger-total">
+              <span>Net profit</span>
+              <strong>{money.format(pnl.netProfit || 0)}</strong>
+            </div>
           </div>
-        </div>
+        </article>
+
+        <article className="card">
+          <div className="card-head">
+            <div>
+              <span className="page-kicker">Refund desk</span>
+              <h3>Processing health</h3>
+            </div>
+            <RefreshCcw size={20} />
+          </div>
+
+          <div className="refund-panel">
+            <div>
+              <span>Total issued</span>
+              <strong>{money.format(refundStats.total)}</strong>
+            </div>
+            <div>
+              <span>Pending</span>
+              <strong>{refundStats.pendingCount}</strong>
+            </div>
+            <div>
+              <span>Average time</span>
+              <strong>{refundStats.avgDays} days</strong>
+            </div>
+            <div className={refundStats.overdueCount > 0 ? 'refund-risk' : ''}>
+              <span>Overdue</span>
+              <strong>{refundStats.overdueCount}</strong>
+            </div>
+          </div>
+
+          <Link className="text-link" to="/refunds">
+            Review refund queue
+            <ArrowRight size={15} />
+          </Link>
+        </article>
+
+        <article className="card recent-card">
+          <div className="card-head">
+            <div>
+              <span className="page-kicker">Recent tickets</span>
+              <h3>Latest bookings</h3>
+            </div>
+            <Users size={20} />
+          </div>
+
+          <div className="booking-feed">
+            {recentBookings.map((booking) => (
+              <div className="booking-feed-row" key={booking.id}>
+                <div>
+                  <strong>{booking.pnr}</strong>
+                  <span>{booking.passenger_name}</span>
+                </div>
+                <div>
+                  <span>{booking.sector || booking.airline}</span>
+                  <strong>{money.format(booking.fare_sold || 0)}</strong>
+                </div>
+                <span className={`badge ${String(booking.payment_status || 'settled').toLowerCase()}`}>
+                  {String(booking.payment_status || 'Passenger row').replace(/_/g, ' ')}
+                </span>
+              </div>
+            ))}
+          </div>
+        </article>
       </section>
     </div>
   );

@@ -1,130 +1,288 @@
-import React, { useState, useEffect } from 'react';
-import { getPayments, getBookings, savePayment, saveBooking } from '../helpers/storage';
-import { getPaymentStatus, getInstalmentType } from '../helpers/calculations';
-import { CreditCard, Plus } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { getPayments, getBookings, savePayment } from '../helpers/storage';
+import { createPaymentEntry, getBookingLedger, getPaymentLedger, PAYMENT_MODES } from '../helpers/calculations';
+import { ArrowUpDown, Download, Plus, Search, SlidersHorizontal } from 'lucide-react';
+
+const PAYMENT_COLUMNS = [
+  ['sl', 'SL'],
+  ['payment_date', 'Payment Date'],
+  ['pnr', 'PNR'],
+  ['passenger_name', 'Passenger Name'],
+  ['amount_paid', 'Amount Paid'],
+  ['payment_mode', 'Payment Mode'],
+  ['receipt_ref', 'Receipt Ref'],
+  ['instalment_no', 'Inst No'],
+  ['instalment_type', 'Inst Type'],
+  ['received_by', 'Received By'],
+  ['cumulative_paid', 'Cumulative Paid'],
+  ['total_fare', 'Total Fare'],
+  ['remaining_balance', 'Remaining Bal'],
+  ['remarks', 'Remarks'],
+];
+
+function money(value) {
+  return `EUR ${Number(value || 0).toLocaleString()}`;
+}
 
 export default function Payments() {
-  const [payments, setPayments] = useState([]);
-  const [bookings, setBookings] = useState([]);
+  const [payments, setPayments] = useState(() => getPayments());
+  const [bookings] = useState(() => getBookings());
   const [showModal, setShowModal] = useState(false);
+  const [search, setSearch] = useState('');
+  const [modeFilter, setModeFilter] = useState('');
+  const [showColumns, setShowColumns] = useState(false);
+  const [visibleColumns, setVisibleColumns] = useState(() => new Set(PAYMENT_COLUMNS.map(([key]) => key)));
+  const [sortKey, setSortKey] = useState('payment_date');
+  const [sortDir, setSortDir] = useState('asc');
+  const [form, setForm] = useState({
+    payment_date: new Date().toISOString().split('T')[0],
+    pnr: '',
+    amount_paid: '',
+    payment_mode: 'BANK_TRANSFER',
+    receipt_ref: '',
+    remarks: '',
+  });
 
-  // Form State
-  const [pnr, setPnr] = useState('');
-  const [amount, setAmount] = useState('');
-  const [mode, setMode] = useState('BANK_TRANSFER');
+  const bookingLedger = useMemo(() => getBookingLedger(bookings, payments), [bookings, payments]);
+  const paymentLedger = useMemo(() => getPaymentLedger(bookings, payments), [bookings, payments]);
+  const pnrOptions = bookingLedger.filter((booking) => booking.pnr_n === 1);
+  const activeColumns = useMemo(
+    () => PAYMENT_COLUMNS.filter(([key]) => visibleColumns.has(key)),
+    [visibleColumns],
+  );
+  const filteredPayments = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return paymentLedger
+      .filter((payment) => {
+        const matchesQuery = !query || ['pnr', 'passenger_name', 'receipt_ref', 'instalment_type', 'received_by', 'remarks']
+          .some((key) => String(payment[key] || '').toLowerCase().includes(query));
+        return matchesQuery && (!modeFilter || payment.payment_mode === modeFilter);
+      })
+      .sort((a, b) => {
+        const av = a[sortKey];
+        const bv = b[sortKey];
+        const result = typeof av === 'number' && typeof bv === 'number'
+          ? av - bv
+          : String(av || '').localeCompare(String(bv || ''), undefined, { numeric: true });
+        return sortDir === 'asc' ? result : -result;
+      });
+  }, [modeFilter, paymentLedger, search, sortDir, sortKey]);
 
-  useEffect(() => {
-    setPayments(getPayments());
-    setBookings(getBookings());
-  }, [showModal]);
+  const selectedPreview = useMemo(() => {
+    const nextPayment = createPaymentEntry(
+      { ...form, amount_paid: Number(form.amount_paid || 0), received_by: 'Finance Desk' },
+      bookings,
+      payments,
+    );
+    return nextPayment;
+  }, [bookings, form, payments]);
+
+  const updateForm = (key, value) => {
+    setForm((current) => ({ ...current, [key]: value }));
+  };
+
+  const handleSort = (key) => {
+    if (sortKey === key) {
+      setSortDir((current) => (current === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  };
+
+  const toggleColumn = (key) => {
+    setVisibleColumns((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const exportCSV = () => {
+    const header = activeColumns.map(([, label]) => label);
+    const rows = filteredPayments.map((payment) => activeColumns.map(([key]) => (
+      ['amount_paid', 'cumulative_paid', 'total_fare', 'remaining_balance'].includes(key)
+        ? money(payment[key])
+        : String(payment[key] || '').replace(/_/g, ' ')
+    )));
+    const csv = [header, ...rows].map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `payments-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
 
   const handleSavePayment = () => {
-    const booking = bookings.find(b => b.pnr === pnr);
-    if (!booking) return alert('PNR not found!');
+    const amount = Number(form.amount_paid);
+    if (!form.pnr || !amount || amount <= 0) {
+      alert('Select a PNR and enter a positive payment amount.');
+      return;
+    }
 
-    const amt = parseFloat(amount);
-    const pnrPayments = getPayments(pnr);
-    
-    const instalment_no = pnrPayments.length + 1;
-    const cumulative_paid = booking.total_paid + amt;
-    const type = getInstalmentType(instalment_no, cumulative_paid, booking.fare_sold);
-
-    const payment = {
+    savePayment(createPaymentEntry({ ...form, amount_paid: amount, received_by: 'Finance Desk' }, bookings, payments));
+    setPayments(getPayments());
+    setForm({
       payment_date: new Date().toISOString().split('T')[0],
-      pnr: pnr,
-      passenger_name: booking.passenger_name,
-      amount_paid: amt,
-      payment_mode: mode,
-      instalment_no,
-      instalment_type: type,
-      cumulative_paid
-    };
-
-    savePayment(payment);
-
-    // Auto update booking
-    booking.total_paid = cumulative_paid;
-    booking.balance_due = booking.fare_sold - cumulative_paid;
-    booking.payment_status = getPaymentStatus(booking.fare_sold, cumulative_paid);
-    saveBooking(booking);
-
+      pnr: '',
+      amount_paid: '',
+      payment_mode: 'BANK_TRANSFER',
+      receipt_ref: '',
+      remarks: '',
+    });
     setShowModal(false);
   };
 
   return (
     <div className="page-container fade-in">
-      <header className="page-header" style={{display:'flex', justifyContent:'space-between'}}>
+      <header className="page-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
         <div>
           <h1>Payments</h1>
-          <p>Ledger of all received payments by PNR.</p>
+          <p>Positive-only payment ledger with running balance and automatic instalment sequencing.</p>
         </div>
         <button className="btn btn-primary" onClick={() => setShowModal(true)}>
           <Plus size={16} /> Record Payment
         </button>
       </header>
 
-      <div className="card">
-        <table className="data-table" style={{width: '100%', textAlign: 'left', borderCollapse: 'collapse'}}>
-          <thead>
-            <tr style={{borderBottom: '1px solid var(--border)'}}>
-              <th style={{padding: '12px 8px'}}>Date</th>
-              <th style={{padding: '12px 8px'}}>PNR</th>
-              <th style={{padding: '12px 8px'}}>Instalment</th>
-              <th style={{padding: '12px 8px'}}>Amount</th>
-              <th style={{padding: '12px 8px'}}>Total Paid</th>
-              <th style={{padding: '12px 8px'}}>Mode</th>
-            </tr>
-          </thead>
-          <tbody>
-            {payments.map(p => (
-              <tr key={p.id} style={{borderBottom: '1px solid var(--border)'}}>
-                <td style={{padding: '12px 8px'}}>{p.payment_date}</td>
-                <td style={{padding: '12px 8px', fontWeight: 'bold'}}>{p.pnr}</td>
-                <td style={{padding: '12px 8px'}}>
-                  <span className="badge" style={{background: 'var(--bg-secondary)'}}>{p.instalment_type}</span>
-                </td>
-                <td style={{padding: '12px 8px'}}>€{p.amount_paid}</td>
-                <td style={{padding: '12px 8px'}}>€{p.cumulative_paid}</td>
-                <td style={{padding: '12px 8px'}}>{p.payment_mode.replace('_', ' ')}</td>
-              </tr>
+      <div className="card booking-controls">
+        <div className="booking-filter-grid compact">
+          <label>
+            <span>Search</span>
+            <div className="field-with-icon">
+              <Search size={17} />
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="PNR, passenger, receipt, remarks..." />
+            </div>
+          </label>
+          <label>
+            <span>Payment Mode</span>
+            <select value={modeFilter} onChange={(event) => setModeFilter(event.target.value)}>
+              <option value="">All modes</option>
+              {PAYMENT_MODES.filter((mode) => mode !== 'AUTO_DEBIT').map((mode) => (
+                <option key={mode} value={mode}>{mode.replace(/_/g, ' ')}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="booking-table-actions">
+          <div className="table-meta">
+            <span><strong>{filteredPayments.length}</strong> of <strong>{paymentLedger.length}</strong> payments</span>
+            <span>{activeColumns.length} visible columns</span>
+          </div>
+          <div className="booking-action-group">
+            <button className="btn btn-secondary btn-sm" type="button" onClick={() => { setSearch(''); setModeFilter(''); }}>Reset</button>
+            <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowColumns((value) => !value)}>
+              <SlidersHorizontal size={15} /> Columns
+            </button>
+            <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
+              <Download size={15} /> Export
+            </button>
+          </div>
+        </div>
+        {showColumns && (
+          <div className="column-panel">
+            {PAYMENT_COLUMNS.map(([key, label]) => (
+              <label key={key}>
+                <input type="checkbox" checked={visibleColumns.has(key)} onChange={() => toggleColumn(key)} />
+                <span>{label}</span>
+              </label>
             ))}
-          </tbody>
-        </table>
+          </div>
+        )}
+      </div>
+
+      <div className="card table-card">
+        <div className="table-scroll">
+          <table className="data-table dense-table payment-ledger-table">
+            <thead>
+              <tr>
+                {activeColumns.map(([key, label]) => (
+                  <th key={key}>
+                    <button type="button" onClick={() => handleSort(key)}>
+                      {label}
+                      <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filteredPayments.map((payment) => (
+                <tr key={payment.id}>
+                  {activeColumns.map(([key]) => (
+                    <td key={key}>
+                      {['amount_paid', 'cumulative_paid', 'total_fare', 'remaining_balance'].includes(key)
+                        ? money(payment[key])
+                        : String(payment[key] || '').replace(/_/g, ' ')}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+              {filteredPayments.length === 0 && (
+                <tr><td className="empty-table-cell" colSpan={activeColumns.length}>No payments recorded.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {showModal && (
-        <div style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, 
-          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center'
+        <div className="modal-backdrop" style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
-          <div className="card" style={{width: '400px'}}>
+          <div className="card modal-card" style={{ width: '520px' }}>
             <h3>Record Payment</h3>
-            <div style={{display:'flex', flexDirection:'column', gap:'15px', marginTop:'20px'}}>
-              <div>
-                <label style={{display:'block', marginBottom:'5px'}}>PNR</label>
-                <select value={pnr} onChange={e => setPnr(e.target.value)} style={{width:'100%', padding:'8px'}}>
+            <div className="modal-form-grid">
+              <label>
+                <span>Payment Date</span>
+                <input type="date" value={form.payment_date} onChange={(event) => updateForm('payment_date', event.target.value)} />
+              </label>
+              <label>
+                <span>PNR</span>
+                <select value={form.pnr} onChange={(event) => updateForm('pnr', event.target.value)}>
                   <option value="">Select PNR</option>
-                  {bookings.map(b => (
-                    <option key={b.id} value={b.pnr}>{b.pnr} - {b.passenger_name} (Due: €{b.balance_due})</option>
+                  {pnrOptions.map((booking) => (
+                    <option key={booking.id} value={booking.pnr}>
+                      {booking.pnr} - {booking.passenger_name} (Due: {money(booking.balance_due)})
+                    </option>
                   ))}
                 </select>
-              </div>
-              <div>
-                <label style={{display:'block', marginBottom:'5px'}}>Amount Received (€)</label>
-                <input type="number" value={amount} onChange={e => setAmount(e.target.value)} style={{width:'100%', padding:'8px'}} />
-              </div>
-              <div>
-                <label style={{display:'block', marginBottom:'5px'}}>Mode</label>
-                <select value={mode} onChange={e => setMode(e.target.value)} style={{width:'100%', padding:'8px'}}>
-                  <option value="BANK_TRANSFER">Bank Transfer</option>
-                  <option value="CREDIT_CARD">Credit Card</option>
-                  <option value="CASH">Cash</option>
+              </label>
+              <label>
+                <span>Amount Paid</span>
+                <input type="number" value={form.amount_paid} onChange={(event) => updateForm('amount_paid', event.target.value)} min="0" />
+              </label>
+              <label>
+                <span>Payment Mode</span>
+                <select value={form.payment_mode} onChange={(event) => updateForm('payment_mode', event.target.value)}>
+                  {PAYMENT_MODES.filter((mode) => mode !== 'AUTO_DEBIT').map((mode) => (
+                    <option key={mode} value={mode}>{mode.replace(/_/g, ' ')}</option>
+                  ))}
                 </select>
-              </div>
-              <div style={{display:'flex', gap:'10px', marginTop:'10px'}}>
-                <button className="btn btn-primary" onClick={handleSavePayment}>Save</button>
-                <button className="btn btn-secondary" onClick={() => setShowModal(false)}>Cancel</button>
-              </div>
+              </label>
+              <label>
+                <span>Receipt Ref</span>
+                <input value={form.receipt_ref} onChange={(event) => updateForm('receipt_ref', event.target.value)} />
+              </label>
+              <label>
+                <span>Remarks</span>
+                <input value={form.remarks} onChange={(event) => updateForm('remarks', event.target.value)} />
+              </label>
+            </div>
+
+            <div className="auto-preview-list compact-preview">
+              <div><span>Instalment No</span><strong>{selectedPreview.instalment_no || '-'}</strong></div>
+              <div><span>Instalment Type</span><strong>{selectedPreview.instalment_type || '-'}</strong></div>
+              <div><span>Cumulative Paid</span><strong>{money(selectedPreview.cumulative_paid)}</strong></div>
+              <div><span>Remaining Balance</span><strong>{money(selectedPreview.remaining_balance)}</strong></div>
+            </div>
+
+            <div className="form-actions">
+              <button className="btn btn-secondary" onClick={() => setShowModal(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleSavePayment}>Save Payment</button>
             </div>
           </div>
         </div>
