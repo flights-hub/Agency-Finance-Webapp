@@ -19,6 +19,26 @@ const STATEMENT_COLUMNS = [
   ['alert', 'Alert'],
 ];
 
+function supplierNamesForBooking(booking) {
+  const segmentSuppliers = (booking.supplier_segments || []).map((segment) => segment.supplier_name).filter(Boolean);
+  return [...new Set([
+    booking.supplier_name,
+    booking.supplier,
+    booking.airline,
+    ...segmentSuppliers,
+  ].filter(Boolean))];
+}
+
+function bookingMatchesSupplier(booking, supplier) {
+  return supplierNamesForBooking(booking).includes(supplier);
+}
+
+function supplierPayableForBooking(booking, supplier) {
+  const matchingSegments = (booking.supplier_segments || []).filter((segment) => segment.supplier_name === supplier);
+  const allocated = matchingSegments.reduce((sum, segment) => sum + Number(segment.buying_price || 0), 0);
+  return allocated || Number(booking.fare_issued || 0);
+}
+
 export default function Statements() {
   const [statementType, setStatementType] = useState('agent');
   const [party, setParty] = useState('');
@@ -37,15 +57,17 @@ export default function Statements() {
   const refundLedger = useMemo(() => getRefundLedger(bookings, refunds), [bookings, refunds]);
 
   const parties = useMemo(() => {
-    const key = statementType === 'agent' ? 'booked_by' : 'airline';
-    return [...new Set(bookingLedger.map((booking) => booking[key]).filter(Boolean))];
+    if (statementType === 'agent') {
+      return [...new Set(bookingLedger.map((booking) => booking.bill_to_name || booking.booked_by).filter(Boolean))];
+    }
+    return [...new Set(bookingLedger.flatMap((booking) => supplierNamesForBooking(booking)).filter(Boolean))];
   }, [bookingLedger, statementType]);
 
   const selectedParty = party || parties[0] || '';
   const statementBookings = bookingLedger.filter((booking) => (
     statementType === 'agent'
-      ? booking.booked_by === selectedParty
-      : booking.airline === selectedParty
+      ? (booking.bill_to_name || booking.booked_by) === selectedParty
+      : bookingMatchesSupplier(booking, selectedParty)
   ));
   const activeColumns = useMemo(
     () => STATEMENT_COLUMNS.filter(([key]) => visibleColumns.has(key)),
@@ -70,7 +92,11 @@ export default function Statements() {
   const statementPayments = paymentLedger.filter((payment) => statementPnrs.has(payment.pnr));
   const statementRefunds = refundLedger.filter((refund) => statementTickets.has(refund.ticket_no));
   const revenue = statementBookings.reduce((sum, booking) => sum + Number(booking.fare_sold || 0), 0);
-  const payable = statementBookings.reduce((sum, booking) => sum + Number(booking.fare_issued || 0), 0);
+  const payable = statementBookings.reduce((sum, booking) => (
+    sum + (statementType === 'supplier'
+      ? supplierPayableForBooking(booking, selectedParty)
+      : Number(booking.fare_issued || 0))
+  ), 0);
   const collected = statementPayments.reduce((sum, payment) => sum + Number(payment.amount_paid || 0), 0);
   const outstanding = statementBookings
     .filter((booking) => booking.pnr_n === 1)
@@ -95,7 +121,10 @@ export default function Statements() {
   };
 
   const renderValue = (booking, key) => {
-    if (['fare_sold', 'fare_issued'].includes(key)) return money(booking[key]);
+    if (key === 'fare_sold') return money(booking[key]);
+    if (key === 'fare_issued') {
+      return money(statementType === 'supplier' ? supplierPayableForBooking(booking, selectedParty) : booking[key]);
+    }
     if (key === 'balance_due') return booking.pnr_n === 1 ? money(booking.balance_due) : '-';
     return booking[key] || '-';
   };

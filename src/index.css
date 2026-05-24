@@ -2113,6 +2113,194 @@ textarea:focus {
   align-items: start;
 }
 
+.manual-booking-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.manual-section-card {
+  display: grid;
+  gap: 16px;
+}
+
+.manual-section-head,
+.flight-segment-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.manual-section-head p {
+  color: var(--ink-500);
+  font-size: 14px;
+  margin-top: 4px;
+}
+
+.manual-grid,
+.route-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.route-passenger-row {
+  display: grid;
+  grid-template-columns:
+    minmax(180px, 1.25fr)
+    minmax(180px, 1.25fr)
+    minmax(170px, 1fr)
+    minmax(170px, 1fr)
+    minmax(92px, 0.55fr)
+    minmax(92px, 0.55fr)
+    minmax(92px, 0.55fr);
+  gap: 14px;
+  align-items: end;
+}
+
+.manual-grid label,
+.route-passenger-row label,
+.pax-count-grid label,
+.pricing-row,
+.supplier-segment-card label,
+.connection-grid label {
+  min-width: 0;
+}
+
+.manual-grid label,
+.route-passenger-row label,
+.pax-count-grid label,
+.supplier-segment-card label,
+.connection-grid label {
+  display: grid;
+  gap: 6px;
+  color: var(--ink-500);
+  font-size: 12px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.manual-grid input,
+.manual-grid select,
+.route-passenger-row input,
+.pax-count-grid input,
+.pricing-row input,
+.supplier-segment-card input,
+.connection-grid input {
+  width: 100%;
+  padding: 10px 12px;
+}
+
+.manual-radio-row {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.manual-trip-inline {
+  display: flex;
+  align-items: end;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding-bottom: 4px;
+  grid-column: span 2;
+}
+
+.manual-radio-row label,
+.manual-trip-inline label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-800);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.manual-radio-row input,
+.manual-trip-inline input {
+  min-height: auto;
+  accent-color: var(--accent);
+}
+
+.pax-count-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 160px));
+  gap: 14px;
+}
+
+.pricing-table {
+  display: grid;
+  gap: 8px;
+}
+
+.pricing-row {
+  display: grid;
+  grid-template-columns: 0.7fr minmax(180px, 1.5fr) 0.55fr 0.8fr 0.8fr 0.7fr;
+  gap: 10px;
+  align-items: center;
+}
+
+.pricing-head {
+  color: var(--ink-500);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.pricing-row.disabled {
+  opacity: 0.62;
+}
+
+.pricing-row strong,
+.pricing-row > span:last-child {
+  color: var(--ink-900);
+  font-weight: 750;
+}
+
+.supplier-mode-row {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.supplier-segment-grid,
+.flight-segment-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.supplier-segment-card,
+.flight-segment-card {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.supplier-segment-card {
+  grid-template-columns: 0.7fr repeat(3, minmax(0, 1fr));
+  align-items: end;
+}
+
+.supplier-segment-card > strong,
+.flight-segment-head > span {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  color: #11386F;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.connection-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
 .booking-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2610,6 +2798,20 @@ textarea:focus {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-grid { grid-template-columns: 1fr; }
   .users-layout { grid-template-columns: 1fr; }
+  .route-passenger-row {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .manual-grid,
+  .route-grid,
+  .connection-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pricing-row {
+    grid-template-columns: 0.7fr minmax(160px, 1.3fr) repeat(4, minmax(100px, 1fr));
+  }
+  .supplier-segment-card {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 820px) {
@@ -2667,6 +2869,23 @@ textarea:focus {
   .grid-3,
   .grid-4 {
     grid-template-columns: 1fr;
+  }
+
+  .manual-grid,
+  .route-grid,
+  .route-passenger-row,
+  .pax-count-grid,
+  .connection-grid,
+  .supplier-segment-card {
+    grid-template-columns: 1fr;
+  }
+
+  .pricing-table {
+    overflow-x: auto;
+  }
+
+  .pricing-row {
+    min-width: 760px;
   }
 
   .permission-grid {

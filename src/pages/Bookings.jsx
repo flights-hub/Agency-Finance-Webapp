@@ -1,6 +1,13 @@
 import { useMemo, useState } from 'react';
-import { getBookings, getPayments, saveBooking } from '../helpers/storage';
-import { daysBetween, getAlertLevel, getBookingLedger, getPaymentStatus } from '../helpers/calculations';
+import { getBookings, getPayments, getUsers, saveBooking, savePayment } from '../helpers/storage';
+import {
+  PAYMENT_MODES,
+  createPaymentEntry,
+  daysBetween,
+  getAlertLevel,
+  getBookingLedger,
+  getPaymentStatus,
+} from '../helpers/calculations';
 import { extractTextFromPDF, parseTicketData } from '../helpers/pdfParser';
 import { api } from '../helpers/api';
 import { ArrowUpDown, Download, FileText, Plus, Search, SlidersHorizontal, UploadCloud } from 'lucide-react';
@@ -61,6 +68,56 @@ const DEFAULT_COLUMNS = [
 
 const EMPTY_FORM = {
   booking_date: new Date().toISOString().split('T')[0],
+  bill_to_type: 'AGENT',
+  bill_to_name: '',
+  custom_bill_to_name: '',
+  trip_type: 'ONE_WAY',
+  departure_city: '',
+  arrival_city: '',
+  onward_date: '',
+  return_date: '',
+  supplier_mode: 'SINGLE',
+  supplier_name: '',
+  supplier_pnr: '',
+  amount_paid: '',
+  payment_mode: 'CASH',
+  passengers: {
+    ADT: 1,
+    CHD: 0,
+    INF: 0,
+  },
+  pricing: {
+    ADT: { passenger_name: '', buying_price: '', selling_price: '' },
+    CHD: { passenger_name: '', buying_price: '', selling_price: '' },
+    INF: { passenger_name: '', buying_price: '', selling_price: '' },
+  },
+  supplier_segments: [
+    { id: 'onward', label: 'Onward', supplier_name: '', pnr: '', buying_price: '' },
+  ],
+  flight_segments: [
+    {
+      id: 'onward',
+      label: 'Onward',
+      connections: [
+        {
+          id: 'onward-1',
+          airline: '',
+          flight_number: '',
+          departure_city: '',
+          arrival_city: '',
+          departure_date: '',
+          arrival_date: '',
+          departure_time: '',
+          arrival_time: '',
+          departure_terminal: '',
+          arrival_terminal: '',
+          duration: '',
+          check_in_baggage: '',
+          cabin_baggage: '',
+        },
+      ],
+    },
+  ],
   passenger_name: '',
   pax_type: 'ADT',
   mobile: '',
@@ -77,6 +134,51 @@ const EMPTY_FORM = {
   remarks: '',
   refund_flag: false,
 };
+
+const CITY_OPTIONS = ['Rome (FCO)', 'Delhi (DEL)', 'Milan (MXP)', 'Venice (VCE)', 'Mumbai (BOM)', 'Amritsar (ATQ)', 'Dubai (DXB)'];
+
+const PAX_TYPES = [
+  ['ADT', 'Adult'],
+  ['CHD', 'Child'],
+  ['INF', 'Infant'],
+];
+
+const TRIP_TYPES = [
+  ['ONE_WAY', 'One Way'],
+  ['ROUNDTRIP', 'Roundtrip'],
+  ['MULTICITY', 'Multicity'],
+];
+
+const createConnection = (segmentId, index = 0) => ({
+  id: `${segmentId}-${Date.now()}-${index}`,
+  airline: '',
+  flight_number: '',
+  departure_city: '',
+  arrival_city: '',
+  departure_date: '',
+  arrival_date: '',
+  departure_time: '',
+  arrival_time: '',
+  departure_terminal: '',
+  arrival_terminal: '',
+  duration: '',
+  check_in_baggage: '',
+  cabin_baggage: '',
+});
+
+const createFlightSegment = (label, id = label.toLowerCase().replace(/\s+/g, '-')) => ({
+  id,
+  label,
+  connections: [createConnection(id)],
+});
+
+const createSupplierSegment = (label, id = label.toLowerCase().replace(/\s+/g, '-')) => ({
+  id,
+  label,
+  supplier_name: '',
+  pnr: '',
+  buying_price: '',
+});
 
 const FORM_FIELDS = [
   { key: 'booking_date', label: 'Booking Date', input: 'date' },
@@ -198,6 +300,7 @@ export default function Bookings() {
   const [activeTab, setActiveTab] = useState('LIST');
   const [bookings, setBookings] = useState(() => getBookings());
   const [payments, setPayments] = useState(() => getPayments());
+  const [users] = useState(() => getUsers());
   const [formValues, setFormValues] = useState(EMPTY_FORM);
   const [search, setSearch] = useState('');
   const [airlineFilter, setAirlineFilter] = useState('');
@@ -231,6 +334,29 @@ export default function Bookings() {
     paymentStatuses: [...new Set(normalizedBookings.map((booking) => booking.payment_status).filter(Boolean))],
     alerts: [...new Set(normalizedBookings.map((booking) => booking.alert).filter(Boolean))],
   }), [normalizedBookings]);
+
+  const agentOptions = useMemo(
+    () => users.filter((user) => user.role === 'AGENT').map((user) => user.name).filter(Boolean),
+    [users],
+  );
+
+  const supplierOptions = useMemo(() => {
+    const userSuppliers = users.filter((user) => user.role === 'SUPPLIER').map((user) => user.name).filter(Boolean);
+    const bookingSuppliers = bookings.flatMap((booking) => [
+      booking.supplier_name,
+      booking.supplier,
+      booking.airline,
+      ...(booking.supplier_segments || []).map((segment) => segment.supplier_name),
+    ]).filter(Boolean);
+    return [...new Set([...userSuppliers, ...bookingSuppliers])];
+  }, [bookings, users]);
+
+  const employeeOptions = useMemo(() => {
+    const staffRoles = new Set(['ADMIN', 'EMPLOYEE', 'FINANCE_MANAGER']);
+    const userEmployees = users.filter((user) => staffRoles.has(user.role)).map((user) => user.name).filter(Boolean);
+    const bookingEmployees = bookings.flatMap((booking) => [booking.booked_by, booking.agent_issued_by]).filter(Boolean);
+    return [...new Set([...userEmployees, ...bookingEmployees])];
+  }, [bookings, users]);
 
   const filteredBookings = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -276,17 +402,221 @@ export default function Bookings() {
     setFormValues((current) => ({ ...current, [key]: value }));
   };
 
+  const segmentTemplatesForTrip = (tripType) => {
+    if (tripType === 'ROUNDTRIP') return [
+      createFlightSegment('Onward', 'onward'),
+      createFlightSegment('Return', 'return'),
+    ];
+    return [createFlightSegment('Onward', 'onward')];
+  };
+
+  const supplierSegmentsForTrip = (tripType) => {
+    if (tripType === 'ROUNDTRIP') return [
+      createSupplierSegment('Onward', 'onward'),
+      createSupplierSegment('Return', 'return'),
+    ];
+    return [createSupplierSegment('Onward', 'onward')];
+  };
+
+  const updateTripType = (tripType) => {
+    setFormValues((current) => ({
+      ...current,
+      trip_type: tripType,
+      return_date: tripType === 'ONE_WAY' ? '' : current.return_date,
+      supplier_mode: tripType === 'ONE_WAY' ? 'SINGLE' : current.supplier_mode,
+      flight_segments: tripType === 'MULTICITY' ? segmentTemplatesForTrip('ONE_WAY') : segmentTemplatesForTrip(tripType),
+      supplier_segments: tripType === 'MULTICITY' ? supplierSegmentsForTrip('ONE_WAY') : supplierSegmentsForTrip(tripType),
+    }));
+  };
+
+  const updatePassengerCount = (type, value) => {
+    setFormValues((current) => ({
+      ...current,
+      passengers: {
+        ...current.passengers,
+        [type]: Math.max(0, Number(value || 0)),
+      },
+    }));
+  };
+
+  const updatePricing = (type, key, value) => {
+    setFormValues((current) => ({
+      ...current,
+      pricing: {
+        ...current.pricing,
+        [type]: {
+          ...current.pricing[type],
+          [key]: value,
+        },
+      },
+    }));
+  };
+
+  const updateFlightSegment = (segmentIndex, connectionIndex, key, value) => {
+    setFormValues((current) => ({
+      ...current,
+      flight_segments: current.flight_segments.map((segment, index) => (
+        index !== segmentIndex ? segment : {
+          ...segment,
+          connections: segment.connections.map((connection, cIndex) => (
+            cIndex === connectionIndex ? { ...connection, [key]: value } : connection
+          )),
+        }
+      )),
+    }));
+  };
+
+  const addConnection = (segmentIndex) => {
+    setFormValues((current) => ({
+      ...current,
+      flight_segments: current.flight_segments.map((segment, index) => (
+        index !== segmentIndex ? segment : {
+          ...segment,
+          connections: [...segment.connections, createConnection(segment.id, segment.connections.length)],
+        }
+      )),
+    }));
+  };
+
+  const addMulticityLeg = () => {
+    setFormValues((current) => {
+      const nextNumber = current.flight_segments.length + 1;
+      const id = `leg-${nextNumber}`;
+      return {
+        ...current,
+        flight_segments: [...current.flight_segments, createFlightSegment(`Leg ${nextNumber}`, id)],
+        supplier_segments: [...current.supplier_segments, createSupplierSegment(`Leg ${nextNumber}`, id)],
+      };
+    });
+  };
+
+  const updateSupplierSegment = (segmentIndex, key, value) => {
+    setFormValues((current) => ({
+      ...current,
+      supplier_segments: current.supplier_segments.map((segment, index) => (
+        index === segmentIndex ? { ...segment, [key]: value } : segment
+      )),
+    }));
+  };
+
   const resetForm = () => {
     setFormValues(EMPTY_FORM);
   };
 
+  const selectedBillTo = formValues.bill_to_name === '__CUSTOM__'
+    ? formValues.custom_bill_to_name.trim()
+    : formValues.bill_to_name.trim();
+
+  const selectedPaxRows = PAX_TYPES
+    .map(([type, label]) => ({
+      type,
+      label,
+      count: Number(formValues.passengers[type] || 0),
+      ...formValues.pricing[type],
+    }))
+    .filter((row) => row.count > 0);
+
+  const primarySupplierSegment = formValues.supplier_mode === 'MULTI'
+    ? formValues.supplier_segments.find((segment) => segment.pnr || segment.supplier_name) || formValues.supplier_segments[0]
+    : { supplier_name: formValues.supplier_name, pnr: formValues.supplier_pnr };
+
+  const createManualBookingRows = () => {
+    const primaryConnection = formValues.flight_segments[0]?.connections[0] || {};
+    const lastSegment = formValues.flight_segments[formValues.flight_segments.length - 1];
+    const lastConnection = lastSegment?.connections[lastSegment.connections.length - 1] || primaryConnection;
+    const sector = [
+      formValues.departure_city || primaryConnection.departure_city,
+      formValues.arrival_city || lastConnection.arrival_city,
+    ].filter(Boolean).join('-');
+    const airline = primaryConnection.airline || '';
+    const flightNumber = formValues.flight_segments
+      .flatMap((segment) => segment.connections.map((connection) => connection.flight_number).filter(Boolean))
+      .join(', ');
+    const pnr = primarySupplierSegment?.pnr || '';
+    const supplierName = primarySupplierSegment?.supplier_name || '';
+
+    return selectedPaxRows.map((row, index) => {
+      const fareSold = row.count * numeric(row.selling_price);
+      const fareIssued = row.count * numeric(row.buying_price);
+      return makeBookingPayload({
+        ...formValues,
+        passenger_name: row.passenger_name,
+        pax_type: row.type,
+        pax_count: row.count,
+        buying_price_per_pax: numeric(row.buying_price),
+        selling_price_per_pax: numeric(row.selling_price),
+        bill_to_type: formValues.bill_to_name === '__CUSTOM__' ? 'CUSTOMER' : 'AGENT',
+        bill_to_name: selectedBillTo,
+        booked_by: formValues.booked_by || selectedBillTo,
+        airline,
+        pnr,
+        ticket_no: flightNumber,
+        sector,
+        outbound_date: formValues.onward_date || primaryConnection.departure_date,
+        inbound_date: formValues.trip_type === 'ONE_WAY' ? '' : formValues.return_date,
+        fare_sold: fareSold,
+        fare_issued: fareIssued,
+        supplier_name: supplierName,
+        supplier: supplierName,
+        supplier_segments: formValues.supplier_mode === 'MULTI'
+          ? formValues.supplier_segments
+          : [{ id: 'single', label: 'Single Supplier', supplier_name: supplierName, pnr, buying_price: '' }],
+        flight_segments: formValues.flight_segments,
+      }, bookings.length + index);
+    });
+  };
+
   const handleSaveBooking = () => {
-    if (!formValues.passenger_name || !formValues.pnr || !formValues.airline || !formValues.fare_sold) {
-      alert('Passenger name, airline, PNR, and fare sold are required.');
+    if (!selectedBillTo) {
+      alert('Choose who this booking is billed to.');
       return;
     }
 
-    saveBooking(makeBookingPayload(formValues, bookings.length));
+    if (!selectedPaxRows.length) {
+      alert('Enter at least one passenger count.');
+      return;
+    }
+
+    const missingPax = selectedPaxRows.find((row) => !row.passenger_name || !numeric(row.buying_price) || !numeric(row.selling_price));
+    if (missingPax) {
+      alert(`Complete passenger name, buying price, and selling price for ${missingPax.label}.`);
+      return;
+    }
+
+    if (!primarySupplierSegment?.supplier_name || !primarySupplierSegment?.pnr) {
+      alert('Choose a supplier and enter a PNR.');
+      return;
+    }
+
+    if (formValues.supplier_mode === 'MULTI') {
+      const incompleteSupplier = formValues.supplier_segments.find((segment) => !segment.supplier_name || !segment.pnr);
+      if (incompleteSupplier) {
+        alert('Complete supplier and PNR for each journey section.');
+        return;
+      }
+    }
+
+    const firstConnection = formValues.flight_segments[0]?.connections[0];
+    if (!firstConnection?.airline || !firstConnection?.flight_number || !firstConnection?.departure_city || !firstConnection?.arrival_city) {
+      alert('Complete at least the first flight connection: airline, flight number, departure city, and arrival city.');
+      return;
+    }
+
+    const bookingRows = createManualBookingRows();
+    const savedRows = bookingRows.map((booking) => saveBooking(booking));
+
+    if (numeric(formValues.amount_paid) > 0) {
+      savePayment(createPaymentEntry({
+        payment_date: formValues.booking_date,
+        pnr: savedRows[0].pnr,
+        amount_paid: numeric(formValues.amount_paid),
+        payment_mode: formValues.payment_mode,
+        receipt_ref: '',
+        received_by: formValues.agent_issued_by || 'Finance Desk',
+        remarks: formValues.remarks,
+      }, [...bookings, ...savedRows], payments));
+    }
+
     refreshBookings();
     resetForm();
     setPdfStatus('');
@@ -438,54 +768,273 @@ export default function Bookings() {
   };
 
   const renderBookingForm = () => (
-    <div className="grid-2 booking-entry-grid">
-      <div className="card">
-        <h3>Manual Booking Fields</h3>
-        <div className="booking-form-grid">
-          {FORM_FIELDS.map((field) => (
-            <label key={field.key} className={field.input === 'textarea' ? 'span-2' : ''}>
-              <span>{field.label}{field.required ? ' *' : ''}</span>
-              {field.input === 'select' ? (
-                <select value={formValues[field.key]} onChange={(event) => updateForm(field.key, event.target.value)}>
-                  {field.options.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
-              ) : field.input === 'textarea' ? (
-                <textarea value={formValues[field.key]} onChange={(event) => updateForm(field.key, event.target.value)} rows={4} />
-              ) : field.input === 'checkbox' ? (
-                <input
-                  type="checkbox"
-                  checked={formValues[field.key]}
-                  onChange={(event) => updateForm(field.key, event.target.checked)}
-                />
-              ) : (
-                <input
-                  type={field.input || 'text'}
-                  value={formValues[field.key]}
-                  placeholder={field.placeholder}
-                  onChange={(event) => updateForm(field.key, event.target.value)}
-                />
-              )}
-            </label>
-          ))}
+    <div className="manual-booking-stack">
+      <datalist id="city-options">
+        {CITY_OPTIONS.map((city) => <option key={city} value={city} />)}
+      </datalist>
+      <datalist id="supplier-options">
+        {supplierOptions.map((supplier) => <option key={supplier} value={supplier} />)}
+      </datalist>
+
+      <div className="card manual-section-card">
+        <div className="manual-section-head">
+          <div>
+            <h3>Manual Booking Entry</h3>
+            <p>Billing, route, pricing, supplier, flight, and payment details.</p>
+          </div>
         </div>
-        <div className="form-actions">
-          <button className="btn btn-secondary" type="button" onClick={resetForm}>Clear</button>
-          <button className="btn btn-primary" type="button" onClick={handleSaveBooking}>Save Booking</button>
+        <div className="manual-grid">
+          <label>
+            <span>Bill To *</span>
+            <select value={formValues.bill_to_name} onChange={(event) => updateForm('bill_to_name', event.target.value)}>
+              <option value="">Select agent/customer</option>
+              {agentOptions.map((agent) => <option key={agent} value={agent}>{agent}</option>)}
+              <option value="__CUSTOM__">Typed customer</option>
+            </select>
+          </label>
+          {formValues.bill_to_name === '__CUSTOM__' && (
+            <label>
+              <span>Customer Name *</span>
+              <input value={formValues.custom_bill_to_name} onChange={(event) => updateForm('custom_bill_to_name', event.target.value)} />
+            </label>
+          )}
+          <label>
+            <span>Booking Date</span>
+            <input type="date" value={formValues.booking_date} onChange={(event) => updateForm('booking_date', event.target.value)} />
+          </label>
+          <div className="manual-trip-inline">
+            {TRIP_TYPES.map(([value, label]) => (
+              <label key={value}>
+                <input type="radio" checked={formValues.trip_type === value} onChange={() => updateTripType(value)} />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
         </div>
       </div>
 
-      <div className="card auto-preview-card">
-        <h3>Auto Calculated Fields</h3>
-        <div className="auto-preview-list">
-          {TABLE_COLUMNS.filter((column) => column.type === 'auto').map((column) => (
-            <div key={column.key}>
-              <span>{column.label}</span>
-              <strong>{formatCell(draftPreview, column.key)}</strong>
-            </div>
+      <div className="card manual-section-card">
+        <div className="manual-section-head">
+          <h3>Route & Passengers</h3>
+        </div>
+        <div className="route-passenger-row">
+          <label>
+            <span>Departure City *</span>
+            <input list="city-options" value={formValues.departure_city} onChange={(event) => updateForm('departure_city', event.target.value)} />
+          </label>
+          <label>
+            <span>Arrival City *</span>
+            <input list="city-options" value={formValues.arrival_city} onChange={(event) => updateForm('arrival_city', event.target.value)} />
+          </label>
+          <label>
+            <span>Onward Date *</span>
+            <input type="date" value={formValues.onward_date} onChange={(event) => updateForm('onward_date', event.target.value)} />
+          </label>
+          <label>
+            <span>Return Date</span>
+            <input
+              type="date"
+              value={formValues.return_date}
+              disabled={formValues.trip_type === 'ONE_WAY'}
+              onChange={(event) => updateForm('return_date', event.target.value)}
+            />
+          </label>
+          {PAX_TYPES.map(([type, label]) => (
+            <label key={type}>
+              <span>{label}</span>
+              <input type="number" min="0" value={formValues.passengers[type]} onChange={(event) => updatePassengerCount(type, event.target.value)} />
+            </label>
           ))}
-          <div>
-            <span>PNR_N (Hidden)</span>
-            <strong>{draftPreview.pnr_n || '-'}</strong>
+        </div>
+      </div>
+
+      <div className="card manual-section-card">
+        <div className="manual-section-head">
+          <h3>Pricing & Supplier</h3>
+        </div>
+        <div className="pricing-table">
+          <div className="pricing-row pricing-head">
+            <span>Type</span>
+            <span>Passenger Name *</span>
+            <span>Count</span>
+            <span>Buying / Pax *</span>
+            <span>Selling / Pax *</span>
+            <span>Total</span>
+          </div>
+          {PAX_TYPES.filter(([type]) => type === 'ADT' || Number(formValues.passengers[type] || 0) > 0).map(([type, label]) => {
+            const count = Number(formValues.passengers[type] || 0);
+            const pricing = formValues.pricing[type];
+            return (
+              <div className={`pricing-row ${count === 0 ? 'disabled' : ''}`} key={type}>
+                <strong>{label}</strong>
+                <input value={pricing.passenger_name} disabled={count === 0} onChange={(event) => updatePricing(type, 'passenger_name', event.target.value)} />
+                <input type="number" min="0" value={count} onChange={(event) => updatePassengerCount(type, event.target.value)} />
+                <input type="number" min="0" value={pricing.buying_price} disabled={count === 0} onChange={(event) => updatePricing(type, 'buying_price', event.target.value)} />
+                <input type="number" min="0" value={pricing.selling_price} disabled={count === 0} onChange={(event) => updatePricing(type, 'selling_price', event.target.value)} />
+                <span>EUR {(count * numeric(pricing.selling_price)).toLocaleString()}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        {formValues.trip_type !== 'ONE_WAY' && (
+          <div className="manual-radio-row supplier-mode-row">
+            {[
+              ['SINGLE', 'Single Supplier'],
+              ['MULTI', 'Multi Supplier'],
+            ].map(([value, label]) => (
+              <label key={value}>
+                <input type="radio" checked={formValues.supplier_mode === value} onChange={() => updateForm('supplier_mode', value)} />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+        )}
+
+        {formValues.supplier_mode === 'SINGLE' ? (
+          <div className="manual-grid">
+            <label>
+              <span>Supplier *</span>
+              <input list="supplier-options" value={formValues.supplier_name} onChange={(event) => updateForm('supplier_name', event.target.value)} />
+            </label>
+            <label>
+              <span>PNR *</span>
+              <input value={formValues.supplier_pnr} onChange={(event) => updateForm('supplier_pnr', event.target.value.toUpperCase())} />
+            </label>
+          </div>
+        ) : (
+          <div className="supplier-segment-grid">
+            {formValues.supplier_segments.map((segment, index) => (
+              <div className="supplier-segment-card" key={segment.id}>
+                <strong>{segment.label}</strong>
+                <label>
+                  <span>Supplier *</span>
+                  <input list="supplier-options" value={segment.supplier_name} onChange={(event) => updateSupplierSegment(index, 'supplier_name', event.target.value)} />
+                </label>
+                <label>
+                  <span>PNR *</span>
+                  <input value={segment.pnr} onChange={(event) => updateSupplierSegment(index, 'pnr', event.target.value.toUpperCase())} />
+                </label>
+                <label>
+                  <span>Buying Allocation</span>
+                  <input type="number" min="0" value={segment.buying_price} onChange={(event) => updateSupplierSegment(index, 'buying_price', event.target.value)} />
+                </label>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card manual-section-card">
+        <div className="manual-section-head">
+          <h3>Flight Details</h3>
+          {formValues.trip_type === 'MULTICITY' && (
+            <button className="btn btn-secondary btn-sm" type="button" onClick={addMulticityLeg}>
+              <Plus size={15} /> Add Leg
+            </button>
+          )}
+        </div>
+        <div className="flight-segment-stack">
+          {formValues.flight_segments.map((segment, segmentIndex) => (
+            <section className="flight-segment-card" key={segment.id}>
+              <div className="flight-segment-head">
+                <span>{segment.label}</span>
+                <button className="icon-button" type="button" onClick={() => addConnection(segmentIndex)} aria-label={`Add connection to ${segment.label}`}>
+                  <Plus size={17} />
+                </button>
+              </div>
+              {segment.connections.map((connection, connectionIndex) => (
+                <div className="connection-grid" key={connection.id}>
+                  {[
+                    ['airline', 'Airline *'],
+                    ['flight_number', 'Flight Number *'],
+                    ['departure_city', 'Departure City *', 'city-options'],
+                    ['arrival_city', 'Arrival City *', 'city-options'],
+                    ['departure_date', 'Departure Date', null, 'date'],
+                    ['arrival_date', 'Arrival Date', null, 'date'],
+                    ['departure_time', 'Departure Time', null, 'time'],
+                    ['arrival_time', 'Arrival Time', null, 'time'],
+                    ['departure_terminal', 'Departure Terminal'],
+                    ['arrival_terminal', 'Arrival Terminal'],
+                    ['duration', 'Duration'],
+                    ['check_in_baggage', 'Check-in Baggage'],
+                    ['cabin_baggage', 'Cabin Baggage'],
+                  ].map(([key, label, list, type]) => (
+                    <label key={key}>
+                      <span>{label}</span>
+                      <input
+                        type={type || 'text'}
+                        list={list || undefined}
+                        value={connection[key]}
+                        onChange={(event) => updateFlightSegment(segmentIndex, connectionIndex, key, event.target.value)}
+                      />
+                    </label>
+                  ))}
+                </div>
+              ))}
+            </section>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid-2 booking-entry-grid">
+        <div className="card manual-section-card">
+          <h3>Contact & Payment</h3>
+          <div className="booking-form-grid">
+            <label>
+              <span>Mobile</span>
+              <input value={formValues.mobile} onChange={(event) => updateForm('mobile', event.target.value)} />
+            </label>
+            <label>
+              <span>Booked By</span>
+              <select value={formValues.booked_by} onChange={(event) => updateForm('booked_by', event.target.value)}>
+                <option value="">Select employee</option>
+                {employeeOptions.map((employee) => <option key={employee} value={employee}>{employee}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Issued By</span>
+              <select value={formValues.agent_issued_by} onChange={(event) => updateForm('agent_issued_by', event.target.value)}>
+                <option value="">Select employee</option>
+                {employeeOptions.map((employee) => <option key={employee} value={employee}>{employee}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Mode of Payment</span>
+              <select value={formValues.payment_mode} onChange={(event) => updateForm('payment_mode', event.target.value)}>
+                {PAYMENT_MODES.filter((mode) => mode !== 'AUTO_DEBIT').map((mode) => (
+                  <option key={mode} value={mode}>{mode.replace(/_/g, ' ')}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Amount Paid</span>
+              <input type="number" min="0" value={formValues.amount_paid} onChange={(event) => updateForm('amount_paid', event.target.value)} />
+            </label>
+            <label className="span-2">
+              <span>Remarks</span>
+              <textarea value={formValues.remarks} onChange={(event) => updateForm('remarks', event.target.value)} rows={4} />
+            </label>
+          </div>
+          <div className="form-actions">
+            <button className="btn btn-secondary" type="button" onClick={resetForm}>Clear</button>
+            <button className="btn btn-primary" type="button" onClick={handleSaveBooking}>Save Booking</button>
+          </div>
+        </div>
+
+        <div className="card auto-preview-card">
+          <h3>Auto Calculated Fields</h3>
+          <div className="auto-preview-list">
+            {TABLE_COLUMNS.filter((column) => column.type === 'auto').map((column) => (
+              <div key={column.key}>
+                <span>{column.label}</span>
+                <strong>{formatCell(draftPreview, column.key)}</strong>
+              </div>
+            ))}
+            <div>
+              <span>Rows To Save</span>
+              <strong>{selectedPaxRows.length}</strong>
+            </div>
           </div>
         </div>
       </div>
