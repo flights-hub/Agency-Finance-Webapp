@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { getBookings, getPayments, saveBooking } from '../helpers/storage';
 import { daysBetween, getAlertLevel, getBookingLedger, getPaymentStatus } from '../helpers/calculations';
 import { extractTextFromPDF, parseTicketData } from '../helpers/pdfParser';
+import { api } from '../helpers/api';
 import { ArrowUpDown, Download, FileText, Plus, Search, SlidersHorizontal, UploadCloud } from 'lucide-react';
 
 const TABLE_COLUMNS = [
@@ -94,6 +95,21 @@ const FORM_FIELDS = [
   { key: 'agent_issued_by', label: 'Agent Issued By' },
   { key: 'remarks', label: 'Remarks', input: 'textarea' },
   { key: 'refund_flag', label: 'Refund', input: 'checkbox' },
+];
+
+const CRYPTIC_DRAFT_FIELDS = [
+  { key: 'passenger_name', label: 'Passenger Name', required: true },
+  { key: 'pnr', label: 'PNR', required: true },
+  { key: 'airline', label: 'Airline', required: true },
+  { key: 'sector', label: 'Sector' },
+  { key: 'outbound_date', label: 'Outbound Date', input: 'date' },
+  { key: 'inbound_date', label: 'Inbound Date', input: 'date' },
+  { key: 'fare_sold', label: 'Fare Sold', input: 'number', required: true },
+  { key: 'fare_issued', label: 'Fare Issued', input: 'number' },
+  { key: 'ticket_no', label: 'Ticket No' },
+  { key: 'booked_by', label: 'Booked By' },
+  { key: 'agent_issued_by', label: 'Agent Issued By' },
+  { key: 'remarks', label: 'Remarks' },
 ];
 
 const moneyKeys = new Set(['fare_sold', 'fare_issued', 'profit', 'total_paid', 'balance_due']);
@@ -193,6 +209,12 @@ export default function Bookings() {
   const [sortDir, setSortDir] = useState('asc');
   const [pdfStatus, setPdfStatus] = useState('');
   const [crypticText, setCrypticText] = useState('');
+  const [crypticProvider, setCrypticProvider] = useState('auto');
+  const [crypticStatus, setCrypticStatus] = useState('idle');
+  const [crypticError, setCrypticError] = useState('');
+  const [crypticWarnings, setCrypticWarnings] = useState([]);
+  const [crypticMeta, setCrypticMeta] = useState(null);
+  const [crypticDrafts, setCrypticDrafts] = useState([]);
 
   const normalizedBookings = useMemo(
     () => getBookingLedger(bookings, payments),
@@ -272,6 +294,14 @@ export default function Bookings() {
     setActiveTab('LIST');
   };
 
+  const resetCrypticParse = () => {
+    setCrypticDrafts([]);
+    setCrypticWarnings([]);
+    setCrypticMeta(null);
+    setCrypticError('');
+    setCrypticStatus('idle');
+  };
+
   const handleSort = (key) => {
     if (sortKey === key) {
       setSortDir((current) => (current === 'asc' ? 'desc' : 'asc'));
@@ -347,9 +377,64 @@ export default function Bookings() {
     }
   };
 
-  const handleCrypticParse = () => {
-    applyParsedFields(parseTicketData(crypticText));
-    setActiveTab('ADD');
+  const handleCrypticParse = async () => {
+    setCrypticError('');
+    setCrypticWarnings([]);
+    setCrypticStatus('processing');
+
+    try {
+      const result = await api.parsePnr(crypticText, crypticProvider);
+      setCrypticDrafts(result.drafts || []);
+      setCrypticWarnings(result.warnings || []);
+      setCrypticMeta({
+        provider: result.provider,
+        confidence: result.confidence,
+        count: result.drafts?.length || 0,
+      });
+      setCrypticStatus('success');
+    } catch (err) {
+      setCrypticDrafts([]);
+      setCrypticMeta(null);
+      setCrypticError(err.message || 'Unable to parse raw booking text.');
+      setCrypticStatus('error');
+    }
+  };
+
+  const updateCrypticDraft = (index, key, value) => {
+    setCrypticDrafts((current) => current.map((draft, draftIndex) => (
+      draftIndex === index ? { ...draft, [key]: value } : draft
+    )));
+  };
+
+  const draftMissingFields = (draft) => [
+    !draft.passenger_name ? 'Passenger Name' : '',
+    !draft.pnr ? 'PNR' : '',
+    !draft.airline ? 'Airline' : '',
+    !numeric(draft.fare_sold) ? 'Fare Sold' : '',
+  ].filter(Boolean);
+
+  const saveCrypticDrafts = () => {
+    const invalidRows = crypticDrafts
+      .map((draft, index) => ({ index, missing: draftMissingFields(draft) }))
+      .filter((row) => row.missing.length);
+
+    if (!crypticDrafts.length) {
+      setCrypticError('Parse a PNR before saving draft rows.');
+      return;
+    }
+
+    if (invalidRows.length) {
+      setCrypticError(`Complete required fields before saving: ${invalidRows.map((row) => `row ${row.index + 1} (${row.missing.join(', ')})`).join('; ')}.`);
+      return;
+    }
+
+    crypticDrafts.forEach((draft, index) => {
+      saveBooking(makeBookingPayload(draft, bookings.length + index));
+    });
+    refreshBookings();
+    setCrypticText('');
+    resetCrypticParse();
+    setActiveTab('LIST');
   };
 
   const renderBookingForm = () => (
@@ -555,28 +640,119 @@ export default function Bookings() {
       {activeTab === 'ADD' && renderBookingForm()}
 
       {activeTab === 'CRYPTIC' && (
-        <div className="grid-2">
+        <div className="grid-2 cryptic-entry-grid">
           <div className="card">
             <h3>Cryptic / Raw Booking Entry</h3>
             <p style={{ color: 'var(--zinc-500)', marginBottom: 16 }}>
-              Paste airline, email, WhatsApp, or GDS-style text. Parsed values populate the same manual booking form.
+              Paste airline, email, WhatsApp, or GDS-style text. Parsed PNR values become reviewable booking drafts.
             </p>
+            <label className="provider-select">
+              <span>Provider</span>
+              <select value={crypticProvider} onChange={(event) => setCrypticProvider(event.target.value)}>
+                <option value="auto">Auto-detect</option>
+                <option value="amadeus">Amadeus</option>
+                <option value="sabre">Sabre</option>
+              </select>
+            </label>
             <textarea
               className="cryptic-textarea"
               value={crypticText}
-              onChange={(event) => setCrypticText(event.target.value)}
-              placeholder="Paste raw booking details here..."
+              onChange={(event) => {
+                setCrypticText(event.target.value);
+                if (crypticStatus !== 'idle') resetCrypticParse();
+              }}
+              placeholder="Paste raw PNR details here..."
             />
             <div className="form-actions">
-              <button className="btn btn-secondary" type="button" onClick={() => setCrypticText('')}>Clear</button>
-              <button className="btn btn-primary" type="button" onClick={handleCrypticParse}>Parse to Manual Form</button>
+              <button
+                className="btn btn-secondary"
+                type="button"
+                onClick={() => {
+                  setCrypticText('');
+                  resetCrypticParse();
+                }}
+              >
+                Clear
+              </button>
+              <button className="btn btn-primary" type="button" onClick={handleCrypticParse} disabled={crypticStatus === 'processing'}>
+                {crypticStatus === 'processing' ? 'Parsing...' : 'Parse PNR'}
+              </button>
             </div>
           </div>
           <div className="card auto-preview-card">
-            <h3>Target Schema</h3>
-            <div className="schema-list">
-              {FORM_FIELDS.map((field) => <span key={field.key}>{field.label}</span>)}
-            </div>
+            <h3>Parser Status</h3>
+            {crypticMeta ? (
+              <div className="auto-preview-list">
+                <div><span>Provider</span><strong>{crypticMeta.provider?.toUpperCase()}</strong></div>
+                <div><span>Confidence</span><strong>{String(crypticMeta.confidence || '-').replace(/_/g, ' ')}</strong></div>
+                <div><span>Draft Rows</span><strong>{crypticMeta.count}</strong></div>
+              </div>
+            ) : (
+              <div className="schema-list">
+                {FORM_FIELDS.map((field) => <span key={field.key}>{field.label}</span>)}
+              </div>
+            )}
+          </div>
+
+          <div className="card cryptic-review-card">
+            <h3>Parsed Booking Drafts</h3>
+            {crypticError && <div className="notice error">{crypticError}</div>}
+            {crypticWarnings.length > 0 && (
+              <div className="notice">
+                {crypticWarnings.join(' ')}
+              </div>
+            )}
+            {crypticDrafts.length > 0 ? (
+              <>
+                <div className="table-scroll">
+                  <table className="data-table dense-table draft-table">
+                    <thead>
+                      <tr>
+                        <th>Row</th>
+                        {CRYPTIC_DRAFT_FIELDS.map((field) => (
+                          <th key={field.key}>{field.label}{field.required ? ' *' : ''}</th>
+                        ))}
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {crypticDrafts.map((draft, index) => {
+                        const missing = draftMissingFields(draft);
+                        return (
+                          <tr key={`${draft.pnr}-${index}`}>
+                            <td>{index + 1}</td>
+                            {CRYPTIC_DRAFT_FIELDS.map((field) => (
+                              <td key={field.key}>
+                                <input
+                                  type={field.input || 'text'}
+                                  value={draft[field.key] ?? ''}
+                                  onChange={(event) => updateCrypticDraft(index, field.key, event.target.value)}
+                                />
+                              </td>
+                            ))}
+                            <td>
+                              {missing.length ? (
+                                <span className="badge overdue">{missing.join(', ')}</span>
+                              ) : (
+                                <span className="badge settled">Ready</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="form-actions">
+                  <button className="btn btn-secondary" type="button" onClick={resetCrypticParse}>Discard Drafts</button>
+                  <button className="btn btn-primary" type="button" onClick={saveCrypticDrafts}>Save All Rows</button>
+                </div>
+              </>
+            ) : (
+              <p style={{ color: 'var(--zinc-500)', marginTop: 14 }}>
+                Parsed rows will appear here for review before anything is saved.
+              </p>
+            )}
           </div>
         </div>
       )}

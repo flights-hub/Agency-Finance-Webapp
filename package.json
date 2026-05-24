@@ -4,13 +4,16 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node server/dev.js",
+    "dev:api": "node server/index.js",
+    "dev:web": "vite",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
     "lucide-react": "^1.16.0",
+    "open-pnr": "^0.0.4",
     "pdfjs-dist": "^5.1.91",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",

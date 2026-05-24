@@ -16,6 +16,11 @@ npm install
 npm run dev
 ```
 
+`npm run dev` starts the Node API on port `8787` and Vite on port `5173`.
+Create a `.env` from `.env.example`, run `supabase/schema.sql` in Supabase,
+then manually create the first Supabase Auth admin user and insert a matching
+`profiles` row with role `ADMIN`.
+
 ## Checks
 
 ```bash
