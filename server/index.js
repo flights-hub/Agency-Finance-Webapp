@@ -1,6 +1,6 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { pnrParser } from 'open-pnr';
+import { parseBookingText } from './bookingParser.js';
 import { loadEnvFile } from './env.js';
 import { signJwt, verifyJwt } from './jwt.js';
 import {
@@ -74,21 +74,6 @@ function randomPassword() {
 }
 
 const PNR_PROVIDERS = new Set(['auto', 'amadeus', 'sabre']);
-const MONTH_INDEX = {
-  JAN: 0,
-  FEB: 1,
-  MAR: 2,
-  APR: 3,
-  MAY: 4,
-  JUN: 5,
-  JUL: 6,
-  AUG: 7,
-  SEP: 8,
-  OCT: 9,
-  NOV: 10,
-  DEC: 11,
-};
-
 function normalizeProvider(provider) {
   const value = String(provider || 'auto').toLowerCase();
   return PNR_PROVIDERS.has(value) ? value : 'auto';
@@ -113,122 +98,6 @@ function detectPnrProvider(text) {
   return { provider: 'amadeus', confidence: 'fallback' };
 }
 
-function parseDdMmm(value) {
-  const match = String(value || '').toUpperCase().match(/^(\d{2})([A-Z]{3})(\d{2})?$/);
-  if (!match || MONTH_INDEX[match[2]] === undefined) return null;
-  return {
-    day: Number(match[1]),
-    month: MONTH_INDEX[match[2]],
-    year: match[3] ? 2000 + Number(match[3]) : null,
-  };
-}
-
-function formatIsoDate(parts) {
-  if (!parts) return '';
-  const month = String(parts.month + 1).padStart(2, '0');
-  const day = String(parts.day).padStart(2, '0');
-  return `${parts.year}-${month}-${day}`;
-}
-
-function normalizePnrDate(value, baseParts = null, previousParts = null) {
-  const parts = parseDdMmm(value);
-  if (!parts) return '';
-
-  parts.year = parts.year || baseParts?.year || new Date().getFullYear();
-
-  if (baseParts && !parseDdMmm(value)?.year) {
-    const beforeBase = parts.month < baseParts.month || (parts.month === baseParts.month && parts.day < baseParts.day);
-    if (beforeBase) parts.year += 1;
-  }
-
-  if (previousParts) {
-    const beforePrevious = parts.year < previousParts.year
-      || (parts.year === previousParts.year && parts.month < previousParts.month)
-      || (parts.year === previousParts.year && parts.month === previousParts.month && parts.day < previousParts.day);
-    if (beforePrevious) parts.year = previousParts.year + 1;
-  }
-
-  return formatIsoDate(parts);
-}
-
-function normalizePassengerName(value) {
-  const cleaned = String(value || '').replace(/\s+/g, ' ').trim();
-  const [surname, given] = cleaned.split('/');
-  if (!surname || !given) return cleaned;
-  const withoutTitle = given.replace(/\b(MR|MRS|MS|MISS|MSTR|MASTER)\b\.?$/i, '').trim();
-  return `${withoutTitle} ${surname}`.replace(/\s+/g, ' ').trim();
-}
-
-function normalizeFlightNo(segment) {
-  const airline = String(segment?.airline || '').trim();
-  const flightNo = String(segment?.flight_no || '').trim();
-  if (!airline || flightNo.startsWith(airline)) return flightNo;
-  return [airline, flightNo].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
-}
-
-function normalizePnrDrafts(parsed, provider) {
-  const warnings = [];
-  const passengers = Array.isArray(parsed?.passengers) ? parsed.passengers : [];
-  const segments = Array.isArray(parsed?.flightSegments) ? parsed.flightSegments : [];
-  const recordLocator = parsed?.recordLocator?.locator || '';
-  const baseDate = parseDdMmm(parsed?.recordLocator?.ticketingInfo?.issuingDate);
-  const firstSegment = segments[0];
-  const lastSegment = segments[segments.length - 1];
-  const outboundDate = normalizePnrDate(firstSegment?.depart_date, baseDate);
-  const outboundParts = parseDdMmm(firstSegment?.depart_date);
-  if (outboundParts && outboundDate) outboundParts.year = Number(outboundDate.slice(0, 4));
-  const inboundDate = normalizePnrDate(lastSegment?.arrive_date, baseDate, outboundParts);
-  const sector = firstSegment && lastSegment
-    ? `${firstSegment.depart_airport}-${lastSegment.arrive_airport}`
-    : '';
-  const segmentSummary = segments
-    .map((segment) => `${normalizeFlightNo(segment)} ${segment.depart_airport}-${segment.arrive_airport} ${segment.depart_date} ${segment.depart_time}-${segment.arrive_time}`)
-    .join('; ');
-  const remarks = [
-    `Parsed from ${provider.toUpperCase()} PNR`,
-    segmentSummary ? `Segments: ${segmentSummary}` : '',
-    parsed?.agency?.name ? `Agency: ${parsed.agency.name}` : '',
-  ].filter(Boolean).join(' | ');
-
-  if (!passengers.length) warnings.push('No passenger names were detected.');
-  if (!segments.length) warnings.push('No flight segments were detected.');
-  if (!recordLocator) warnings.push('No record locator was detected.');
-
-  const passengerRows = passengers.length ? passengers : [''];
-
-  return {
-    drafts: passengerRows.map((passenger) => ({
-      booking_date: new Date().toISOString().split('T')[0],
-      passenger_name: normalizePassengerName(passenger),
-      pax_type: 'ADT',
-      mobile: '',
-      airline: firstSegment?.airline || '',
-      pnr: recordLocator,
-      ticket_no: '',
-      sector,
-      outbound_date: outboundDate,
-      inbound_date: inboundDate && inboundDate !== outboundDate ? inboundDate : '',
-      fare_sold: '',
-      fare_issued: '',
-      booked_by: '',
-      agent_issued_by: '',
-      remarks,
-      refund_flag: false,
-    })),
-    warnings,
-  };
-}
-
-function parsePnrQuietly(text, provider) {
-  const originalLog = console.log;
-  console.log = () => {};
-  try {
-    return pnrParser(text, provider);
-  } finally {
-    console.log = originalLog;
-  }
-}
-
 async function handleParsePnr(req, res) {
   const body = await readBody(req);
   const text = String(body.text || '').trim();
@@ -249,23 +118,55 @@ async function handleParsePnr(req, res) {
     warnings.push('Could not confidently detect provider, so Amadeus was used.');
   }
 
-  let raw;
   try {
-    raw = parsePnrQuietly(text, detection.provider);
+    const result = parseBookingText({ text, source: 'CRYPTIC', provider: detection.provider });
+    json(res, 200, {
+      provider: detection.provider,
+      confidence: result.meta?.confidence || detection.confidence,
+      raw: result.raw,
+      meta: {
+        ...(result.meta || {}),
+        provider: detection.provider,
+        confidence: result.meta?.confidence || detection.confidence,
+      },
+      drafts: result.drafts || [],
+      warnings: [...warnings, ...(result.warnings || [])],
+    });
   } catch (error) {
     error.status = 422;
     error.message = `Unable to parse ${detection.provider.toUpperCase()} PNR: ${error.message}`;
     throw error;
   }
+}
 
-  const normalized = normalizePnrDrafts(raw, detection.provider);
+async function handleParseBookingText(req, res) {
+  const body = await readBody(req);
+  const text = String(body.text || '').trim();
+  const source = String(body.source || 'CRYPTIC').toUpperCase();
+  const requestedProvider = normalizeProvider(body.provider);
 
+  if (!text) {
+    const error = new Error('Booking text is required.');
+    error.status = 400;
+    throw error;
+  }
+
+  const detection = source === 'CRYPTIC' && requestedProvider === 'auto'
+    ? detectPnrProvider(text)
+    : { provider: requestedProvider, confidence: source === 'PDF' ? 'selected' : 'selected' };
+
+  const result = parseBookingText({ text, source, provider: detection.provider });
   json(res, 200, {
     provider: detection.provider,
-    confidence: detection.confidence,
-    raw,
-    drafts: normalized.drafts,
-    warnings: [...warnings, ...normalized.warnings],
+    confidence: result.meta?.confidence || detection.confidence,
+    raw: result.raw,
+    meta: {
+      ...(result.meta || {}),
+      provider: detection.provider,
+      confidence: result.meta?.confidence || detection.confidence,
+    },
+    drafts: result.drafts || [],
+    warnings: result.warnings || [],
   });
 }
 
@@ -605,6 +506,7 @@ async function route(req, res) {
   if (req.method === 'GET' && path === '/api/auth/me') return json(res, 200, { user: await currentUser(req) });
   if (req.method === 'POST' && path === '/api/auth/change-password') return handleChangePassword(req, res);
   if (req.method === 'POST' && path === '/api/bookings/parse-pnr') return handleParsePnr(req, res);
+  if (req.method === 'POST' && path === '/api/bookings/parse-text') return handleParseBookingText(req, res);
   if (req.method === 'POST' && path === '/api/admin/users') return handleCreateUser(req, res);
   if (req.method === 'GET' && path === '/api/admin/users') return handleListUsers(req, res);
   if (req.method === 'POST' && path === '/api/admin/users/bulk') return handleBulk(req, res);

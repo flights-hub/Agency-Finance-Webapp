@@ -8,7 +8,7 @@ import {
   getBookingLedger,
   getPaymentStatus,
 } from '../helpers/calculations';
-import { extractTextFromPDF, parseTicketData } from '../helpers/pdfParser';
+import { extractTextFromPDF } from '../helpers/pdfParser';
 import { api } from '../helpers/api';
 import { AIRLINES } from '../data/airlines';
 import { AIRPORTS } from '../data/airports';
@@ -179,6 +179,91 @@ const createSupplierSegment = (label, id = label.toLowerCase().replace(/\s+/g, '
   pnr: '',
   buying_price: '',
 });
+
+function normalizeParsedAirport(value) {
+  const code = parseAirportCode(value);
+  return code || value || '';
+}
+
+function normalizeParsedAirline(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function parsedConnection(segment, index) {
+  return withAutoDuration({
+    id: `parsed-${index + 1}`,
+    airline: normalizeParsedAirline(segment.airline),
+    flight_number: segment.flight_number || '',
+    departure_city: normalizeParsedAirport(segment.departure_city),
+    arrival_city: normalizeParsedAirport(segment.arrival_city),
+    departure_date: segment.departure_date || '',
+    arrival_date: segment.arrival_date || segment.departure_date || '',
+    departure_time: segment.departure_time || '',
+    arrival_time: segment.arrival_time || '',
+    departure_terminal: segment.departure_terminal || '',
+    arrival_terminal: segment.arrival_terminal || '',
+    duration: '',
+    check_in_baggage: segment.check_in_baggage || '',
+    cabin_baggage: segment.cabin_baggage || '',
+  });
+}
+
+function splitConnectionsByTrip(connections, tripType) {
+  if (tripType !== 'ROUNDTRIP' || connections.length < 2) {
+    return [{ id: 'onward', label: 'Onward', connections }];
+  }
+
+  const firstDeparture = connections[0].departure_city;
+  const returnIndex = connections.findIndex((connection, index) => (
+    index > 0 && connection.arrival_city === firstDeparture
+  ));
+
+  if (returnIndex <= 0) return [{ id: 'onward', label: 'Onward', connections }];
+
+  return [
+    { id: 'onward', label: 'Onward', connections: connections.slice(0, returnIndex) },
+    { id: 'return', label: 'Return', connections: connections.slice(returnIndex) },
+  ];
+}
+
+function namesForType(passengers, type) {
+  return passengers
+    .filter((passenger) => (passenger.pax_type || 'ADT') === type)
+    .map((passenger) => passenger.passenger_name)
+    .filter(Boolean)
+    .join(', ');
+}
+
+function commonFareForType(drafts, type) {
+  const values = drafts
+    .filter((draft) => (draft.pax_type || 'ADT') === type)
+    .map((draft) => numeric(draft.fare_issued || draft.buying_price_per_pax))
+    .filter((value) => value > 0);
+  if (!values.length) return '';
+  return String(values[0]);
+}
+
+function parsedCounts(passengers) {
+  return PAX_TYPES.reduce((result, [type]) => ({
+    ...result,
+    [type]: Math.max(type === 'ADT' ? 1 : 0, passengers.filter((passenger) => (passenger.pax_type || 'ADT') === type).length),
+  }), {});
+}
+
+function hasUsefulPdfDetails(result) {
+  const firstDraft = result.drafts?.[0] || {};
+  const firstSegment = result.raw?.segments?.[0] || {};
+  return Boolean(
+    firstDraft.ticket_no
+    || firstDraft.airline
+    || firstDraft.sector
+    || firstDraft.outbound_date
+    || firstSegment.airline
+    || firstSegment.flight_number
+    || firstSegment.departure_city
+    || firstSegment.arrival_city
+  );
+}
 
 const FORM_FIELDS = [
   { key: 'booking_date', label: 'Booking Date', input: 'date' },
@@ -861,6 +946,89 @@ export default function Bookings() {
     setFormValues(EMPTY_FORM);
   };
 
+  const applyParsedBookingToManualForm = (result, source) => {
+    const drafts = result.drafts || [];
+    const passengers = result.raw?.passengers?.length
+      ? result.raw.passengers
+      : drafts.map((draft) => ({
+        passenger_name: draft.passenger_name,
+        pax_type: draft.pax_type || 'ADT',
+        mobile: draft.mobile || '',
+        contact_email: draft.contact_email || '',
+      }));
+    const segments = result.raw?.segments || [];
+    const firstDraft = drafts[0] || {};
+    const firstSegment = segments[0] || {};
+    const parsedTripType = firstDraft.trip_type || (firstDraft.inbound_date ? 'ROUNDTRIP' : 'ONE_WAY');
+    const tripType = parsedTripType === 'RT' ? 'ROUNDTRIP' : parsedTripType;
+    const connections = segments.length
+      ? segments.map((segment, index) => parsedConnection(segment, index))
+      : (firstDraft.flight_segments || []).flatMap((segment) => (
+        (segment.connections || []).map((connection, index) => parsedConnection(connection, index))
+      ));
+    const flightSegments = connections.length ? splitConnectionsByTrip(connections, tripType) : EMPTY_FORM.flight_segments;
+    const firstConnection = flightSegments[0]?.connections[0] || {};
+    const lastSegment = flightSegments[flightSegments.length - 1] || flightSegments[0];
+    const lastConnection = lastSegment?.connections[lastSegment.connections.length - 1] || firstConnection;
+    const sectorParts = String(firstDraft.sector || '').split('-').map((part) => part.trim()).filter(Boolean);
+    const parsedDeparture = firstSegment.departure_city || firstConnection.departure_city || sectorParts[0] || firstDraft.departure_city;
+    const parsedArrival = lastConnection.arrival_city || firstSegment.arrival_city || sectorParts[1] || firstDraft.arrival_city;
+    const supplierName = firstDraft.supplier_name || result.raw?.supplierName || '';
+    const supplierPnr = firstDraft.pnr || result.meta?.pnr || result.raw?.pnr || '';
+    const remarks = [
+      firstDraft.remarks,
+      source === 'PDF' ? 'Parsed from ticket PDF' : 'Parsed from cryptic PNR',
+      result.warnings?.length ? `Warnings: ${result.warnings.join(', ')}` : '',
+    ].filter(Boolean).join(' | ');
+
+    setFormValues((current) => ({
+      ...current,
+      booking_date: firstDraft.booking_date || current.booking_date,
+      trip_type: tripType || current.trip_type,
+      departure_city: normalizeParsedAirport(parsedDeparture),
+      arrival_city: normalizeParsedAirport(parsedArrival),
+      onward_date: firstConnection.departure_date || firstDraft.outbound_date || current.onward_date,
+      return_date: tripType === 'ONE_WAY' ? '' : (firstDraft.inbound_date || current.return_date),
+      supplier_mode: 'SINGLE',
+      supplier_name: supplierName || current.supplier_name,
+      supplier_pnr: supplierPnr || current.supplier_pnr,
+      passengers: parsedCounts(passengers),
+      pricing: {
+        ADT: {
+          ...current.pricing.ADT,
+          passenger_name: namesForType(passengers, 'ADT'),
+          buying_price: source === 'PDF' ? current.pricing.ADT.buying_price : commonFareForType(drafts, 'ADT'),
+        },
+        CHD: {
+          ...current.pricing.CHD,
+          passenger_name: namesForType(passengers, 'CHD'),
+          buying_price: source === 'PDF' ? current.pricing.CHD.buying_price : commonFareForType(drafts, 'CHD'),
+        },
+        INF: {
+          ...current.pricing.INF,
+          passenger_name: namesForType(passengers, 'INF'),
+          buying_price: source === 'PDF' ? current.pricing.INF.buying_price : commonFareForType(drafts, 'INF'),
+        },
+      },
+      supplier_segments: [{ id: 'single', label: 'Single Supplier', supplier_name: supplierName, pnr: supplierPnr, buying_price: '' }],
+      flight_segments: flightSegments,
+      passenger_name: firstDraft.passenger_name || current.passenger_name,
+      pax_type: firstDraft.pax_type || current.pax_type,
+      mobile: firstDraft.mobile || passengers.find((passenger) => passenger.mobile)?.mobile || current.mobile,
+      airline: firstDraft.airline || firstConnection.airline || current.airline,
+      pnr: supplierPnr || current.pnr,
+      ticket_no: firstDraft.ticket_no || current.ticket_no,
+      sector: [normalizeParsedAirport(parsedDeparture), normalizeParsedAirport(parsedArrival)].filter(Boolean).join('-') || firstDraft.sector,
+      outbound_date: firstConnection.departure_date || firstDraft.outbound_date || current.outbound_date,
+      inbound_date: firstDraft.inbound_date || current.inbound_date,
+      fare_issued: source === 'PDF' ? current.fare_issued : (firstDraft.fare_issued || current.fare_issued),
+      buying_price_per_pax: source === 'PDF' ? current.buying_price_per_pax : (firstDraft.buying_price_per_pax || current.buying_price_per_pax),
+      supplier: supplierName || current.supplier,
+      remarks,
+      parsed_passenger_rows: drafts,
+    }));
+  };
+
   const selectedBillTo = formValues.bill_to_name === '__CUSTOM__'
     ? formValues.custom_bill_to_name.trim()
     : formValues.bill_to_name.trim();
@@ -990,6 +1158,17 @@ export default function Bookings() {
     setCrypticStatus('idle');
   };
 
+  const switchBookingTab = (tab) => {
+    setActiveTab(tab);
+    setCrypticError('');
+    setCrypticWarnings([]);
+    if (tab !== 'UPLOAD') setPdfStatus('');
+    if (tab === 'CRYPTIC' || tab === 'UPLOAD') {
+      setCrypticDrafts([]);
+      setCrypticMeta(null);
+    }
+  };
+
   const handleSort = (key) => {
     if (sortKey === key) {
       setSortDir((current) => (current === 'asc' ? 'desc' : 'asc'));
@@ -1034,50 +1213,72 @@ export default function Bookings() {
     URL.revokeObjectURL(url);
   };
 
-  const applyParsedFields = (parsed) => {
-    setFormValues((current) => ({
-      ...current,
-      passenger_name: parsed.passenger_name?.value || current.passenger_name,
-      airline: parsed.airline?.value || current.airline,
-      pnr: parsed.pnr?.value || current.pnr,
-      ticket_no: parsed.ticket_no?.value || current.ticket_no,
-      fare_sold: parsed.fare_sold?.value || current.fare_sold,
-      fare_issued: parsed.fare_issued?.value || current.fare_issued,
-      sector: parsed.sector?.value || current.sector,
-      outbound_date: parsed.outbound_date?.value || current.outbound_date,
-      inbound_date: parsed.inbound_date?.value || current.inbound_date,
-    }));
-  };
-
   const handlePdfUpload = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
 
     setPdfStatus('processing');
+    setCrypticError('');
+    setCrypticWarnings([]);
+    setCrypticDrafts([]);
+    setCrypticMeta(null);
 
     try {
       const text = await extractTextFromPDF(file);
-      applyParsedFields(parseTicketData(text));
+      if (!text.trim()) throw new Error('No selectable text was found in this PDF.');
+      const result = await api.parseBookingText(text, 'PDF');
+      setCrypticDrafts(result.drafts || []);
+      setCrypticWarnings(result.warnings || []);
+      applyParsedBookingToManualForm(result, 'PDF');
+      console.info('PDF parser diagnostics', {
+        meta: result.meta,
+        warnings: result.warnings,
+        raw: result.raw,
+        textPreview: text.slice(0, 1200),
+      });
+      setCrypticMeta({
+        source: result.meta?.source || 'PDF',
+        provider: result.provider,
+        confidence: result.confidence,
+        count: result.drafts?.length || 0,
+        pnr: result.meta?.pnr || '',
+        ticketCount: result.meta?.ticketCount || 0,
+      });
+      if (!hasUsefulPdfDetails(result)) {
+        setCrypticError('PDF parsed only passenger and PNR. Route, flight, or ticket details were not found in the extracted text.');
+        setPdfStatus('error');
+        return;
+      }
       setPdfStatus('success');
     } catch (err) {
       console.error(err);
+      setCrypticError(err.message || 'Unable to parse ticket PDF.');
       setPdfStatus('error');
+    } finally {
+      event.target.value = '';
     }
   };
 
   const handleCrypticParse = async () => {
     setCrypticError('');
     setCrypticWarnings([]);
+    setCrypticDrafts([]);
+    setCrypticMeta(null);
+    setPdfStatus('');
     setCrypticStatus('processing');
 
     try {
-      const result = await api.parsePnr(crypticText, crypticProvider);
+      const result = await api.parseBookingText(crypticText, 'CRYPTIC', crypticProvider);
       setCrypticDrafts(result.drafts || []);
       setCrypticWarnings(result.warnings || []);
+      applyParsedBookingToManualForm(result, 'CRYPTIC');
       setCrypticMeta({
+        source: result.meta?.source || 'CRYPTIC',
         provider: result.provider,
         confidence: result.confidence,
         count: result.drafts?.length || 0,
+        pnr: result.meta?.pnr || '',
+        ticketCount: result.meta?.ticketCount || 0,
       });
       setCrypticStatus('success');
     } catch (err) {
@@ -1099,6 +1300,7 @@ export default function Bookings() {
     !draft.pnr ? 'PNR' : '',
     !draft.airline ? 'Airline' : '',
     !numeric(draft.fare_sold) ? 'Fare Sold' : '',
+    ...(draft.validation?.blocking || []),
   ].filter(Boolean);
 
   const saveCrypticDrafts = () => {
@@ -1124,6 +1326,72 @@ export default function Bookings() {
     resetCrypticParse();
     setActiveTab('LIST');
   };
+
+  const renderParsedDraftReview = () => (
+    <div className="card cryptic-review-card">
+      <h3>Parsed Booking Drafts</h3>
+      {crypticError && <div className="notice error">{crypticError}</div>}
+      {crypticWarnings.length > 0 && (
+        <div className="notice">
+          {crypticWarnings.join(' ')}
+        </div>
+      )}
+      {crypticDrafts.length > 0 ? (
+        <>
+          <div className="table-scroll">
+            <table className="data-table dense-table draft-table">
+              <thead>
+                <tr>
+                  <th>Row</th>
+                  {CRYPTIC_DRAFT_FIELDS.map((field) => (
+                    <th key={field.key}>{field.label}{field.required ? ' *' : ''}</th>
+                  ))}
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {crypticDrafts.map((draft, index) => {
+                  const missing = [...new Set(draftMissingFields(draft))];
+                  const warnings = draft.validation?.warnings || [];
+                  return (
+                    <tr key={`${draft.pnr}-${index}`}>
+                      <td>{index + 1}</td>
+                      {CRYPTIC_DRAFT_FIELDS.map((field) => (
+                        <td key={field.key}>
+                          <input
+                            type={field.input || 'text'}
+                            value={draft[field.key] ?? ''}
+                            onChange={(event) => updateCrypticDraft(index, field.key, event.target.value)}
+                          />
+                        </td>
+                      ))}
+                      <td>
+                        {missing.length ? (
+                          <span className="badge overdue">{missing.join(', ')}</span>
+                        ) : warnings.length ? (
+                          <span className="badge warning">{warnings.join(', ')}</span>
+                        ) : (
+                          <span className="badge settled">Ready</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="form-actions">
+            <button className="btn btn-secondary" type="button" onClick={resetCrypticParse}>Discard Drafts</button>
+            <button className="btn btn-primary" type="button" onClick={saveCrypticDrafts}>Save All Rows</button>
+          </div>
+        </>
+      ) : (
+        <p style={{ color: 'var(--zinc-500)', marginTop: 14 }}>
+          Parsed rows will appear here for review before anything is saved.
+        </p>
+      )}
+    </div>
+  );
 
   const renderBookingForm = () => (
     <div className="manual-booking-stack">
@@ -1422,16 +1690,16 @@ export default function Bookings() {
           <p>Canonical booking ledger with manual fields, auto calculations, PDF extraction, and cryptic entry.</p>
         </div>
         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-          <button className={`btn ${activeTab === 'ADD' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('ADD')}>
+          <button className={`btn ${activeTab === 'ADD' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('ADD')}>
             <Plus size={16} /> Manual
           </button>
-          <button className={`btn ${activeTab === 'CRYPTIC' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('CRYPTIC')}>
+          <button className={`btn ${activeTab === 'CRYPTIC' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('CRYPTIC')}>
             <FileText size={16} /> Cryptic
           </button>
-          <button className={`btn ${activeTab === 'UPLOAD' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('UPLOAD')}>
+          <button className={`btn ${activeTab === 'UPLOAD' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('UPLOAD')}>
             <UploadCloud size={16} /> Upload PDF
           </button>
-          <button className={`btn ${activeTab === 'LIST' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('LIST')}>
+          <button className={`btn ${activeTab === 'LIST' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('LIST')}>
             List
           </button>
         </div>
@@ -1562,7 +1830,8 @@ export default function Bookings() {
       {activeTab === 'ADD' && renderBookingForm()}
 
       {activeTab === 'CRYPTIC' && (
-        <div className="grid-2 cryptic-entry-grid">
+        <div className="manual-booking-stack">
+          <div className="grid-2 cryptic-entry-grid">
           <div className="card">
             <h3>Cryptic / Raw Booking Entry</h3>
             <p style={{ color: 'var(--zinc-500)', marginBottom: 16 }}>
@@ -1605,9 +1874,12 @@ export default function Bookings() {
             <h3>Parser Status</h3>
             {crypticMeta ? (
               <div className="auto-preview-list">
+                <div><span>Source</span><strong>{crypticMeta.source || 'CRYPTIC'}</strong></div>
                 <div><span>Provider</span><strong>{crypticMeta.provider?.toUpperCase()}</strong></div>
                 <div><span>Confidence</span><strong>{String(crypticMeta.confidence || '-').replace(/_/g, ' ')}</strong></div>
+                <div><span>PNR</span><strong>{crypticMeta.pnr || '-'}</strong></div>
                 <div><span>Draft Rows</span><strong>{crypticMeta.count}</strong></div>
+                <div><span>Tickets</span><strong>{crypticMeta.ticketCount}</strong></div>
               </div>
             ) : (
               <div className="schema-list">
@@ -1616,66 +1888,9 @@ export default function Bookings() {
             )}
           </div>
 
-          <div className="card cryptic-review-card">
-            <h3>Parsed Booking Drafts</h3>
-            {crypticError && <div className="notice error">{crypticError}</div>}
-            {crypticWarnings.length > 0 && (
-              <div className="notice">
-                {crypticWarnings.join(' ')}
-              </div>
-            )}
-            {crypticDrafts.length > 0 ? (
-              <>
-                <div className="table-scroll">
-                  <table className="data-table dense-table draft-table">
-                    <thead>
-                      <tr>
-                        <th>Row</th>
-                        {CRYPTIC_DRAFT_FIELDS.map((field) => (
-                          <th key={field.key}>{field.label}{field.required ? ' *' : ''}</th>
-                        ))}
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {crypticDrafts.map((draft, index) => {
-                        const missing = draftMissingFields(draft);
-                        return (
-                          <tr key={`${draft.pnr}-${index}`}>
-                            <td>{index + 1}</td>
-                            {CRYPTIC_DRAFT_FIELDS.map((field) => (
-                              <td key={field.key}>
-                                <input
-                                  type={field.input || 'text'}
-                                  value={draft[field.key] ?? ''}
-                                  onChange={(event) => updateCrypticDraft(index, field.key, event.target.value)}
-                                />
-                              </td>
-                            ))}
-                            <td>
-                              {missing.length ? (
-                                <span className="badge overdue">{missing.join(', ')}</span>
-                              ) : (
-                                <span className="badge settled">Ready</span>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="form-actions">
-                  <button className="btn btn-secondary" type="button" onClick={resetCrypticParse}>Discard Drafts</button>
-                  <button className="btn btn-primary" type="button" onClick={saveCrypticDrafts}>Save All Rows</button>
-                </div>
-              </>
-            ) : (
-              <p style={{ color: 'var(--zinc-500)', marginTop: 14 }}>
-                Parsed rows will appear here for review before anything is saved.
-              </p>
-            )}
+          {renderParsedDraftReview()}
           </div>
+          {renderBookingForm()}
         </div>
       )}
 

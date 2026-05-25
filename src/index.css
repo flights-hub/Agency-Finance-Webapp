@@ -2583,6 +2583,7 @@ textarea:focus {
 }
 
 .badge.partial,
+.badge.warning,
 .badge-warn {
   background: var(--warning-soft);
   color: var(--warning);

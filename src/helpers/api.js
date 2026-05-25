@@ -41,4 +41,8 @@ export const api = {
     method: 'POST',
     body: { text, provider },
   }),
+  parseBookingText: (text, source, provider = 'auto') => request('/api/bookings/parse-text', {
+    method: 'POST',
+    body: { text, source, provider },
+  }),
 };
