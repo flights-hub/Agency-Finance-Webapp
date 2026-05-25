@@ -10,6 +10,7 @@ import {
 } from '../helpers/calculations';
 import { extractTextFromPDF, parseTicketData } from '../helpers/pdfParser';
 import { api } from '../helpers/api';
+import { AIRLINES } from '../data/airlines';
 import { AIRPORTS } from '../data/airports';
 import { ArrowUpDown, Download, FileText, Plus, Search, SlidersHorizontal, UploadCloud } from 'lucide-react';
 
@@ -441,6 +442,43 @@ function getAirportMatches(value, limit = 8) {
     .map((item) => item.airport);
 }
 
+function normalizeAirlineQuery(value = '') {
+  return value.trim().toLowerCase();
+}
+
+function getAirlineMatches(value, limit = 8) {
+  const query = normalizeAirlineQuery(value);
+  if (!query) return AIRLINES.slice(0, limit);
+
+  return AIRLINES
+    .map((airline) => {
+      const code = airline.code.toLowerCase();
+      const name = airline.airlineName.toLowerCase();
+      const alliance = airline.alliance.toLowerCase();
+      const hubAirports = airline.hubAirports.toLowerCase();
+      let rank = 99;
+
+      if (code === query) rank = 0;
+      else if (name === query) rank = 1;
+      else if (code.startsWith(query)) rank = 2;
+      else if (name.startsWith(query)) rank = 3;
+      else if (name.includes(query)) rank = 4;
+      else if (alliance.includes(query) || hubAirports.includes(query)) rank = 5;
+      else if (airline.search.includes(query)) rank = 6;
+
+      return { airline, rank };
+    })
+    .filter((item) => item.rank < 99)
+    .sort((a, b) => (
+      a.rank - b.rank
+      || Number(b.airline.isActive) - Number(a.airline.isActive)
+      || a.airline.airlineName.localeCompare(b.airline.airlineName)
+      || a.airline.code.localeCompare(b.airline.code)
+    ))
+    .slice(0, limit)
+    .map((item) => item.airline);
+}
+
 function AirportAutocomplete({ label, value, onChange }) {
   const [isOpen, setIsOpen] = useState(false);
   const matches = getAirportMatches(value);
@@ -476,6 +514,49 @@ function AirportAutocomplete({ label, value, onChange }) {
             >
               <strong>{airport.label}</strong>
               <span>{airport.detail}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </label>
+  );
+}
+
+function AirlineAutocomplete({ label, value, onChange }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const matches = getAirlineMatches(value);
+
+  const selectAirline = (airline) => {
+    onChange(airline.label);
+    setIsOpen(false);
+  };
+
+  return (
+    <label className="airport-autocomplete-field">
+      <span>{label}</span>
+      <input
+        type="text"
+        value={value}
+        autoComplete="off"
+        onFocus={() => setIsOpen(true)}
+        onBlur={() => window.setTimeout(() => setIsOpen(false), 120)}
+        onChange={(event) => {
+          onChange(event.target.value);
+          setIsOpen(true);
+        }}
+      />
+      {isOpen && matches.length > 0 && (
+        <div className="airport-suggestions" role="listbox">
+          {matches.map((airline) => (
+            <button
+              key={`${airline.code}-${airline.airlineName}-${airline.detail}`}
+              type="button"
+              className="airport-suggestion"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => selectAirline(airline)}
+            >
+              <strong>{airline.label}</strong>
+              <span>{airline.detail || airline.code}</span>
             </button>
           ))}
         </div>
@@ -1222,7 +1303,7 @@ export default function Bookings() {
               {segment.connections.map((connection, connectionIndex) => (
                 <div className="connection-grid" key={connection.id}>
                   {[
-                    ['airline', 'Airline *'],
+                    ['airline', 'Airline *', 'airline'],
                     ['flight_number', 'Flight Number *'],
                     ['departure_city', 'Departure City *', 'airport'],
                     ['arrival_city', 'Arrival City *', 'airport'],
@@ -1238,6 +1319,13 @@ export default function Bookings() {
                   ].map(([key, label, inputKind, type]) => (
                     inputKind === 'airport' ? (
                       <AirportAutocomplete
+                        key={key}
+                        label={label}
+                        value={connection[key]}
+                        onChange={(value) => updateFlightSegment(segmentIndex, connectionIndex, key, value)}
+                      />
+                    ) : inputKind === 'airline' ? (
+                      <AirlineAutocomplete
                         key={key}
                         label={label}
                         value={connection[key]}
