@@ -214,9 +214,26 @@ function splitConnectionsByTrip(connections, tripType) {
   }
 
   const firstDeparture = connections[0].departure_city;
-  const returnIndex = connections.findIndex((connection, index) => (
-    index > 0 && connection.arrival_city === firstDeparture
-  ));
+  const lastArrival = connections[connections.length - 1]?.arrival_city;
+  const routeCities = [firstDeparture, ...connections.map((connection) => connection.arrival_city)].filter(Boolean);
+  let returnIndex = -1;
+
+  if (routeCities.length === connections.length + 1 && lastArrival === firstDeparture) {
+    for (let index = 1; index < routeCities.length - 1; index += 1) {
+      const outboundPath = routeCities.slice(0, index);
+      const returnPath = routeCities.slice(index + 1);
+      if (returnPath.join('|') === outboundPath.reverse().join('|')) {
+        returnIndex = index;
+        break;
+      }
+    }
+  }
+
+  if (returnIndex < 0) {
+    returnIndex = connections.findIndex((connection, index) => (
+      index > 0 && connection.arrival_city === firstDeparture
+    ));
+  }
 
   if (returnIndex <= 0) return [{ id: 'onward', label: 'Onward', connections }];
 
@@ -972,7 +989,10 @@ export default function Bookings() {
     const lastConnection = lastSegment?.connections[lastSegment.connections.length - 1] || firstConnection;
     const sectorParts = String(firstDraft.sector || '').split('-').map((part) => part.trim()).filter(Boolean);
     const parsedDeparture = firstSegment.departure_city || firstConnection.departure_city || sectorParts[0] || firstDraft.departure_city;
-    const parsedArrival = lastConnection.arrival_city || firstSegment.arrival_city || sectorParts[1] || firstDraft.arrival_city;
+    const routeArrivalConnection = tripType === 'ROUNDTRIP'
+      ? flightSegments[0]?.connections[flightSegments[0].connections.length - 1] || lastConnection
+      : lastConnection;
+    const parsedArrival = routeArrivalConnection.arrival_city || firstSegment.arrival_city || sectorParts[1] || firstDraft.arrival_city;
     const supplierName = firstDraft.supplier_name || result.raw?.supplierName || '';
     const supplierPnr = firstDraft.pnr || result.meta?.pnr || result.raw?.pnr || '';
     const remarks = [

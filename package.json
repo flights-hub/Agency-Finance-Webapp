@@ -9,6 +9,7 @@
     "dev:web": "vite",
     "build": "vite build",
     "lint": "eslint .",
+    "test:parser": "node server/bookingParser.test.js",
     "preview": "vite preview"
   },
   "dependencies": {
