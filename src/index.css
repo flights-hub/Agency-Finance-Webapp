@@ -2191,6 +2191,59 @@ textarea:focus {
   padding: 10px 12px;
 }
 
+.airport-autocomplete-field {
+  position: relative;
+}
+
+.airport-suggestions {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  display: grid;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: var(--shadow-3);
+  text-transform: none;
+}
+
+.airport-suggestion {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-900);
+  text-align: left;
+  cursor: pointer;
+}
+
+.airport-suggestion:hover,
+.airport-suggestion:focus-visible {
+  background: var(--accent-50);
+  outline: none;
+}
+
+.airport-suggestion strong {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.airport-suggestion span {
+  color: var(--ink-500);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
 .manual-radio-row {
   display: flex;
   gap: 18px;

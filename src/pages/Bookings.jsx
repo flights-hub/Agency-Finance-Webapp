@@ -10,6 +10,7 @@ import {
 } from '../helpers/calculations';
 import { extractTextFromPDF, parseTicketData } from '../helpers/pdfParser';
 import { api } from '../helpers/api';
+import { AIRPORTS } from '../data/airports';
 import { ArrowUpDown, Download, FileText, Plus, Search, SlidersHorizontal, UploadCloud } from 'lucide-react';
 
 const TABLE_COLUMNS = [
@@ -135,8 +136,6 @@ const EMPTY_FORM = {
   refund_flag: false,
 };
 
-const CITY_OPTIONS = ['Rome (FCO)', 'Delhi (DEL)', 'Milan (MXP)', 'Venice (VCE)', 'Mumbai (BOM)', 'Amritsar (ATQ)', 'Dubai (DXB)'];
-
 const PAX_TYPES = [
   ['ADT', 'Adult'],
   ['CHD', 'Child'],
@@ -215,10 +214,193 @@ const CRYPTIC_DRAFT_FIELDS = [
 ];
 
 const moneyKeys = new Set(['fare_sold', 'fare_issued', 'profit', 'total_paid', 'balance_due']);
+const durationInputKeys = new Set(['departure_city', 'arrival_city', 'departure_date', 'departure_time', 'arrival_time']);
+const AIRPORT_TIMEZONES = {
+  ATQ: 'Asia/Kolkata',
+  BOM: 'Asia/Kolkata',
+  DEL: 'Asia/Kolkata',
+  DXB: 'Asia/Dubai',
+  FCO: 'Europe/Rome',
+  JFK: 'America/New_York',
+  LHR: 'Europe/London',
+  MXP: 'Europe/Rome',
+  ROM: 'Europe/Rome',
+  SIN: 'Asia/Singapore',
+  VCE: 'Europe/Rome',
+};
+const DATE_PATTERNS = [
+  /(?:^|\D)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\D|$)/,
+  /(?:^|\D)(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:\D|$)/,
+  /\b(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})\b/,
+  /\b([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})\b/,
+];
+const TIME_PATTERN = /\b([01]?\d|2[0-3])[:.]([0-5]\d)\b/;
+const AIRPORT_CODE_PATTERN = /\b[A-Z]{3}\b/;
+const MONTH_LOOKUP = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
 
 function numeric(value) {
   const next = Number(value);
   return Number.isFinite(next) ? next : 0;
+}
+
+function normalizeDateParts(year, month, day) {
+  if (!year || !month || !day) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return { year, month, day };
+}
+
+function parseDateParts(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  let match = raw.match(DATE_PATTERNS[0]);
+  if (match) return normalizeDateParts(Number(match[1]), Number(match[2]), Number(match[3]));
+
+  match = raw.match(DATE_PATTERNS[1]);
+  if (match) {
+    const first = Number(match[1]);
+    const second = Number(match[2]);
+    const year = Number(match[3]);
+    const day = first > 12 ? first : second;
+    const month = first > 12 ? second : first;
+    return normalizeDateParts(year, month, day);
+  }
+
+  match = raw.match(DATE_PATTERNS[2]);
+  if (match) return normalizeDateParts(Number(match[3]), MONTH_LOOKUP[match[2].toLowerCase()], Number(match[1]));
+
+  match = raw.match(DATE_PATTERNS[3]);
+  if (match) return normalizeDateParts(Number(match[3]), MONTH_LOOKUP[match[1].toLowerCase()], Number(match[2]));
+
+  return null;
+}
+
+function parseTimeParts(value) {
+  const match = String(value || '').match(TIME_PATTERN);
+  if (!match) return null;
+  return { hour: Number(match[1]), minute: Number(match[2]) };
+}
+
+function parseAirportCode(value) {
+  const raw = String(value || '').toUpperCase();
+  const parenthesizedCode = raw.match(/\(([A-Z]{3})\)/);
+  if (parenthesizedCode) return parenthesizedCode[1];
+
+  const match = raw.match(AIRPORT_CODE_PATTERN);
+  return match ? match[0] : '';
+}
+
+function getTimeZoneParts(timeZone, utcMillis) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(utcMillis));
+
+  return parts.reduce((result, part) => {
+    if (part.type !== 'literal') result[part.type] = Number(part.value);
+    return result;
+  }, {});
+}
+
+function zonedDateTimeToUtc(date, time, timeZone) {
+  const targetUtc = Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute);
+  let utcMillis = targetUtc;
+
+  for (let index = 0; index < 4; index += 1) {
+    const parts = getTimeZoneParts(timeZone, utcMillis);
+    const zonedAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+    const nextUtcMillis = utcMillis + (targetUtc - zonedAsUtc);
+    if (nextUtcMillis === utcMillis) break;
+    utcMillis = nextUtcMillis;
+  }
+
+  return utcMillis;
+}
+
+function addDays(date, days) {
+  const next = new Date(Date.UTC(date.year, date.month - 1, date.day + days));
+  return {
+    year: next.getUTCFullYear(),
+    month: next.getUTCMonth() + 1,
+    day: next.getUTCDate(),
+  };
+}
+
+function calculateConnectionDuration(connection) {
+  const departureDate = parseDateParts(connection.departure_date);
+  const departureTime = parseTimeParts(connection.departure_time);
+  const arrivalTime = parseTimeParts(connection.arrival_time);
+  const departureCode = parseAirportCode(connection.departure_city);
+  const arrivalCode = parseAirportCode(connection.arrival_city);
+  const departureZone = AIRPORT_TIMEZONES[departureCode];
+  const arrivalZone = AIRPORT_TIMEZONES[arrivalCode];
+
+  if (
+    !departureDate
+    || !departureTime
+    || !arrivalTime
+    || !departureZone
+    || !arrivalZone
+    || departureCode === arrivalCode
+  ) {
+    return '';
+  }
+
+  const departureUtc = zonedDateTimeToUtc(departureDate, departureTime, departureZone);
+  let arrivalUtc = zonedDateTimeToUtc(departureDate, arrivalTime, arrivalZone);
+
+  while (arrivalUtc <= departureUtc) {
+    arrivalUtc = zonedDateTimeToUtc(addDays(departureDate, 1), arrivalTime, arrivalZone);
+  }
+
+  const totalMinutes = Math.round((arrivalUtc - departureUtc) / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h ${minutes}m`;
+}
+
+function withAutoDuration(connection) {
+  return {
+    ...connection,
+    duration: calculateConnectionDuration(connection),
+  };
 }
 
 function invoiceNumber(index) {
@@ -227,6 +409,79 @@ function invoiceNumber(index) {
 
 function normalizePnr(value = '') {
   return value.replace(/[^a-z0-9]/gi, '').toUpperCase();
+}
+
+function normalizeAirportQuery(value = '') {
+  return value.trim().toLowerCase();
+}
+
+function getAirportMatches(value, limit = 8) {
+  const query = normalizeAirportQuery(value);
+  if (!query) return AIRPORTS.slice(0, limit);
+
+  return AIRPORTS
+    .map((airport) => {
+      const code = airport.code.toLowerCase();
+      const city = airport.city.toLowerCase();
+      const name = airport.name.toLowerCase();
+      let rank = 99;
+
+      if (code === query) rank = 0;
+      else if (city === query) rank = 1;
+      else if (code.startsWith(query)) rank = 2;
+      else if (city.startsWith(query)) rank = 3;
+      else if (name.includes(query)) rank = 4;
+      else if (airport.search.includes(query)) rank = 5;
+
+      return { airport, rank };
+    })
+    .filter((item) => item.rank < 99)
+    .sort((a, b) => a.rank - b.rank || a.airport.city.localeCompare(b.airport.city) || a.airport.code.localeCompare(b.airport.code))
+    .slice(0, limit)
+    .map((item) => item.airport);
+}
+
+function AirportAutocomplete({ label, value, onChange }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const matches = getAirportMatches(value);
+
+  const selectAirport = (airport) => {
+    onChange(airport.label);
+    setIsOpen(false);
+  };
+
+  return (
+    <label className="airport-autocomplete-field">
+      <span>{label}</span>
+      <input
+        type="text"
+        value={value}
+        autoComplete="off"
+        onFocus={() => setIsOpen(true)}
+        onBlur={() => window.setTimeout(() => setIsOpen(false), 120)}
+        onChange={(event) => {
+          onChange(event.target.value);
+          setIsOpen(true);
+        }}
+      />
+      {isOpen && matches.length > 0 && (
+        <div className="airport-suggestions" role="listbox">
+          {matches.map((airport) => (
+            <button
+              key={airport.code}
+              type="button"
+              className="airport-suggestion"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => selectAirport(airport)}
+            >
+              <strong>{airport.label}</strong>
+              <span>{airport.detail}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </label>
+  );
 }
 
 function deriveBooking(rawBooking, index, payments) {
@@ -402,6 +657,26 @@ export default function Bookings() {
     setFormValues((current) => ({ ...current, [key]: value }));
   };
 
+  const updateRouteAirport = (key, value) => {
+    setFormValues((current) => {
+      const flightSegments = current.flight_segments.map((segment, segmentIndex) => {
+        const isDeparture = key === 'departure_city' && segmentIndex === 0;
+        const isArrival = key === 'arrival_city' && segmentIndex === current.flight_segments.length - 1;
+        if (!isDeparture && !isArrival) return segment;
+
+        const targetConnectionIndex = isDeparture ? 0 : segment.connections.length - 1;
+        return {
+          ...segment,
+          connections: segment.connections.map((connection, connectionIndex) => (
+            connectionIndex === targetConnectionIndex ? withAutoDuration({ ...connection, [key]: value }) : connection
+          )),
+        };
+      });
+
+      return { ...current, [key]: value, flight_segments: flightSegments };
+    });
+  };
+
   const segmentTemplatesForTrip = (tripType) => {
     if (tripType === 'ROUNDTRIP') return [
       createFlightSegment('Onward', 'onward'),
@@ -458,9 +733,11 @@ export default function Bookings() {
       flight_segments: current.flight_segments.map((segment, index) => (
         index !== segmentIndex ? segment : {
           ...segment,
-          connections: segment.connections.map((connection, cIndex) => (
-            cIndex === connectionIndex ? { ...connection, [key]: value } : connection
-          )),
+          connections: segment.connections.map((connection, cIndex) => {
+            if (cIndex !== connectionIndex || key === 'duration') return connection;
+            const nextConnection = { ...connection, [key]: value };
+            return durationInputKeys.has(key) ? withAutoDuration(nextConnection) : nextConnection;
+          }),
         }
       )),
     }));
@@ -769,9 +1046,6 @@ export default function Bookings() {
 
   const renderBookingForm = () => (
     <div className="manual-booking-stack">
-      <datalist id="city-options">
-        {CITY_OPTIONS.map((city) => <option key={city} value={city} />)}
-      </datalist>
       <datalist id="supplier-options">
         {supplierOptions.map((supplier) => <option key={supplier} value={supplier} />)}
       </datalist>
@@ -818,14 +1092,16 @@ export default function Bookings() {
           <h3>Route & Passengers</h3>
         </div>
         <div className="route-passenger-row">
-          <label>
-            <span>Departure City *</span>
-            <input list="city-options" value={formValues.departure_city} onChange={(event) => updateForm('departure_city', event.target.value)} />
-          </label>
-          <label>
-            <span>Arrival City *</span>
-            <input list="city-options" value={formValues.arrival_city} onChange={(event) => updateForm('arrival_city', event.target.value)} />
-          </label>
+          <AirportAutocomplete
+            label="Departure City *"
+            value={formValues.departure_city}
+            onChange={(value) => updateRouteAirport('departure_city', value)}
+          />
+          <AirportAutocomplete
+            label="Arrival City *"
+            value={formValues.arrival_city}
+            onChange={(value) => updateRouteAirport('arrival_city', value)}
+          />
           <label>
             <span>Onward Date *</span>
             <input type="date" value={formValues.onward_date} onChange={(event) => updateForm('onward_date', event.target.value)} />
@@ -948,8 +1224,8 @@ export default function Bookings() {
                   {[
                     ['airline', 'Airline *'],
                     ['flight_number', 'Flight Number *'],
-                    ['departure_city', 'Departure City *', 'city-options'],
-                    ['arrival_city', 'Arrival City *', 'city-options'],
+                    ['departure_city', 'Departure City *', 'airport'],
+                    ['arrival_city', 'Arrival City *', 'airport'],
                     ['departure_date', 'Departure Date', null, 'date'],
                     ['arrival_date', 'Arrival Date', null, 'date'],
                     ['departure_time', 'Departure Time', null, 'time'],
@@ -959,16 +1235,25 @@ export default function Bookings() {
                     ['duration', 'Duration'],
                     ['check_in_baggage', 'Check-in Baggage'],
                     ['cabin_baggage', 'Cabin Baggage'],
-                  ].map(([key, label, list, type]) => (
-                    <label key={key}>
-                      <span>{label}</span>
-                      <input
-                        type={type || 'text'}
-                        list={list || undefined}
+                  ].map(([key, label, inputKind, type]) => (
+                    inputKind === 'airport' ? (
+                      <AirportAutocomplete
+                        key={key}
+                        label={label}
                         value={connection[key]}
-                        onChange={(event) => updateFlightSegment(segmentIndex, connectionIndex, key, event.target.value)}
+                        onChange={(value) => updateFlightSegment(segmentIndex, connectionIndex, key, value)}
                       />
-                    </label>
+                    ) : (
+                      <label key={key}>
+                        <span>{label}</span>
+                        <input
+                          type={type || 'text'}
+                          value={connection[key]}
+                          readOnly={key === 'duration'}
+                          onChange={(event) => updateFlightSegment(segmentIndex, connectionIndex, key, event.target.value)}
+                        />
+                      </label>
+                    )
                   ))}
                 </div>
               ))}
