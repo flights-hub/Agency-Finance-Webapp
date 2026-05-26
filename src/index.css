@@ -2288,7 +2288,7 @@ textarea:focus {
 
 .pricing-row {
   display: grid;
-  grid-template-columns: 0.7fr minmax(180px, 1.5fr) 0.55fr 0.8fr 0.8fr 0.7fr;
+  grid-template-columns: 0.7fr minmax(180px, 1.5fr) minmax(150px, 1fr) 0.8fr 0.8fr;
   gap: 10px;
   align-items: center;
 }
@@ -2304,8 +2304,7 @@ textarea:focus {
   opacity: 0.62;
 }
 
-.pricing-row strong,
-.pricing-row > span:last-child {
+.pricing-row strong {
   color: var(--ink-900);
   font-weight: 750;
 }
@@ -2861,7 +2860,7 @@ textarea:focus {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .pricing-row {
-    grid-template-columns: 0.7fr minmax(160px, 1.3fr) repeat(4, minmax(100px, 1fr));
+    grid-template-columns: 0.7fr minmax(160px, 1.3fr) repeat(3, minmax(120px, 1fr));
   }
   .supplier-segment-card {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2939,7 +2938,7 @@ textarea:focus {
   }
 
   .pricing-row {
-    min-width: 760px;
+    min-width: 700px;
   }
 
   .permission-grid {

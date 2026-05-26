@@ -251,3 +251,56 @@ assert.equal(amadeusResult.drafts[0].outbound_date, '2026-05-25');
 assert.equal(amadeusResult.raw.supplierName, 'KAMBOJ VIAGGI');
 
 console.log('bookingParser Amadeus family PNR checks passed');
+
+const wrappedAmadeusPnr = `
+RP/VCEIG2265/VCEIG2265            DM/SU  26MAY26/0829Z   ZPHEF2
+  1.KAUR/NARINDER   2.SINGH/MANRAJ(CHD/03FEB17)
+  3.SINGH/REPARMANJIT
+  4  QR 116 O 12JUN 5 FCODOH HK3       3  1045 1720   *1A/E*
+  5  QR 548 O 12JUN 5 DOHATQ
+AMRITSAR, SRI GURU RAM DASS JEE
+ HK3          2010 0230+1 *1A/E*
+  6 AP VCE 049.8840733 -  ALMATE SRL - A
+  7 TK PAX OK26MAY/MILIG21AG//ETQR/S4-5/P1,3
+  8 TK OK26MAY/MILIG21AG//ETQR
+  9 SSR CHLD QR HK1 03FEB17/P2
+ 10 SSR OTHS 1A 657173425545 - FARE RULE OVERRIDES TKT DEADLINE
+       IF MORE RESTRICTIVE
+ 11 SSR CTCE QR HK1 BOOKINGS//FLYFORSURE.COM/P1
+ 12 SSR CTCM QR HK1 00393805932640/IT/P1
+ 13 RMZ CONF*FORMAT:PDF
+ 14 RMZ CONF*LANG:EN
+ 15 FA PAX 157-9497449356/ETQR/26MAY26/MILIG21AG/38237931
+       /S4-5/P1
+ 16 FA PAX 157-9497449357/ETQR/26MAY26/MILIG21AG/38237931
+       /S4-5/P3
+ 17 FA PAX 157-9497449358/ETQR/26MAY26/MILIG21AG/38237931
+       /S4-5/P2
+ 18 FB PAX 0000000000 TTP/RT OK ETICKET/S4-5/P1,3
+)>
+`;
+
+const wrappedAmadeusResult = parseBookingText({ text: wrappedAmadeusPnr, source: 'CRYPTIC', provider: 'amadeus' });
+
+assert.equal(wrappedAmadeusResult.raw.pnr, 'ZPHEF2');
+assert.equal(wrappedAmadeusResult.meta.ticketCount, 3);
+assert.equal(wrappedAmadeusResult.meta.segmentCount, 2);
+assert.deepEqual(
+  wrappedAmadeusResult.raw.passengers.map((passenger) => `${passenger.p_ref}:${passenger.passenger_name}:${passenger.pax_type}:${passenger.ticket_no}:${passenger.fare_issued}:${passenger.ticket_issue_date}:${passenger.ticket_status}`),
+  [
+    '1:KAUR/NARINDER:ADT:157-9497449356::2026-05-26:TICKETED',
+    '2:SINGH/MANRAJ:CHD:157-9497449358::2026-05-26:TICKETED',
+    '3:SINGH/REPARMANJIT:ADT:157-9497449357::2026-05-26:TICKETED',
+  ],
+);
+assert.deepEqual(
+  wrappedAmadeusResult.raw.segments.map((segment) => `${segment.airline}${segment.flight_number}:${segment.departure_city}-${segment.arrival_city}:${segment.departure_time}-${segment.arrival_time}:${segment.arrival_date}`),
+  [
+    'QR116:FCO-DOH:10:45-17:20:2026-06-12',
+    'QR548:DOH-ATQ:20:10-02:30:2026-06-13',
+  ],
+);
+assert.equal(wrappedAmadeusResult.drafts[0].sector, 'FCO-ATQ');
+assert.equal(wrappedAmadeusResult.drafts[0].outbound_date, '2026-06-12');
+
+console.log('bookingParser wrapped Amadeus segment and fareless FA checks passed');

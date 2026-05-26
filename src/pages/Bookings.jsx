@@ -68,6 +68,26 @@ const DEFAULT_COLUMNS = [
   'refund_flag',
 ];
 
+const PAX_TYPES = [
+  ['ADT', 'Adult'],
+  ['CHD', 'Child'],
+  ['INF', 'Infant'],
+];
+
+const PAX_LABELS = Object.fromEntries(PAX_TYPES);
+
+const pricingRowId = (type, index) => `${type}-${index + 1}`;
+
+const createPricingRow = (type = 'ADT', index = 0, values = {}) => ({
+  id: values.id || pricingRowId(type, index),
+  pax_type: type,
+  passenger_name: '',
+  ticket_no: '',
+  buying_price: '',
+  selling_price: '',
+  ...values,
+});
+
 const EMPTY_FORM = {
   booking_date: new Date().toISOString().split('T')[0],
   bill_to_type: 'AGENT',
@@ -88,11 +108,7 @@ const EMPTY_FORM = {
     CHD: 0,
     INF: 0,
   },
-  pricing: {
-    ADT: { passenger_name: '', buying_price: '', selling_price: '' },
-    CHD: { passenger_name: '', buying_price: '', selling_price: '' },
-    INF: { passenger_name: '', buying_price: '', selling_price: '' },
-  },
+  pricing_rows: [createPricingRow('ADT', 0)],
   supplier_segments: [
     { id: 'onward', label: 'Onward', supplier_name: '', pnr: '', buying_price: '' },
   ],
@@ -136,12 +152,6 @@ const EMPTY_FORM = {
   remarks: '',
   refund_flag: false,
 };
-
-const PAX_TYPES = [
-  ['ADT', 'Adult'],
-  ['CHD', 'Child'],
-  ['INF', 'Infant'],
-];
 
 const TRIP_TYPES = [
   ['ONE_WAY', 'One Way'],
@@ -243,28 +253,45 @@ function splitConnectionsByTrip(connections, tripType) {
   ];
 }
 
-function namesForType(passengers, type) {
-  return passengers
-    .filter((passenger) => (passenger.pax_type || 'ADT') === type)
-    .map((passenger) => passenger.passenger_name)
-    .filter(Boolean)
-    .join(', ');
-}
-
-function commonFareForType(drafts, type) {
-  const values = drafts
-    .filter((draft) => (draft.pax_type || 'ADT') === type)
-    .map((draft) => numeric(draft.fare_issued || draft.buying_price_per_pax))
-    .filter((value) => value > 0);
-  if (!values.length) return '';
-  return String(values[0]);
-}
-
 function parsedCounts(passengers) {
   return PAX_TYPES.reduce((result, [type]) => ({
     ...result,
     [type]: Math.max(type === 'ADT' ? 1 : 0, passengers.filter((passenger) => (passenger.pax_type || 'ADT') === type).length),
   }), {});
+}
+
+function pricingRowsFromCounts(passengerCounts, currentRows = []) {
+  return PAX_TYPES.flatMap(([type]) => {
+    const count = Math.max(0, Number(passengerCounts[type] || 0));
+    const existingRows = currentRows.filter((row) => row.pax_type === type);
+
+    return Array.from({ length: count }, (_, index) => createPricingRow(type, index, existingRows[index]));
+  });
+}
+
+function pricingRowsFromParsedPassengers(passengers, drafts, currentRows = []) {
+  const byName = new Map(
+    drafts
+      .filter((draft) => draft.passenger_name)
+      .map((draft) => [draft.passenger_name, draft]),
+  );
+  const typeIndexes = {};
+
+  return passengers.map((passenger, index) => {
+    const type = passenger.pax_type || 'ADT';
+    const typeIndex = typeIndexes[type] || 0;
+    typeIndexes[type] = typeIndex + 1;
+    const draft = byName.get(passenger.passenger_name) || drafts[index] || {};
+    const current = currentRows.filter((row) => row.pax_type === type)[typeIndex] || {};
+    const buyingPrice = passenger.fare_issued || draft.buying_price_per_pax || draft.fare_issued || current.buying_price || '';
+
+    return createPricingRow(type, typeIndex, {
+      passenger_name: passenger.passenger_name || draft.passenger_name || current.passenger_name || '',
+      ticket_no: passenger.ticket_no || draft.ticket_no || current.ticket_no || '',
+      buying_price: buyingPrice ? String(buyingPrice) : '',
+      selling_price: current.selling_price || draft.selling_price_per_pax || '',
+    });
+  });
 }
 
 function hasUsefulPdfDetails(result) {
@@ -888,25 +915,26 @@ export default function Bookings() {
   };
 
   const updatePassengerCount = (type, value) => {
-    setFormValues((current) => ({
-      ...current,
-      passengers: {
+    setFormValues((current) => {
+      const passengers = {
         ...current.passengers,
         [type]: Math.max(0, Number(value || 0)),
-      },
-    }));
+      };
+
+      return {
+        ...current,
+        passengers,
+        pricing_rows: pricingRowsFromCounts(passengers, current.pricing_rows || []),
+      };
+    });
   };
 
-  const updatePricing = (type, key, value) => {
+  const updatePricingRow = (rowId, key, value) => {
     setFormValues((current) => ({
       ...current,
-      pricing: {
-        ...current.pricing,
-        [type]: {
-          ...current.pricing[type],
-          [key]: value,
-        },
-      },
+      pricing_rows: (current.pricing_rows || []).map((row) => (
+        row.id === rowId ? { ...row, [key]: value } : row
+      )),
     }));
   };
 
@@ -970,6 +998,8 @@ export default function Bookings() {
       : drafts.map((draft) => ({
         passenger_name: draft.passenger_name,
         pax_type: draft.pax_type || 'ADT',
+        ticket_no: draft.ticket_no || '',
+        fare_issued: draft.fare_issued || draft.buying_price_per_pax || '',
         mobile: draft.mobile || '',
         contact_email: draft.contact_email || '',
       }));
@@ -1013,23 +1043,7 @@ export default function Bookings() {
       supplier_name: supplierName || current.supplier_name,
       supplier_pnr: supplierPnr || current.supplier_pnr,
       passengers: parsedCounts(passengers),
-      pricing: {
-        ADT: {
-          ...current.pricing.ADT,
-          passenger_name: namesForType(passengers, 'ADT'),
-          buying_price: source === 'PDF' ? current.pricing.ADT.buying_price : commonFareForType(drafts, 'ADT'),
-        },
-        CHD: {
-          ...current.pricing.CHD,
-          passenger_name: namesForType(passengers, 'CHD'),
-          buying_price: source === 'PDF' ? current.pricing.CHD.buying_price : commonFareForType(drafts, 'CHD'),
-        },
-        INF: {
-          ...current.pricing.INF,
-          passenger_name: namesForType(passengers, 'INF'),
-          buying_price: source === 'PDF' ? current.pricing.INF.buying_price : commonFareForType(drafts, 'INF'),
-        },
-      },
+      pricing_rows: pricingRowsFromParsedPassengers(passengers, drafts, current.pricing_rows || []),
       supplier_segments: [{ id: 'single', label: 'Single Supplier', supplier_name: supplierName, pnr: supplierPnr, buying_price: '' }],
       flight_segments: flightSegments,
       passenger_name: firstDraft.passenger_name || current.passenger_name,
@@ -1053,14 +1067,11 @@ export default function Bookings() {
     ? formValues.custom_bill_to_name.trim()
     : formValues.bill_to_name.trim();
 
-  const selectedPaxRows = PAX_TYPES
-    .map(([type, label]) => ({
-      type,
-      label,
-      count: Number(formValues.passengers[type] || 0),
-      ...formValues.pricing[type],
-    }))
-    .filter((row) => row.count > 0);
+  const selectedPaxRows = (formValues.pricing_rows || []).map((row, index) => ({
+    ...row,
+    type: row.pax_type || 'ADT',
+    label: PAX_LABELS[row.pax_type] || row.pax_type || `Passenger ${index + 1}`,
+  }));
 
   const primarySupplierSegment = formValues.supplier_mode === 'MULTI'
     ? formValues.supplier_segments.find((segment) => segment.pnr || segment.supplier_name) || formValues.supplier_segments[0]
@@ -1075,20 +1086,17 @@ export default function Bookings() {
       formValues.arrival_city || lastConnection.arrival_city,
     ].filter(Boolean).join('-');
     const airline = primaryConnection.airline || '';
-    const flightNumber = formValues.flight_segments
-      .flatMap((segment) => segment.connections.map((connection) => connection.flight_number).filter(Boolean))
-      .join(', ');
     const pnr = primarySupplierSegment?.pnr || '';
     const supplierName = primarySupplierSegment?.supplier_name || '';
 
     return selectedPaxRows.map((row, index) => {
-      const fareSold = row.count * numeric(row.selling_price);
-      const fareIssued = row.count * numeric(row.buying_price);
+      const fareSold = numeric(row.selling_price);
+      const fareIssued = numeric(row.buying_price);
       return makeBookingPayload({
         ...formValues,
         passenger_name: row.passenger_name,
         pax_type: row.type,
-        pax_count: row.count,
+        pax_count: 1,
         buying_price_per_pax: numeric(row.buying_price),
         selling_price_per_pax: numeric(row.selling_price),
         bill_to_type: formValues.bill_to_name === '__CUSTOM__' ? 'CUSTOMER' : 'AGENT',
@@ -1096,7 +1104,7 @@ export default function Bookings() {
         booked_by: formValues.booked_by || selectedBillTo,
         airline,
         pnr,
-        ticket_no: flightNumber,
+        ticket_no: row.ticket_no.trim(),
         sector,
         outbound_date: formValues.onward_date || primaryConnection.departure_date,
         inbound_date: formValues.trip_type === 'ONE_WAY' ? '' : formValues.return_date,
@@ -1119,7 +1127,7 @@ export default function Bookings() {
     }
 
     if (!selectedPaxRows.length) {
-      alert('Enter at least one passenger count.');
+      alert('Enter at least one passenger.');
       return;
     }
 
@@ -1501,22 +1509,19 @@ export default function Bookings() {
           <div className="pricing-row pricing-head">
             <span>Type</span>
             <span>Passenger Name *</span>
-            <span>Count</span>
+            <span>Ticket Number</span>
             <span>Buying / Pax *</span>
             <span>Selling / Pax *</span>
-            <span>Total</span>
           </div>
-          {PAX_TYPES.filter(([type]) => type === 'ADT' || Number(formValues.passengers[type] || 0) > 0).map(([type, label]) => {
-            const count = Number(formValues.passengers[type] || 0);
-            const pricing = formValues.pricing[type];
+          {(formValues.pricing_rows || []).map((row) => {
+            const label = PAX_LABELS[row.pax_type] || row.pax_type;
             return (
-              <div className={`pricing-row ${count === 0 ? 'disabled' : ''}`} key={type}>
+              <div className="pricing-row" key={row.id}>
                 <strong>{label}</strong>
-                <input value={pricing.passenger_name} disabled={count === 0} onChange={(event) => updatePricing(type, 'passenger_name', event.target.value)} />
-                <input type="number" min="0" value={count} onChange={(event) => updatePassengerCount(type, event.target.value)} />
-                <input type="number" min="0" value={pricing.buying_price} disabled={count === 0} onChange={(event) => updatePricing(type, 'buying_price', event.target.value)} />
-                <input type="number" min="0" value={pricing.selling_price} disabled={count === 0} onChange={(event) => updatePricing(type, 'selling_price', event.target.value)} />
-                <span>EUR {(count * numeric(pricing.selling_price)).toLocaleString()}</span>
+                <input value={row.passenger_name} onChange={(event) => updatePricingRow(row.id, 'passenger_name', event.target.value)} />
+                <input value={row.ticket_no} onChange={(event) => updatePricingRow(row.id, 'ticket_no', event.target.value)} />
+                <input type="number" min="0" value={row.buying_price} onChange={(event) => updatePricingRow(row.id, 'buying_price', event.target.value)} />
+                <input type="number" min="0" value={row.selling_price} onChange={(event) => updatePricingRow(row.id, 'selling_price', event.target.value)} />
               </div>
             );
           })}
