@@ -1,4 +1,5 @@
-import { Navigate, Route, Routes, NavLink, useLocation } from 'react-router-dom';
+import { useState } from 'react';
+import { Navigate, Route, Routes, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { Bell, CreditCard, FileText, LayoutDashboard, LogOut, Plane, Receipt, RefreshCcw, Search, Settings, ShieldCheck, UserCog } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Bookings from './pages/Bookings';
@@ -31,6 +32,8 @@ export default function App() {
 
 function AuthenticatedApp() {
   const { user, loading, logout } = useAuth();
+  const navigate = useNavigate();
+  const [globalSearch, setGlobalSearch] = useState('');
 
   if (loading) {
     return <div className="auth-screen"><div className="auth-card"><h1>Loading workspace</h1><p>Checking your secure session.</p></div></div>;
@@ -50,6 +53,12 @@ function AuthenticatedApp() {
     { path: '/users', label: 'Users', icon: UserCog, permission: 'manage_users' },
     { path: '/settings', label: 'Settings', icon: Settings, permission: 'configure_settings' },
   ].filter((item) => !item.permission || hasPermission(user, item.permission));
+
+  const submitGlobalSearch = (event) => {
+    event.preventDefault();
+    const query = globalSearch.trim();
+    navigate(query ? `/bookings?search=${encodeURIComponent(query)}` : '/bookings');
+  };
 
   return (
     <div className="app-container">
@@ -86,10 +95,15 @@ function AuthenticatedApp() {
       {/* Main Content Area */}
       <main className="main-content">
         <header className="top-header">
-          <div className="search-bar">
+          <form className="search-bar" onSubmit={submitGlobalSearch}>
             <Search size={18} />
-            <input type="text" placeholder="Search PNR, Passenger, or Ticket..." />
-          </div>
+            <input
+              type="text"
+              placeholder="Search PNR, Passenger, or Ticket..."
+              value={globalSearch}
+              onChange={(event) => setGlobalSearch(event.target.value)}
+            />
+          </form>
           <div className="top-header-status">
             <ShieldCheck size={16} />
             Secure session
@@ -106,14 +120,14 @@ function AuthenticatedApp() {
         <div className="page-content">
           <Routes>
             <Route path="/" element={<Dashboard />} />
-            <Route path="/bookings" element={<Bookings />} />
-            <Route path="/payments" element={<Payments />} />
-            <Route path="/refunds" element={<Refunds />} />
-            <Route path="/expenses" element={<Expenses />} />
-            <Route path="/alerts" element={<Alerts />} />
-            <Route path="/statements" element={<Statements />} />
+            <Route path="/bookings" element={<PermissionGate permission="view_bookings"><Bookings /></PermissionGate>} />
+            <Route path="/payments" element={<PermissionGate permission="view_payments"><Payments /></PermissionGate>} />
+            <Route path="/refunds" element={<PermissionGate permission="view_refunds"><Refunds /></PermissionGate>} />
+            <Route path="/expenses" element={<PermissionGate permission="view_financials"><Expenses /></PermissionGate>} />
+            <Route path="/alerts" element={<PermissionGate permission="view_bookings"><Alerts /></PermissionGate>} />
+            <Route path="/statements" element={<PermissionGate permission="view_statements"><Statements /></PermissionGate>} />
             <Route path="/users" element={<PermissionGate permission="manage_users"><Users /></PermissionGate>} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings" element={<PermissionGate permission="configure_settings"><SettingsPage /></PermissionGate>} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>

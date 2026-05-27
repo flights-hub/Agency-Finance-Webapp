@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
-import { getBookings, getPayments, getUsers, saveBooking, savePayment } from '../helpers/storage';
+import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { getBookings, getPayments, saveBooking, savePayment } from '../helpers/storage';
 import {
   PAYMENT_MODES,
   createPaymentEntry,
@@ -10,6 +11,8 @@ import {
 } from '../helpers/calculations';
 import { extractTextFromPDF } from '../helpers/pdfParser';
 import { api } from '../helpers/api';
+import { useAuth } from '../AuthContext';
+import { canCreateBookings, canExport, filterBookingsForUser, filterRecordsForUser } from '../helpers/access';
 import { AIRLINES } from '../data/airlines';
 import { AIRPORTS } from '../data/airports';
 import { ArrowUpDown, Download, FileText, Plus, Search, SlidersHorizontal, UploadCloud } from 'lucide-react';
@@ -762,12 +765,17 @@ function makeBookingPayload(formValues, index) {
 }
 
 export default function Bookings() {
+  const { user } = useAuth();
+  const [searchParams] = useSearchParams();
+  const allowBookingEntry = canCreateBookings(user);
+  const allowExport = canExport(user);
   const [activeTab, setActiveTab] = useState('LIST');
   const [bookings, setBookings] = useState(() => getBookings());
   const [payments, setPayments] = useState(() => getPayments());
-  const [users] = useState(() => getUsers());
+  const [registeredUsers, setRegisteredUsers] = useState([]);
+  const [usersNotice, setUsersNotice] = useState('');
   const [formValues, setFormValues] = useState(EMPTY_FORM);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(() => searchParams.get('search') || '');
   const [airlineFilter, setAirlineFilter] = useState('');
   const [paymentFilter, setPaymentFilter] = useState('');
   const [alertFilter, setAlertFilter] = useState('');
@@ -784,9 +792,43 @@ export default function Bookings() {
   const [crypticMeta, setCrypticMeta] = useState(null);
   const [crypticDrafts, setCrypticDrafts] = useState([]);
 
+  useEffect(() => {
+    const query = searchParams.get('search');
+    if (query !== null) {
+      setSearch(query);
+      setActiveTab('LIST');
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!allowBookingEntry) return;
+
+    let isMounted = true;
+    setUsersNotice('');
+    api.listUsers()
+      .then((data) => {
+        if (!isMounted) return;
+        setRegisteredUsers(data.users || []);
+      })
+      .catch((error) => {
+        if (!isMounted) return;
+        setRegisteredUsers([]);
+        setUsersNotice(`Registered agents and suppliers could not be loaded: ${error.message}`);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [allowBookingEntry]);
+
+  const scopedBookings = useMemo(() => filterBookingsForUser(user, bookings), [bookings, user]);
+  const scopedPayments = useMemo(
+    () => filterRecordsForUser(user, payments, 'payments', { bookings: scopedBookings }),
+    [payments, scopedBookings, user],
+  );
   const normalizedBookings = useMemo(
-    () => getBookingLedger(bookings, payments),
-    [bookings, payments],
+    () => getBookingLedger(scopedBookings, scopedPayments),
+    [scopedBookings, scopedPayments],
   );
 
   const activeColumns = useMemo(
@@ -801,27 +843,30 @@ export default function Bookings() {
   }), [normalizedBookings]);
 
   const agentOptions = useMemo(
-    () => users.filter((user) => user.role === 'AGENT').map((user) => user.name).filter(Boolean),
-    [users],
+    () => registeredUsers
+      .filter((item) => item.role === 'AGENT' && item.status !== 'SUSPENDED')
+      .map((item) => item.name || item.email)
+      .filter(Boolean),
+    [registeredUsers],
   );
 
-  const supplierOptions = useMemo(() => {
-    const userSuppliers = users.filter((user) => user.role === 'SUPPLIER').map((user) => user.name).filter(Boolean);
-    const bookingSuppliers = bookings.flatMap((booking) => [
-      booking.supplier_name,
-      booking.supplier,
-      booking.airline,
-      ...(booking.supplier_segments || []).map((segment) => segment.supplier_name),
-    ]).filter(Boolean);
-    return [...new Set([...userSuppliers, ...bookingSuppliers])];
-  }, [bookings, users]);
+  const supplierOptions = useMemo(
+    () => registeredUsers
+      .filter((item) => item.role === 'SUPPLIER' && item.status !== 'SUSPENDED')
+      .map((item) => item.name || item.email)
+      .filter(Boolean),
+    [registeredUsers],
+  );
 
   const employeeOptions = useMemo(() => {
-    const staffRoles = new Set(['ADMIN', 'EMPLOYEE', 'FINANCE_MANAGER']);
-    const userEmployees = users.filter((user) => staffRoles.has(user.role)).map((user) => user.name).filter(Boolean);
+    const staffRoles = new Set(['ADMIN', 'EMPLOYEE']);
+    const userEmployees = registeredUsers
+      .filter((item) => staffRoles.has(item.role) && item.status !== 'SUSPENDED')
+      .map((item) => item.name || item.email)
+      .filter(Boolean);
     const bookingEmployees = bookings.flatMap((booking) => [booking.booked_by, booking.agent_issued_by]).filter(Boolean);
     return [...new Set([...userEmployees, ...bookingEmployees])];
-  }, [bookings, users]);
+  }, [bookings, registeredUsers]);
 
   const filteredBookings = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -1187,6 +1232,7 @@ export default function Bookings() {
   };
 
   const switchBookingTab = (tab) => {
+    if (tab !== 'LIST' && !allowBookingEntry) return;
     setActiveTab(tab);
     setCrypticError('');
     setCrypticWarnings([]);
@@ -1224,6 +1270,7 @@ export default function Bookings() {
   };
 
   const exportCSV = () => {
+    if (!allowExport) return;
     const header = [...activeColumns.map((column) => column.label), 'PNR_N'];
     const rows = filteredBookings.map((booking) => [
       ...activeColumns.map((column) => formatCell(booking, column.key)),
@@ -1242,6 +1289,7 @@ export default function Bookings() {
   };
 
   const handlePdfUpload = async (event) => {
+    if (!allowBookingEntry) return;
     const file = event.target.files[0];
     if (!file) return;
 
@@ -1332,6 +1380,7 @@ export default function Bookings() {
   ].filter(Boolean);
 
   const saveCrypticDrafts = () => {
+    if (!allowBookingEntry) return;
     const invalidRows = crypticDrafts
       .map((draft, index) => ({ index, missing: draftMissingFields(draft) }))
       .filter((row) => row.missing.length);
@@ -1423,10 +1472,6 @@ export default function Bookings() {
 
   const renderBookingForm = () => (
     <div className="manual-booking-stack">
-      <datalist id="supplier-options">
-        {supplierOptions.map((supplier) => <option key={supplier} value={supplier} />)}
-      </datalist>
-
       <div className="card manual-section-card">
         <div className="manual-section-head">
           <div>
@@ -1434,6 +1479,7 @@ export default function Bookings() {
             <p>Billing, route, pricing, supplier, flight, and payment details.</p>
           </div>
         </div>
+        {usersNotice && <div className="notice">{usersNotice}</div>}
         <div className="manual-grid">
           <label>
             <span>Bill To *</span>
@@ -1545,7 +1591,10 @@ export default function Bookings() {
           <div className="manual-grid">
             <label>
               <span>Supplier *</span>
-              <input list="supplier-options" value={formValues.supplier_name} onChange={(event) => updateForm('supplier_name', event.target.value)} />
+              <select value={formValues.supplier_name} onChange={(event) => updateForm('supplier_name', event.target.value)}>
+                <option value="">Select supplier</option>
+                {supplierOptions.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
+              </select>
             </label>
             <label>
               <span>PNR *</span>
@@ -1559,7 +1608,10 @@ export default function Bookings() {
                 <strong>{segment.label}</strong>
                 <label>
                   <span>Supplier *</span>
-                  <input list="supplier-options" value={segment.supplier_name} onChange={(event) => updateSupplierSegment(index, 'supplier_name', event.target.value)} />
+                  <select value={segment.supplier_name} onChange={(event) => updateSupplierSegment(index, 'supplier_name', event.target.value)}>
+                    <option value="">Select supplier</option>
+                    {supplierOptions.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
+                  </select>
                 </label>
                 <label>
                   <span>PNR *</span>
@@ -1715,15 +1767,19 @@ export default function Bookings() {
           <p>Canonical booking ledger with manual fields, auto calculations, PDF extraction, and cryptic entry.</p>
         </div>
         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-          <button className={`btn ${activeTab === 'ADD' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('ADD')}>
-            <Plus size={16} /> Manual
-          </button>
-          <button className={`btn ${activeTab === 'CRYPTIC' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('CRYPTIC')}>
-            <FileText size={16} /> Cryptic
-          </button>
-          <button className={`btn ${activeTab === 'UPLOAD' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('UPLOAD')}>
-            <UploadCloud size={16} /> Upload PDF
-          </button>
+          {allowBookingEntry && (
+            <>
+              <button className={`btn ${activeTab === 'ADD' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('ADD')}>
+                <Plus size={16} /> Manual
+              </button>
+              <button className={`btn ${activeTab === 'CRYPTIC' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('CRYPTIC')}>
+                <FileText size={16} /> Cryptic
+              </button>
+              <button className={`btn ${activeTab === 'UPLOAD' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('UPLOAD')}>
+                <UploadCloud size={16} /> Upload PDF
+              </button>
+            </>
+          )}
           <button className={`btn ${activeTab === 'LIST' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('LIST')}>
             List
           </button>
@@ -1780,10 +1836,12 @@ export default function Bookings() {
                   <SlidersHorizontal size={15} />
                   Columns
                 </button>
-                <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
-                  <Download size={15} />
-                  Export
-                </button>
+                {allowExport && (
+                  <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
+                    <Download size={15} />
+                    Export
+                  </button>
+                )}
               </div>
             </div>
 

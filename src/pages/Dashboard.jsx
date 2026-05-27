@@ -1,6 +1,8 @@
 import { Link } from 'react-router-dom';
 import { getBookings, getPayments, getRefunds, getExpenses } from '../helpers/storage';
 import { generateAlerts, getBookingLedger, getPnlAnalytics, getRefundLedger } from '../helpers/calculations';
+import { useAuth } from '../AuthContext';
+import { canCreateBookings, canRecordPayments, scopedFinanceData } from '../helpers/access';
 import { AlertCircle, ArrowRight, CreditCard, Euro, Plane, RefreshCcw, TrendingUp, Users } from 'lucide-react';
 
 const money = new Intl.NumberFormat('en-IE', {
@@ -9,11 +11,13 @@ const money = new Intl.NumberFormat('en-IE', {
   maximumFractionDigits: 0,
 });
 
-function getDashboardSummary() {
-  const bookings = getBookings();
-  const payments = getPayments();
-  const refunds = getRefunds();
-  const expenses = getExpenses();
+function getDashboardSummary(user) {
+  const { bookings, payments, refunds, expenses } = scopedFinanceData(user, {
+    bookings: getBookings(),
+    payments: getPayments(),
+    refunds: getRefunds(),
+    expenses: getExpenses(),
+  });
   const refundLedger = getRefundLedger(bookings, refunds);
   const pendingRefunds = refundLedger.filter((refund) => (
     refund.refund_status !== 'REFUNDED_TO_CLIENT' && refund.refund_status !== 'REJECTED'
@@ -40,8 +44,11 @@ function getDashboardSummary() {
 }
 
 export default function Dashboard() {
-  const summary = getDashboardSummary();
+  const { user } = useAuth();
+  const summary = getDashboardSummary(user);
   const { bookings, pnl, alerts, refundStats } = summary;
+  const allowRecordPayment = canRecordPayments(user);
+  const allowBookingEntry = canCreateBookings(user);
   const outstanding = pnl.outstanding;
   const paidBookings = pnl.paidPnrs;
   const recentBookings = [...bookings].slice(-4).reverse();
@@ -89,14 +96,18 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="hero-actions">
-          <Link className="btn btn-secondary" to="/payments">
-            <CreditCard size={16} />
-            Record payment
-          </Link>
-          <Link className="btn btn-primary" to="/bookings">
-            <Plane size={16} />
-            New booking
-          </Link>
+          {allowRecordPayment && (
+            <Link className="btn btn-secondary" to="/payments">
+              <CreditCard size={16} />
+              Record payment
+            </Link>
+          )}
+          {allowBookingEntry && (
+            <Link className="btn btn-primary" to="/bookings">
+              <Plane size={16} />
+              New booking
+            </Link>
+          )}
         </div>
       </section>
 

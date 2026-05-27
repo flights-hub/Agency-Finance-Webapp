@@ -1,11 +1,23 @@
 import { useMemo, useState } from 'react';
 import { getPayments, getBookings, savePayment } from '../helpers/storage';
-import { createPaymentEntry, getBookingLedger, getPaymentLedger, PAYMENT_MODES } from '../helpers/calculations';
+import {
+  createPaymentEntry,
+  createSupplierPaymentEntry,
+  getBookingLedger,
+  getPaymentLedger,
+  getSupplierPaymentLedger,
+  PAYMENT_MODES,
+  supplierNamesForBooking,
+} from '../helpers/calculations';
+import { useAuth } from '../AuthContext';
+import { canExport, canRecordPayments, filterBookingsForUser, filterRecordsForUser } from '../helpers/access';
 import { ArrowUpDown, Download, Plus, Search, SlidersHorizontal } from 'lucide-react';
 
 const PAYMENT_COLUMNS = [
   ['sl', 'SL'],
   ['payment_date', 'Payment Date'],
+  ['payment_direction', 'Direction'],
+  ['supplier_name', 'Supplier'],
   ['pnr', 'PNR'],
   ['passenger_name', 'Passenger Name'],
   ['amount_paid', 'Amount Paid'],
@@ -25,6 +37,9 @@ function money(value) {
 }
 
 export default function Payments() {
+  const { user } = useAuth();
+  const allowRecordPayment = canRecordPayments(user);
+  const allowExport = canExport(user);
   const [payments, setPayments] = useState(() => getPayments());
   const [bookings] = useState(() => getBookings());
   const [showModal, setShowModal] = useState(false);
@@ -35,17 +50,31 @@ export default function Payments() {
   const [sortKey, setSortKey] = useState('payment_date');
   const [sortDir, setSortDir] = useState('asc');
   const [form, setForm] = useState({
+    payment_direction: 'AGENT_IN',
     payment_date: new Date().toISOString().split('T')[0],
     pnr: '',
+    supplier_name: '',
     amount_paid: '',
     payment_mode: 'BANK_TRANSFER',
     receipt_ref: '',
     remarks: '',
   });
 
-  const bookingLedger = useMemo(() => getBookingLedger(bookings, payments), [bookings, payments]);
-  const paymentLedger = useMemo(() => getPaymentLedger(bookings, payments), [bookings, payments]);
+  const scopedBookings = useMemo(() => filterBookingsForUser(user, bookings), [bookings, user]);
+  const scopedPayments = useMemo(
+    () => filterRecordsForUser(user, payments, 'payments', { bookings: scopedBookings }),
+    [payments, scopedBookings, user],
+  );
+  const bookingLedger = useMemo(() => getBookingLedger(scopedBookings, scopedPayments), [scopedBookings, scopedPayments]);
+  const agentPaymentLedger = useMemo(() => getPaymentLedger(scopedBookings, scopedPayments), [scopedBookings, scopedPayments]);
+  const supplierPaymentLedger = useMemo(() => getSupplierPaymentLedger(scopedBookings, scopedPayments), [scopedBookings, scopedPayments]);
+  const paymentLedger = useMemo(() => (
+    user?.role === 'SUPPLIER' ? supplierPaymentLedger : [...agentPaymentLedger, ...supplierPaymentLedger]
+  ), [agentPaymentLedger, supplierPaymentLedger, user?.role]);
   const pnrOptions = bookingLedger.filter((booking) => booking.pnr_n === 1);
+  const supplierOptions = useMemo(() => (
+    [...new Set(scopedBookings.flatMap((booking) => supplierNamesForBooking(booking)).filter(Boolean))]
+  ), [scopedBookings]);
   const activeColumns = useMemo(
     () => PAYMENT_COLUMNS.filter(([key]) => visibleColumns.has(key)),
     [visibleColumns],
@@ -71,11 +100,11 @@ export default function Payments() {
   const selectedPreview = useMemo(() => {
     const nextPayment = createPaymentEntry(
       { ...form, amount_paid: Number(form.amount_paid || 0), received_by: 'Finance Desk' },
-      bookings,
-      payments,
+      scopedBookings,
+      scopedPayments,
     );
     return nextPayment;
-  }, [bookings, form, payments]);
+  }, [form, scopedBookings, scopedPayments]);
 
   const updateForm = (key, value) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -100,6 +129,7 @@ export default function Payments() {
   };
 
   const exportCSV = () => {
+    if (!allowExport) return;
     const header = activeColumns.map(([, label]) => label);
     const rows = filteredPayments.map((payment) => activeColumns.map(([key]) => (
       ['amount_paid', 'cumulative_paid', 'total_fare', 'remaining_balance'].includes(key)
@@ -116,17 +146,32 @@ export default function Payments() {
   };
 
   const handleSavePayment = () => {
+    if (!allowRecordPayment) return;
     const amount = Number(form.amount_paid);
-    if (!form.pnr || !amount || amount <= 0) {
-      alert('Select a PNR and enter a positive payment amount.');
+    if (!amount || amount <= 0) {
+      alert('Enter a positive payment amount.');
       return;
     }
 
-    savePayment(createPaymentEntry({ ...form, amount_paid: amount, received_by: 'Finance Desk' }, bookings, payments));
+    if (form.payment_direction === 'SUPPLIER_OUT') {
+      if (!form.supplier_name) {
+        alert('Select a supplier.');
+        return;
+      }
+      savePayment(createSupplierPaymentEntry({ ...form, amount_paid: amount, received_by: 'Finance Desk' }));
+    } else {
+      if (!form.pnr) {
+        alert('Select a PNR.');
+        return;
+      }
+      savePayment(createPaymentEntry({ ...form, amount_paid: amount, received_by: 'Finance Desk' }, bookings, payments));
+    }
     setPayments(getPayments());
     setForm({
+      payment_direction: 'AGENT_IN',
       payment_date: new Date().toISOString().split('T')[0],
       pnr: '',
+      supplier_name: '',
       amount_paid: '',
       payment_mode: 'BANK_TRANSFER',
       receipt_ref: '',
@@ -142,9 +187,11 @@ export default function Payments() {
           <h1>Payments</h1>
           <p>Positive-only payment ledger with running balance and automatic instalment sequencing.</p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowModal(true)}>
-          <Plus size={16} /> Record Payment
-        </button>
+        {allowRecordPayment && (
+          <button className="btn btn-primary" onClick={() => setShowModal(true)}>
+            <Plus size={16} /> Record Payment
+          </button>
+        )}
       </header>
 
       <div className="card booking-controls">
@@ -176,9 +223,11 @@ export default function Payments() {
             <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowColumns((value) => !value)}>
               <SlidersHorizontal size={15} /> Columns
             </button>
-            <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
-              <Download size={15} /> Export
-            </button>
+            {allowExport && (
+              <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
+                <Download size={15} /> Export
+              </button>
+            )}
           </div>
         </div>
         {showColumns && (
@@ -237,20 +286,37 @@ export default function Payments() {
             <h3>Record Payment</h3>
             <div className="modal-form-grid">
               <label>
+                <span>Payment Type</span>
+                <select value={form.payment_direction} onChange={(event) => updateForm('payment_direction', event.target.value)}>
+                  <option value="AGENT_IN">Agent payment to Admin</option>
+                  <option value="SUPPLIER_OUT">Admin payment to Supplier</option>
+                </select>
+              </label>
+              <label>
                 <span>Payment Date</span>
                 <input type="date" value={form.payment_date} onChange={(event) => updateForm('payment_date', event.target.value)} />
               </label>
-              <label>
-                <span>PNR</span>
-                <select value={form.pnr} onChange={(event) => updateForm('pnr', event.target.value)}>
-                  <option value="">Select PNR</option>
-                  {pnrOptions.map((booking) => (
-                    <option key={booking.id} value={booking.pnr}>
-                      {booking.pnr} - {booking.passenger_name} (Due: {money(booking.balance_due)})
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {form.payment_direction === 'SUPPLIER_OUT' ? (
+                <label>
+                  <span>Supplier</span>
+                  <select value={form.supplier_name} onChange={(event) => updateForm('supplier_name', event.target.value)}>
+                    <option value="">Select supplier</option>
+                    {supplierOptions.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
+                  </select>
+                </label>
+              ) : (
+                <label>
+                  <span>PNR</span>
+                  <select value={form.pnr} onChange={(event) => updateForm('pnr', event.target.value)}>
+                    <option value="">Select PNR</option>
+                    {pnrOptions.map((booking) => (
+                      <option key={booking.id} value={booking.pnr}>
+                        {booking.pnr} - {booking.passenger_name} (Due: {money(booking.balance_due)})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <label>
                 <span>Amount Paid</span>
                 <input type="number" value={form.amount_paid} onChange={(event) => updateForm('amount_paid', event.target.value)} min="0" />

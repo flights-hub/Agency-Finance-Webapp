@@ -1,6 +1,9 @@
 import { useMemo, useState } from 'react';
 import { getExpenses, saveExpense } from '../helpers/storage';
 import { BRANCH_OFFICES, EXPENSE_CATEGORIES, getExpenseLedger, monthLabel, PAYMENT_MODES } from '../helpers/calculations';
+import { useAuth } from '../AuthContext';
+import { canExport } from '../helpers/access';
+import { hasPermission } from '../helpers/permissions';
 import { ArrowUpDown, Download, Plus, Search, SlidersHorizontal } from 'lucide-react';
 
 const EXPENSE_COLUMNS = [
@@ -23,6 +26,9 @@ function money(value) {
 }
 
 export default function Expenses() {
+  const { user } = useAuth();
+  const allowEditExpenses = user?.role === 'ADMIN' || hasPermission(user, 'edit_financials');
+  const allowExport = canExport(user);
   const [expenses, setExpenses] = useState(() => getExpenses());
   const [showModal, setShowModal] = useState(false);
   const [search, setSearch] = useState('');
@@ -100,6 +106,7 @@ export default function Expenses() {
   };
 
   const exportCSV = () => {
+    if (!allowExport) return;
     const header = activeColumns.map(([, label]) => label);
     const rows = filteredExpenses.map((expense) => activeColumns.map(([key]) => renderValue(expense, key)));
     const csv = [header, ...rows].map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
@@ -112,6 +119,7 @@ export default function Expenses() {
   };
 
   const handleSave = () => {
+    if (!allowEditExpenses) return;
     if (!form.description || !form.amount_eur) {
       alert('Description and amount are required.');
       return;
@@ -146,9 +154,11 @@ export default function Expenses() {
           <h1>Expenses</h1>
           <p>Storefront-style expense tracker with branch, recurring, month, and EUR rollups.</p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowModal(true)}>
-          <Plus size={16} /> Add Expense
-        </button>
+        {allowEditExpenses && (
+          <button className="btn btn-primary" onClick={() => setShowModal(true)}>
+            <Plus size={16} /> Add Expense
+          </button>
+        )}
       </header>
 
       <div className="grid-3" style={{ marginBottom: 16 }}>
@@ -191,9 +201,11 @@ export default function Expenses() {
             <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowColumns((value) => !value)}>
               <SlidersHorizontal size={15} /> Columns
             </button>
-            <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
-              <Download size={15} /> Export
-            </button>
+            {allowExport && (
+              <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
+                <Download size={15} /> Export
+              </button>
+            )}
           </div>
         </div>
         {showColumns && (

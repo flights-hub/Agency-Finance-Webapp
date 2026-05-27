@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { getRefunds, getBookings, saveRefund, saveBooking } from '../helpers/storage';
 import { getEligibleRefund, getRefundLedger, REFUND_CATEGORIES, REFUND_STATUSES, PAYMENT_MODES } from '../helpers/calculations';
+import { useAuth } from '../AuthContext';
+import { canExport, canProcessRefunds, filterBookingsForUser, filterRecordsForUser } from '../helpers/access';
 import { ArrowUpDown, Download, Plus, Search, SlidersHorizontal } from 'lucide-react';
 
 const REFUND_COLUMNS = [
@@ -31,6 +33,9 @@ function money(value) {
 }
 
 export default function Refunds() {
+  const { user } = useAuth();
+  const allowProcessRefund = canProcessRefunds(user);
+  const allowExport = canExport(user);
   const [refunds, setRefunds] = useState(() => getRefunds());
   const [bookings, setBookings] = useState(() => getBookings());
   const [showModal, setShowModal] = useState(false);
@@ -54,7 +59,12 @@ export default function Refunds() {
     remarks: '',
   });
 
-  const refundLedger = useMemo(() => getRefundLedger(bookings, refunds), [bookings, refunds]);
+  const scopedBookings = useMemo(() => filterBookingsForUser(user, bookings), [bookings, user]);
+  const scopedRefunds = useMemo(
+    () => filterRecordsForUser(user, refunds, 'refunds', { bookings: scopedBookings }),
+    [refunds, scopedBookings, user],
+  );
+  const refundLedger = useMemo(() => getRefundLedger(scopedBookings, scopedRefunds), [scopedBookings, scopedRefunds]);
   const activeColumns = useMemo(
     () => REFUND_COLUMNS.filter(([key]) => visibleColumns.has(key)),
     [visibleColumns],
@@ -78,7 +88,7 @@ export default function Refunds() {
         return sortDir === 'asc' ? result : -result;
       });
   }, [categoryFilter, refundLedger, search, sortDir, sortKey, statusFilter]);
-  const selectedBooking = bookings.find((booking) => booking.ticket_no === form.ticket_no);
+  const selectedBooking = scopedBookings.find((booking) => booking.ticket_no === form.ticket_no);
   const eligiblePreview = getEligibleRefund(
     Number(selectedBooking?.fare_sold || 0),
     Number(form.airline_penalty || 0),
@@ -113,6 +123,7 @@ export default function Refunds() {
   };
 
   const exportCSV = () => {
+    if (!allowExport) return;
     const header = activeColumns.map(([, label]) => label);
     const rows = filteredRefunds.map((refund) => activeColumns.map(([key]) => (
       ['fare_sold', 'fare_issued', 'airline_penalty', 'service_fee', 'eligible_refund', 'supplier_refund'].includes(key)
@@ -129,6 +140,7 @@ export default function Refunds() {
   };
 
   const handleCreateRefund = () => {
+    if (!allowProcessRefund) return;
     if (!selectedBooking) {
       alert('Select a ticket number from bookings.');
       return;
@@ -178,9 +190,11 @@ export default function Refunds() {
           <h1>Refunds</h1>
           <p>Ticket-keyed refund tracker with lookup, penalties, supplier refund, and lifecycle status.</p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowModal(true)}>
-          <Plus size={16} /> New Refund
-        </button>
+        {allowProcessRefund && (
+          <button className="btn btn-primary" onClick={() => setShowModal(true)}>
+            <Plus size={16} /> New Refund
+          </button>
+        )}
       </header>
 
       <div className="card booking-controls">
@@ -217,9 +231,11 @@ export default function Refunds() {
             <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowColumns((value) => !value)}>
               <SlidersHorizontal size={15} /> Columns
             </button>
-            <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
-              <Download size={15} /> Export
-            </button>
+            {allowExport && (
+              <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
+                <Download size={15} /> Export
+              </button>
+            )}
           </div>
         </div>
         {showColumns && (
@@ -275,7 +291,7 @@ export default function Refunds() {
                 <span>Ticket Number</span>
                 <select value={form.ticket_no} onChange={(event) => updateForm('ticket_no', event.target.value)}>
                   <option value="">Select ticket</option>
-                  {bookings.map((booking) => (
+                  {scopedBookings.map((booking) => (
                     <option key={booking.id} value={booking.ticket_no}>
                       {booking.ticket_no} - {booking.passenger_name} ({booking.pnr})
                     </option>

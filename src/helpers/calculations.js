@@ -143,13 +143,14 @@ export function getBookingLedger(bookings = [], payments = []) {
   const pnrTotals = new Map();
   const pnrPayments = new Map();
   const today = new Date().toISOString().split('T')[0];
+  const agentPayments = payments.filter((payment) => payment.payment_direction !== 'SUPPLIER_OUT');
 
   bookings.forEach((booking) => {
     const pnr = normalizePnr(booking.pnr);
     pnrTotals.set(pnr, (pnrTotals.get(pnr) || 0) + numeric(booking.fare_sold));
   });
 
-  payments.forEach((payment) => {
+  agentPayments.forEach((payment) => {
     const pnr = normalizePnr(payment.pnr);
     pnrPayments.set(pnr, (pnrPayments.get(pnr) || 0) + numeric(payment.amount_paid));
   });
@@ -179,7 +180,7 @@ export function getBookingLedger(bookings = [], payments = []) {
       total_paid: pnr_n === 1 ? totalPaid : null,
       balance_due: pnr_n === 1 ? balanceDue : null,
       payment_status: pnr_n === 1 ? getPaymentStatus(totalFare, totalPaid) : '',
-      num_instalments: pnr_n === 1 ? payments.filter((payment) => normalizePnr(payment.pnr) === pnr).length : null,
+      num_instalments: pnr_n === 1 ? agentPayments.filter((payment) => normalizePnr(payment.pnr) === pnr).length : null,
       ticket_status: booking.ticket_status || (booking.ticket_no ? 'TICKETED' : 'PENDING'),
       days_to_departure: daysToDeparture,
       alert: pnr_n === 1 ? alert : '',
@@ -193,6 +194,7 @@ export function getPaymentLedger(bookings = [], payments = []) {
   const fareByPnr = new Map();
   const firstPassengerByPnr = new Map();
   const runningByPnr = new Map();
+  const agentPayments = payments.filter((payment) => payment.payment_direction !== 'SUPPLIER_OUT');
 
   bookings.forEach((booking) => {
     const pnr = normalizePnr(booking.pnr);
@@ -200,7 +202,7 @@ export function getPaymentLedger(bookings = [], payments = []) {
     if (!firstPassengerByPnr.has(pnr)) firstPassengerByPnr.set(pnr, booking.passenger_name);
   });
 
-  return [...payments]
+  return [...agentPayments]
     .sort((a, b) => String(a.payment_date || '').localeCompare(String(b.payment_date || '')))
     .map((payment, index) => {
       const pnr = normalizePnr(payment.pnr);
@@ -209,10 +211,11 @@ export function getPaymentLedger(bookings = [], payments = []) {
       runningByPnr.set(pnr, cumulativePaid);
       const totalFare = fareByPnr.get(pnr) || numeric(payment.total_fare);
       const remainingBalance = Math.max(0, totalFare - cumulativePaid);
-      const instalmentNo = [...payments.slice(0, index + 1)].filter((item) => normalizePnr(item.pnr) === pnr).length;
+      const instalmentNo = [...agentPayments.slice(0, index + 1)].filter((item) => normalizePnr(item.pnr) === pnr).length;
 
       return {
         ...payment,
+        payment_direction: payment.payment_direction || 'AGENT_IN',
         sl: index + 1,
         pnr,
         passenger_name: payment.passenger_name || firstPassengerByPnr.get(pnr) || '',
@@ -231,16 +234,18 @@ export function createPaymentEntry({ payment_date, pnr, amount_paid, payment_mod
   const normalizedPnr = normalizePnr(pnr);
   const relatedBookings = bookings.filter((booking) => normalizePnr(booking.pnr) === normalizedPnr);
   const totalFare = relatedBookings.reduce((sum, booking) => sum + numeric(booking.fare_sold), 0);
-  const existingPaid = payments
+  const agentPayments = payments.filter((payment) => payment.payment_direction !== 'SUPPLIER_OUT');
+  const existingPaid = agentPayments
     .filter((payment) => normalizePnr(payment.pnr) === normalizedPnr)
     .reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);
   const amount = numeric(amount_paid);
-  const instalmentNo = payments.filter((payment) => normalizePnr(payment.pnr) === normalizedPnr).length + 1;
+  const instalmentNo = agentPayments.filter((payment) => normalizePnr(payment.pnr) === normalizedPnr).length + 1;
   const cumulativePaid = existingPaid + amount;
 
   return {
     payment_date,
     pnr: normalizedPnr,
+    payment_direction: 'AGENT_IN',
     passenger_name: relatedBookings[0]?.passenger_name || '',
     amount_paid: amount,
     payment_mode,
@@ -252,6 +257,70 @@ export function createPaymentEntry({ payment_date, pnr, amount_paid, payment_mod
     total_fare: totalFare,
     remaining_balance: Math.max(0, totalFare - cumulativePaid),
     pnr_n: 1,
+    remarks,
+  };
+}
+
+export function supplierNamesForBooking(booking = {}) {
+  const segmentSuppliers = (booking.supplier_segments || []).map((segment) => segment.supplier_name).filter(Boolean);
+  return [...new Set([
+    booking.supplier_name,
+    booking.supplier,
+    booking.airline,
+    ...segmentSuppliers,
+  ].filter(Boolean))];
+}
+
+export function supplierPayableForBooking(booking = {}, supplier = '') {
+  const matchingSegments = (booking.supplier_segments || []).filter((segment) => segment.supplier_name === supplier);
+  const allocated = matchingSegments.reduce((sum, segment) => sum + numeric(segment.buying_price), 0);
+  return allocated || numeric(booking.fare_issued);
+}
+
+export function getSupplierPaymentLedger(bookings = [], payments = []) {
+  return payments
+    .filter((payment) => payment.payment_direction === 'SUPPLIER_OUT')
+    .sort((a, b) => String(a.payment_date || '').localeCompare(String(b.payment_date || '')))
+    .map((payment, index) => {
+      const supplierBookings = bookings.filter((booking) => supplierNamesForBooking(booking).includes(payment.supplier_name));
+      const totalPayable = supplierBookings.reduce((sum, booking) => sum + supplierPayableForBooking(booking, payment.supplier_name), 0);
+      const previousPaid = payments
+        .filter((item) => (
+          item.payment_direction === 'SUPPLIER_OUT'
+          && item.supplier_name === payment.supplier_name
+          && String(item.payment_date || '').localeCompare(String(payment.payment_date || '')) <= 0
+        ))
+        .reduce((sum, item) => sum + numeric(item.amount_paid), 0);
+
+      return {
+        ...payment,
+        sl: index + 1,
+        supplier_name: payment.supplier_name || '',
+        passenger_name: payment.supplier_name || '',
+        pnr: payment.pnr || 'SUPPLIER',
+        amount_paid: numeric(payment.amount_paid),
+        instalment_no: payment.instalment_no || '',
+        instalment_type: 'SUPPLIER PAYMENT',
+        cumulative_paid: previousPaid,
+        total_fare: totalPayable,
+        remaining_balance: Math.max(0, totalPayable - previousPaid),
+        pnr_n: 1,
+      };
+    });
+}
+
+export function createSupplierPaymentEntry({ payment_date, supplier_name, amount_paid, payment_mode, receipt_ref, received_by, remarks }) {
+  return {
+    payment_date,
+    pnr: '',
+    supplier_name,
+    passenger_name: supplier_name,
+    amount_paid: numeric(amount_paid),
+    payment_mode,
+    receipt_ref,
+    received_by,
+    payment_direction: 'SUPPLIER_OUT',
+    instalment_type: 'SUPPLIER PAYMENT',
     remarks,
   };
 }
@@ -299,8 +368,9 @@ export function getExpenseLedger(expenses = []) {
 }
 
 export function getPnlAnalytics(bookings = [], payments = [], refunds = [], expenses = []) {
-  const bookingLedger = getBookingLedger(bookings, payments);
-  const paymentLedger = getPaymentLedger(bookings, payments);
+  const agentPayments = payments.filter((payment) => payment.payment_direction !== 'SUPPLIER_OUT');
+  const bookingLedger = getBookingLedger(bookings, agentPayments);
+  const paymentLedger = getPaymentLedger(bookings, agentPayments);
   const expenseLedger = getExpenseLedger(expenses);
   const pnl = calculatePnL(bookings, refunds, expenseLedger);
   const collections = paymentLedger.reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);

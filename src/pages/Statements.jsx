@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react';
 import { ArrowUpDown, Download, FileText, Search, SlidersHorizontal } from 'lucide-react';
 import { getBookings, getPayments, getRefunds } from '../helpers/storage';
-import { getBookingLedger, getPaymentLedger, getRefundLedger } from '../helpers/calculations';
+import { getBookingLedger, getPaymentLedger, getRefundLedger, getSupplierPaymentLedger } from '../helpers/calculations';
+import { useAuth } from '../AuthContext';
+import { canExport, filterBookingsForUser, filterRecordsForUser, getUserPartyKey } from '../helpers/access';
 
 function money(value) {
   return `EUR ${Number(value || 0).toLocaleString()}`;
@@ -40,7 +42,9 @@ function supplierPayableForBooking(booking, supplier) {
 }
 
 export default function Statements() {
-  const [statementType, setStatementType] = useState('agent');
+  const { user } = useAuth();
+  const allowExport = canExport(user);
+  const [statementType, setStatementType] = useState(user?.role === 'SUPPLIER' ? 'supplier' : 'agent');
   const [party, setParty] = useState('');
   const [statementDate, setStatementDate] = useState(new Date().toISOString().split('T')[0]);
   const [search, setSearch] = useState('');
@@ -48,27 +52,46 @@ export default function Statements() {
   const [visibleColumns, setVisibleColumns] = useState(() => new Set(STATEMENT_COLUMNS.map(([key]) => key)));
   const [sortKey, setSortKey] = useState('invoice_no');
   const [sortDir, setSortDir] = useState('asc');
-  const bookings = getBookings();
-  const payments = getPayments();
-  const refunds = getRefunds();
+  const allBookings = getBookings();
+  const allPayments = getPayments();
+  const allRefunds = getRefunds();
+  const bookings = useMemo(() => filterBookingsForUser(user, allBookings), [allBookings, user]);
+  const payments = useMemo(
+    () => filterRecordsForUser(user, allPayments, 'payments', { bookings }),
+    [allPayments, bookings, user],
+  );
+  const refunds = useMemo(
+    () => filterRecordsForUser(user, allRefunds, 'refunds', { bookings }),
+    [allRefunds, bookings, user],
+  );
 
   const bookingLedger = useMemo(() => getBookingLedger(bookings, payments), [bookings, payments]);
   const paymentLedger = useMemo(() => getPaymentLedger(bookings, payments), [bookings, payments]);
+  const supplierPaymentLedger = useMemo(() => getSupplierPaymentLedger(bookings, payments), [bookings, payments]);
   const refundLedger = useMemo(() => getRefundLedger(bookings, refunds), [bookings, refunds]);
 
   const parties = useMemo(() => {
+    if (user?.role === 'AGENT') return [user.name || user.email].filter(Boolean);
+    if (user?.role === 'SUPPLIER') return [user.name || user.email].filter(Boolean);
     if (statementType === 'agent') {
       return [...new Set(bookingLedger.map((booking) => booking.bill_to_name || booking.booked_by).filter(Boolean))];
     }
     return [...new Set(bookingLedger.flatMap((booking) => supplierNamesForBooking(booking)).filter(Boolean))];
-  }, [bookingLedger, statementType]);
+  }, [bookingLedger, statementType, user]);
 
   const selectedParty = party || parties[0] || '';
-  const statementBookings = bookingLedger.filter((booking) => (
-    statementType === 'agent'
-      ? (booking.bill_to_name || booking.booked_by) === selectedParty
-      : bookingMatchesSupplier(booking, selectedParty)
-  ));
+  const supplierForBooking = (booking) => {
+    if (user?.role !== 'SUPPLIER') return selectedParty;
+    const aliases = getUserPartyKey(user).aliases;
+    return supplierNamesForBooking(booking).find((supplier) => aliases.has(String(supplier || '').trim().toLowerCase())) || selectedParty;
+  };
+  const statementBookings = user?.role === 'ADMIN'
+    ? bookingLedger.filter((booking) => (
+      statementType === 'agent'
+        ? (booking.bill_to_name || booking.booked_by) === selectedParty
+        : bookingMatchesSupplier(booking, selectedParty)
+    ))
+    : bookingLedger;
   const activeColumns = useMemo(
     () => STATEMENT_COLUMNS.filter(([key]) => visibleColumns.has(key)),
     [visibleColumns],
@@ -89,13 +112,15 @@ export default function Statements() {
   }, [search, sortDir, sortKey, statementBookings]);
   const statementPnrs = new Set(statementBookings.map((booking) => booking.pnr));
   const statementTickets = new Set(statementBookings.map((booking) => booking.ticket_no));
-  const statementPayments = paymentLedger.filter((payment) => statementPnrs.has(payment.pnr));
+  const statementPayments = statementType === 'supplier'
+    ? supplierPaymentLedger
+    : paymentLedger.filter((payment) => statementPnrs.has(payment.pnr));
   const statementRefunds = refundLedger.filter((refund) => statementTickets.has(refund.ticket_no));
   const revenue = statementBookings.reduce((sum, booking) => sum + Number(booking.fare_sold || 0), 0);
   const payable = statementBookings.reduce((sum, booking) => (
     sum + (statementType === 'supplier'
-      ? supplierPayableForBooking(booking, selectedParty)
-      : Number(booking.fare_issued || 0))
+      ? supplierPayableForBooking(booking, supplierForBooking(booking))
+      : Number(booking.fare_sold || 0))
   ), 0);
   const collected = statementPayments.reduce((sum, payment) => sum + Number(payment.amount_paid || 0), 0);
   const outstanding = statementBookings
@@ -123,13 +148,14 @@ export default function Statements() {
   const renderValue = (booking, key) => {
     if (key === 'fare_sold') return money(booking[key]);
     if (key === 'fare_issued') {
-      return money(statementType === 'supplier' ? supplierPayableForBooking(booking, selectedParty) : booking[key]);
+      return money(statementType === 'supplier' ? supplierPayableForBooking(booking, supplierForBooking(booking)) : booking[key]);
     }
     if (key === 'balance_due') return booking.pnr_n === 1 ? money(booking.balance_due) : '-';
     return booking[key] || '-';
   };
 
   const exportCSV = () => {
+    if (!allowExport) return;
     const header = activeColumns.map(([, label]) => label);
     const rows = filteredStatementBookings.map((booking) => activeColumns.map(([key]) => renderValue(booking, key)));
     const csv = [header, ...rows].map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
@@ -152,14 +178,14 @@ export default function Statements() {
         <div className="booking-filter-grid compact">
           <label>
             <span>Statement Type</span>
-            <select value={statementType} onChange={(event) => { setStatementType(event.target.value); setParty(''); }}>
+            <select value={statementType} disabled={user?.role !== 'ADMIN'} onChange={(event) => { setStatementType(event.target.value); setParty(''); }}>
               <option value="agent">Agent Statement</option>
               <option value="supplier">Supplier Statement</option>
             </select>
           </label>
           <label>
             <span>{statementType === 'agent' ? 'Agent' : 'Supplier'}</span>
-            <select value={selectedParty} onChange={(event) => setParty(event.target.value)}>
+            <select value={selectedParty} disabled={user?.role !== 'ADMIN'} onChange={(event) => setParty(event.target.value)}>
               {parties.map((item) => <option key={item} value={item}>{item}</option>)}
             </select>
           </label>
@@ -185,9 +211,11 @@ export default function Statements() {
             <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowColumns((value) => !value)}>
               <SlidersHorizontal size={15} /> Columns
             </button>
-            <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
-              <Download size={15} /> Export
-            </button>
+            {allowExport && (
+              <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
+                <Download size={15} /> Export
+              </button>
+            )}
           </div>
         </div>
         {showColumns && (
@@ -214,8 +242,8 @@ export default function Statements() {
         <div className="refund-panel">
           <div><span>Bookings</span><strong>{statementBookings.length}</strong></div>
           <div><span>Revenue</span><strong>{money(revenue)}</strong></div>
-          <div><span>{statementType === 'supplier' ? 'Payable' : 'Ticket Cost'}</span><strong>{money(payable)}</strong></div>
-          <div><span>Collected</span><strong>{money(collected)}</strong></div>
+          <div><span>{statementType === 'supplier' ? 'Supplier Receivable' : 'Agent Payable'}</span><strong>{money(payable)}</strong></div>
+          <div><span>{statementType === 'supplier' ? 'Paid by Admin' : 'Paid to Admin'}</span><strong>{money(collected)}</strong></div>
           <div><span>Outstanding</span><strong>{money(outstanding)}</strong></div>
           <div><span>Refund Exposure</span><strong>{money(refundExposure)}</strong></div>
         </div>

@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { getBookings, getPayments, getRefunds } from '../helpers/storage';
 import { generateAlerts } from '../helpers/calculations';
+import { useAuth } from '../AuthContext';
+import { canExport, canRecordPayments, canProcessRefunds, filterBookingsForUser, filterRecordsForUser } from '../helpers/access';
 import { AlertTriangle, ArrowUpDown, Download, Search, SlidersHorizontal } from 'lucide-react';
 
 const ALERT_COLUMNS = [
@@ -19,7 +21,14 @@ function money(value) {
 }
 
 export default function Alerts() {
-  const alerts = generateAlerts(getBookings(), getPayments(), getRefunds());
+  const { user } = useAuth();
+  const allowExport = canExport(user);
+  const allowRecordPayment = canRecordPayments(user);
+  const allowProcessRefund = canProcessRefunds(user);
+  const bookings = filterBookingsForUser(user, getBookings());
+  const payments = filterRecordsForUser(user, getPayments(), 'payments', { bookings });
+  const refunds = filterRecordsForUser(user, getRefunds(), 'refunds', { bookings });
+  const alerts = filterRecordsForUser(user, generateAlerts(bookings, payments, refunds), 'alerts', { bookings });
   const [search, setSearch] = useState('');
   const [severityFilter, setSeverityFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
@@ -89,6 +98,7 @@ export default function Alerts() {
       );
     }
     if (key === 'action') {
+      if ((alert.ticket_no && !allowProcessRefund) || (!alert.ticket_no && !allowRecordPayment)) return '-';
       return (
         <button className="btn btn-secondary btn-sm" onClick={() => { window.location.href = alert.ticket_no ? '/refunds' : '/payments'; }}>
           {alert.ticket_no ? 'Review Refund' : 'Record Payment'}
@@ -99,6 +109,7 @@ export default function Alerts() {
   };
 
   const exportCSV = () => {
+    if (!allowExport) return;
     const header = activeColumns.map(([, label]) => label);
     const rows = filteredAlerts.map((alert) => activeColumns.map(([key]) => {
       if (key === 'amount_at_risk') return money(alert.amount_at_risk);
@@ -176,9 +187,11 @@ export default function Alerts() {
             <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowColumns((value) => !value)}>
               <SlidersHorizontal size={15} /> Columns
             </button>
-            <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
-              <Download size={15} /> Export
-            </button>
+            {allowExport && (
+              <button className="btn btn-primary btn-sm" type="button" onClick={exportCSV}>
+                <Download size={15} /> Export
+              </button>
+            )}
           </div>
         </div>
         {showColumns && (
