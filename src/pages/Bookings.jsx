@@ -801,6 +801,12 @@ export default function Bookings() {
   }, [searchParams]);
 
   useEffect(() => {
+    if (!allowBookingEntry && activeTab !== 'LIST') {
+      setActiveTab('LIST');
+    }
+  }, [activeTab, allowBookingEntry]);
+
+  useEffect(() => {
     if (!allowBookingEntry) return;
 
     let isMounted = true;
@@ -1764,7 +1770,11 @@ export default function Bookings() {
       <header className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
           <h1>Bookings</h1>
-          <p>Canonical booking ledger with manual fields, auto calculations, PDF extraction, and cryptic entry.</p>
+          <p>
+            {allowBookingEntry
+              ? 'Canonical booking ledger with manual fields, auto calculations, PDF extraction, and cryptic entry.'
+              : 'Scoped booking ledger with search, filters, payment status, and ticket history.'}
+          </p>
         </div>
         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
           {allowBookingEntry && (
@@ -1910,9 +1920,9 @@ export default function Bookings() {
         </>
       )}
 
-      {activeTab === 'ADD' && renderBookingForm()}
+      {allowBookingEntry && activeTab === 'ADD' && renderBookingForm()}
 
-      {activeTab === 'CRYPTIC' && (
+      {allowBookingEntry && activeTab === 'CRYPTIC' && (
         <div className="manual-booking-stack">
           <div className="grid-2 cryptic-entry-grid">
           <div className="card">
@@ -1977,7 +1987,7 @@ export default function Bookings() {
         </div>
       )}
 
-      {activeTab === 'UPLOAD' && (
+      {allowBookingEntry && activeTab === 'UPLOAD' && (
         <div className="grid-2">
           <div className="card">
             <h3>Upload Ticket PDF</h3>

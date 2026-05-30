@@ -32,10 +32,12 @@ export function canSeeAll(user) {
 }
 
 export function canCreateBookings(user) {
+  if (['AGENT', 'SUPPLIER'].includes(user?.role)) return false;
   return hasPermission(user, 'create_bookings');
 }
 
 export function canEditBookings(user) {
+  if (['AGENT', 'SUPPLIER'].includes(user?.role)) return false;
   return hasPermission(user, 'edit_bookings');
 }
 
@@ -146,6 +148,6 @@ export function scopedFinanceData(user, { bookings = [], payments = [], refunds 
     bookings: scopedBookings,
     payments: filterRecordsForUser(user, payments, 'payments', { bookings: scopedBookings }),
     refunds: filterRecordsForUser(user, refunds, 'refunds', { bookings: scopedBookings }),
-    expenses: canSeeAll(user) || hasPermission(user, 'view_financials') ? expenses : [],
+    expenses: filterRecordsForUser(user, expenses, 'expenses', { bookings: scopedBookings }),
   };
 }

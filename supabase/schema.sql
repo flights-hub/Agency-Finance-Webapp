@@ -116,7 +116,7 @@ insert into public.role_templates (role, name, permission_keys) values
     'AGENT',
     'Agent',
     array[
-      'view_bookings', 'create_bookings', 'edit_bookings',
+      'view_bookings',
       'view_payments',
       'view_statements'
     ]

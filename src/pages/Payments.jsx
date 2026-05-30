@@ -54,6 +54,8 @@ export default function Payments() {
     payment_date: new Date().toISOString().split('T')[0],
     pnr: '',
     supplier_name: '',
+    supplier_payment_scope: 'SUPPLIER',
+    segment_id: '',
     amount_paid: '',
     payment_mode: 'BANK_TRANSFER',
     receipt_ref: '',
@@ -75,6 +77,18 @@ export default function Payments() {
   const supplierOptions = useMemo(() => (
     [...new Set(scopedBookings.flatMap((booking) => supplierNamesForBooking(booking)).filter(Boolean))]
   ), [scopedBookings]);
+  const supplierBookingOptions = useMemo(() => (
+    scopedBookings.filter((booking) => supplierNamesForBooking(booking).includes(form.supplier_name))
+  ), [form.supplier_name, scopedBookings]);
+  const supplierSegmentOptions = useMemo(() => {
+    const booking = supplierBookingOptions.find((item) => item.pnr === form.pnr);
+    return (booking?.supplier_segments || [])
+      .filter((segment) => segment.supplier_name === form.supplier_name || segment.supplier_id === form.supplier_name)
+      .map((segment, index) => ({
+        id: String(segment.id || segment.segment_id || `${booking.pnr}-${index}`),
+        label: `${segment.segment || segment.sector || booking.sector || 'Segment'} - ${money(segment.buying_price || 0)}`,
+      }));
+  }, [form.pnr, form.supplier_name, supplierBookingOptions]);
   const activeColumns = useMemo(
     () => PAYMENT_COLUMNS.filter(([key]) => visibleColumns.has(key)),
     [visibleColumns],
@@ -98,6 +112,13 @@ export default function Payments() {
   }, [modeFilter, paymentLedger, search, sortDir, sortKey]);
 
   const selectedPreview = useMemo(() => {
+    if (form.payment_direction === 'SUPPLIER_OUT') {
+      const supplierPayment = createSupplierPaymentEntry(
+        { ...form, amount_paid: Number(form.amount_paid || 0), received_by: 'Finance Desk' },
+      );
+      const ledger = getSupplierPaymentLedger(scopedBookings, [...scopedPayments, supplierPayment]);
+      return ledger[ledger.length - 1] || supplierPayment;
+    }
     const nextPayment = createPaymentEntry(
       { ...form, amount_paid: Number(form.amount_paid || 0), received_by: 'Finance Desk' },
       scopedBookings,
@@ -107,7 +128,25 @@ export default function Payments() {
   }, [form, scopedBookings, scopedPayments]);
 
   const updateForm = (key, value) => {
-    setForm((current) => ({ ...current, [key]: value }));
+    setForm((current) => {
+      const next = { ...current, [key]: value };
+      if (key === 'payment_direction') {
+        next.pnr = '';
+        next.supplier_name = '';
+        next.supplier_payment_scope = 'SUPPLIER';
+        next.segment_id = '';
+      }
+      if (key === 'supplier_name') {
+        next.pnr = '';
+        next.segment_id = '';
+      }
+      if (key === 'supplier_payment_scope') {
+        next.pnr = '';
+        next.segment_id = '';
+      }
+      if (key === 'pnr') next.segment_id = '';
+      return next;
+    });
   };
 
   const handleSort = (key) => {
@@ -158,6 +197,14 @@ export default function Payments() {
         alert('Select a supplier.');
         return;
       }
+      if (form.supplier_payment_scope !== 'SUPPLIER' && !form.pnr) {
+        alert('Select a PNR for this supplier payment.');
+        return;
+      }
+      if (form.supplier_payment_scope === 'SEGMENT' && !form.segment_id) {
+        alert('Select a supplier segment.');
+        return;
+      }
       savePayment(createSupplierPaymentEntry({ ...form, amount_paid: amount, received_by: 'Finance Desk' }));
     } else {
       if (!form.pnr) {
@@ -172,6 +219,8 @@ export default function Payments() {
       payment_date: new Date().toISOString().split('T')[0],
       pnr: '',
       supplier_name: '',
+      supplier_payment_scope: 'SUPPLIER',
+      segment_id: '',
       amount_paid: '',
       payment_mode: 'BANK_TRANSFER',
       receipt_ref: '',
@@ -297,13 +346,47 @@ export default function Payments() {
                 <input type="date" value={form.payment_date} onChange={(event) => updateForm('payment_date', event.target.value)} />
               </label>
               {form.payment_direction === 'SUPPLIER_OUT' ? (
-                <label>
-                  <span>Supplier</span>
-                  <select value={form.supplier_name} onChange={(event) => updateForm('supplier_name', event.target.value)}>
-                    <option value="">Select supplier</option>
-                    {supplierOptions.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
-                  </select>
-                </label>
+                <>
+                  <label>
+                    <span>Supplier</span>
+                    <select value={form.supplier_name} onChange={(event) => updateForm('supplier_name', event.target.value)}>
+                      <option value="">Select supplier</option>
+                      {supplierOptions.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Supplier Payment Scope</span>
+                    <select value={form.supplier_payment_scope} onChange={(event) => updateForm('supplier_payment_scope', event.target.value)}>
+                      <option value="SUPPLIER">Supplier total</option>
+                      <option value="PNR">Specific PNR</option>
+                      <option value="SEGMENT">Specific segment</option>
+                    </select>
+                  </label>
+                  {form.supplier_payment_scope !== 'SUPPLIER' && (
+                    <label>
+                      <span>Supplier PNR</span>
+                      <select value={form.pnr} onChange={(event) => updateForm('pnr', event.target.value)}>
+                        <option value="">Select PNR</option>
+                        {supplierBookingOptions.map((booking) => (
+                          <option key={booking.id || booking.pnr} value={booking.pnr}>
+                            {booking.pnr} - {booking.passenger_name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {form.supplier_payment_scope === 'SEGMENT' && (
+                    <label>
+                      <span>Supplier Segment</span>
+                      <select value={form.segment_id} onChange={(event) => updateForm('segment_id', event.target.value)}>
+                        <option value="">Select segment</option>
+                        {supplierSegmentOptions.map((segment) => (
+                          <option key={segment.id} value={segment.id}>{segment.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                </>
               ) : (
                 <label>
                   <span>PNR</span>

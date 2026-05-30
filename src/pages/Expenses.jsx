@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { getExpenses, saveExpense } from '../helpers/storage';
 import { BRANCH_OFFICES, EXPENSE_CATEGORIES, getExpenseLedger, monthLabel, PAYMENT_MODES } from '../helpers/calculations';
 import { useAuth } from '../AuthContext';
-import { canExport } from '../helpers/access';
+import { canExport, filterRecordsForUser } from '../helpers/access';
 import { hasPermission } from '../helpers/permissions';
 import { ArrowUpDown, Download, Plus, Search, SlidersHorizontal } from 'lucide-react';
 
@@ -51,7 +51,8 @@ export default function Expenses() {
     remarks: '',
   });
 
-  const expenseLedger = useMemo(() => getExpenseLedger(expenses), [expenses]);
+  const scopedExpenses = useMemo(() => filterRecordsForUser(user, expenses, 'expenses'), [expenses, user]);
+  const expenseLedger = useMemo(() => getExpenseLedger(scopedExpenses), [scopedExpenses]);
   const activeColumns = useMemo(
     () => EXPENSE_COLUMNS.filter(([key]) => visibleColumns.has(key)),
     [visibleColumns],

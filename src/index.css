@@ -1552,8 +1552,10 @@ footer.foot ul li:hover { color: var(--paper); }
   display: flex;
   align-items: center;
   gap: 10px;
+  margin-left: auto;
   color: var(--ink-700);
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .page-content {
@@ -2901,6 +2903,10 @@ textarea:focus {
     height: auto;
     flex-wrap: wrap;
     padding: 14px;
+  }
+
+  .user-profile {
+    margin-left: 0;
   }
 
   .page-content {
