@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { getRefunds, getBookings, saveRefund, saveBooking } from '../helpers/storage';
 import { getEligibleRefund, getRefundLedger, REFUND_CATEGORIES, REFUND_STATUSES, PAYMENT_MODES } from '../helpers/calculations';
+import { formatCurrency } from '../helpers/format';
+import { downloadCSV } from '../helpers/downloadCSV';
 import { ArrowUpDown, Download, Plus, Search, SlidersHorizontal } from 'lucide-react';
 
 const REFUND_COLUMNS = [
@@ -25,10 +27,6 @@ const REFUND_COLUMNS = [
   ['refund_mode', 'Refund Mode'],
   ['remarks', 'Remarks'],
 ];
-
-function money(value) {
-  return `EUR ${Number(value || 0).toLocaleString()}`;
-}
 
 export default function Refunds() {
   const [refunds, setRefunds] = useState(() => getRefunds());
@@ -107,25 +105,21 @@ export default function Refunds() {
   };
 
   const renderValue = (refund, key) => {
-    if (['fare_sold', 'fare_issued', 'airline_penalty', 'service_fee', 'eligible_refund', 'supplier_refund'].includes(key)) return money(refund[key]);
+    if (['fare_sold', 'fare_issued', 'airline_penalty', 'service_fee', 'eligible_refund', 'supplier_refund'].includes(key)) return formatCurrency(refund[key]);
     if (key === 'refund_status') return <span className={`badge ${String(refund[key]).toLowerCase()}`}>{String(refund[key] || '').replace(/_/g, ' ')}</span>;
     return String(refund[key] || '').replace(/_/g, ' ');
   };
 
   const exportCSV = () => {
-    const header = activeColumns.map(([, label]) => label);
-    const rows = filteredRefunds.map((refund) => activeColumns.map(([key]) => (
-      ['fare_sold', 'fare_issued', 'airline_penalty', 'service_fee', 'eligible_refund', 'supplier_refund'].includes(key)
-        ? money(refund[key])
-        : String(refund[key] || '').replace(/_/g, ' ')
-    )));
-    const csv = [header, ...rows].map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `refunds-${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    const formatters = {
+      fare_sold: (v) => formatCurrency(v),
+      fare_issued: (v) => formatCurrency(v),
+      airline_penalty: (v) => formatCurrency(v),
+      service_fee: (v) => formatCurrency(v),
+      eligible_refund: (v) => formatCurrency(v),
+      supplier_refund: (v) => formatCurrency(v),
+    };
+    downloadCSV('refunds', activeColumns, filteredRefunds, formatters);
   };
 
   const handleCreateRefund = () => {

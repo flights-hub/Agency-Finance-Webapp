@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { getPayments, getBookings, savePayment } from '../helpers/storage';
 import { createPaymentEntry, getBookingLedger, getPaymentLedger, PAYMENT_MODES } from '../helpers/calculations';
+import { formatCurrency } from '../helpers/format';
+import { downloadCSV } from '../helpers/downloadCSV';
 import { ArrowUpDown, Download, Plus, Search, SlidersHorizontal } from 'lucide-react';
 
 const PAYMENT_COLUMNS = [
@@ -19,10 +21,6 @@ const PAYMENT_COLUMNS = [
   ['remaining_balance', 'Remaining Bal'],
   ['remarks', 'Remarks'],
 ];
-
-function money(value) {
-  return `EUR ${Number(value || 0).toLocaleString()}`;
-}
 
 export default function Payments() {
   const [payments, setPayments] = useState(() => getPayments());
@@ -100,19 +98,13 @@ export default function Payments() {
   };
 
   const exportCSV = () => {
-    const header = activeColumns.map(([, label]) => label);
-    const rows = filteredPayments.map((payment) => activeColumns.map(([key]) => (
-      ['amount_paid', 'cumulative_paid', 'total_fare', 'remaining_balance'].includes(key)
-        ? money(payment[key])
-        : String(payment[key] || '').replace(/_/g, ' ')
-    )));
-    const csv = [header, ...rows].map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `payments-${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    const formatters = {
+      amount_paid: (v) => formatCurrency(v),
+      cumulative_paid: (v) => formatCurrency(v),
+      total_fare: (v) => formatCurrency(v),
+      remaining_balance: (v) => formatCurrency(v),
+    };
+    downloadCSV('payments', activeColumns, filteredPayments, formatters);
   };
 
   const handleSavePayment = () => {
@@ -214,7 +206,7 @@ export default function Payments() {
                   {activeColumns.map(([key]) => (
                     <td key={key}>
                       {['amount_paid', 'cumulative_paid', 'total_fare', 'remaining_balance'].includes(key)
-                        ? money(payment[key])
+                        ? formatCurrency(payment[key])
                         : String(payment[key] || '').replace(/_/g, ' ')}
                     </td>
                   ))}
@@ -246,7 +238,7 @@ export default function Payments() {
                   <option value="">Select PNR</option>
                   {pnrOptions.map((booking) => (
                     <option key={booking.id} value={booking.pnr}>
-                      {booking.pnr} - {booking.passenger_name} (Due: {money(booking.balance_due)})
+                      {booking.pnr} - {booking.passenger_name} (Due: {formatCurrency(booking.balance_due)})
                     </option>
                   ))}
                 </select>
@@ -276,8 +268,8 @@ export default function Payments() {
             <div className="auto-preview-list compact-preview">
               <div><span>Instalment No</span><strong>{selectedPreview.instalment_no || '-'}</strong></div>
               <div><span>Instalment Type</span><strong>{selectedPreview.instalment_type || '-'}</strong></div>
-              <div><span>Cumulative Paid</span><strong>{money(selectedPreview.cumulative_paid)}</strong></div>
-              <div><span>Remaining Balance</span><strong>{money(selectedPreview.remaining_balance)}</strong></div>
+              <div><span>Cumulative Paid</span><strong>{formatCurrency(selectedPreview.cumulative_paid)}</strong></div>
+              <div><span>Remaining Balance</span><strong>{formatCurrency(selectedPreview.remaining_balance)}</strong></div>
             </div>
 
             <div className="form-actions">

@@ -12,17 +12,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@dietrichgebert/ponytail": "file:ponytail",
     "lucide-react": "^1.16.0",
-    "open-pnr": "^0.0.4",
     "pdfjs-dist": "^5.1.91",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-router-dom": "^7.15.1",
-    "recharts": "^3.8.1",
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@rollup/wasm-node": "^4.60.4",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.7.0",

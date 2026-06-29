@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import { getBookings, getPayments, getRefunds } from '../helpers/storage';
 import { generateAlerts } from '../helpers/calculations';
 import { AlertTriangle, ArrowUpDown, Download, Search, SlidersHorizontal } from 'lucide-react';
+import { formatCurrency } from '../helpers/format';
+import { downloadCSV } from '../helpers/downloadCSV';
 
 const ALERT_COLUMNS = [
   ['severity', 'Severity'],
@@ -14,9 +16,6 @@ const ALERT_COLUMNS = [
   ['action', 'Action'],
 ];
 
-function money(value) {
-  return `EUR ${Number(value || 0).toLocaleString()}`;
-}
 
 export default function Alerts() {
   const alerts = generateAlerts(getBookings(), getPayments(), getRefunds());
@@ -79,7 +78,7 @@ export default function Alerts() {
   const renderValue = (alert, key) => {
     if (key === 'severity') return <span className={`badge ${alert.severity.toLowerCase()}`}>{alert.severity}</span>;
     if (key === 'alert_type') return alert.alert_type.replace(/_/g, ' ');
-    if (key === 'amount_at_risk') return money(alert.amount_at_risk);
+    if (key === 'amount_at_risk') return formatCurrency(alert.amount_at_risk);
     if (key === 'message') {
       return (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
@@ -99,19 +98,10 @@ export default function Alerts() {
   };
 
   const exportCSV = () => {
-    const header = activeColumns.map(([, label]) => label);
-    const rows = filteredAlerts.map((alert) => activeColumns.map(([key]) => {
-      if (key === 'amount_at_risk') return money(alert.amount_at_risk);
-      if (key === 'action') return alert.ticket_no ? 'Review Refund' : 'Record Payment';
-      return String(alert[key] || '').replace(/_/g, ' ');
-    }));
-    const csv = [header, ...rows].map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `alerts-${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadCSV('alerts', activeColumns, filteredAlerts, {
+      amount_at_risk: (v) => formatCurrency(v),
+      action: (alert) => alert.ticket_no ? 'Review Refund' : 'Record Payment',
+    });
   };
 
   return (

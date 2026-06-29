@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import { getExpenses, saveExpense } from '../helpers/storage';
 import { BRANCH_OFFICES, EXPENSE_CATEGORIES, getExpenseLedger, monthLabel, PAYMENT_MODES } from '../helpers/calculations';
 import { ArrowUpDown, Download, Plus, Search, SlidersHorizontal } from 'lucide-react';
+import { formatCurrency } from '../helpers/format';
+import { downloadCSV } from '../helpers/downloadCSV';
 
 const EXPENSE_COLUMNS = [
   ['sl', 'SL'],
@@ -18,9 +20,6 @@ const EXPENSE_COLUMNS = [
   ['remarks', 'Remarks'],
 ];
 
-function money(value) {
-  return `EUR ${Number(value || 0).toLocaleString()}`;
-}
 
 export default function Expenses() {
   const [expenses, setExpenses] = useState(() => getExpenses());
@@ -94,21 +93,15 @@ export default function Expenses() {
   };
 
   const renderValue = (expense, key) => {
-    if (key === 'amount_eur') return money(expense.amount_eur);
+    if (key === 'amount_eur') return formatCurrency(expense.amount_eur);
     if (key === 'recurring') return expense.recurring ? 'YES' : 'NO';
     return String(expense[key] || '').replace(/_/g, ' ');
   };
 
   const exportCSV = () => {
-    const header = activeColumns.map(([, label]) => label);
-    const rows = filteredExpenses.map((expense) => activeColumns.map(([key]) => renderValue(expense, key)));
-    const csv = [header, ...rows].map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `expenses-${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadCSV('expenses', activeColumns, filteredExpenses, {
+      amount_eur: (v) => formatCurrency(v),
+    });
   };
 
   const handleSave = () => {
@@ -152,9 +145,9 @@ export default function Expenses() {
       </header>
 
       <div className="grid-3" style={{ marginBottom: 16 }}>
-        <div className="card stat-card"><div className="stat-content"><p className="stat-label">Total Expenses</p><h3 className="stat-value">{money(fixedTotal + variableTotal)}</h3></div></div>
-        <div className="card stat-card"><div className="stat-content"><p className="stat-label">Fixed / Recurring</p><h3 className="stat-value">{money(fixedTotal)}</h3></div></div>
-        <div className="card stat-card"><div className="stat-content"><p className="stat-label">Variable</p><h3 className="stat-value">{money(variableTotal)}</h3></div></div>
+        <div className="card stat-card"><div className="stat-content"><p className="stat-label">Total Expenses</p><h3 className="stat-value">{formatCurrency(fixedTotal + variableTotal)}</h3></div></div>
+        <div className="card stat-card"><div className="stat-content"><p className="stat-label">Fixed / Recurring</p><h3 className="stat-value">{formatCurrency(fixedTotal)}</h3></div></div>
+        <div className="card stat-card"><div className="stat-content"><p className="stat-label">Variable</p><h3 className="stat-value">{formatCurrency(variableTotal)}</h3></div></div>
       </div>
 
       <div className="card booking-controls">

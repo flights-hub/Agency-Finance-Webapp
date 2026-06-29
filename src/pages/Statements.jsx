@@ -2,10 +2,9 @@ import { useMemo, useState } from 'react';
 import { ArrowUpDown, Download, FileText, Search, SlidersHorizontal } from 'lucide-react';
 import { getBookings, getPayments, getRefunds } from '../helpers/storage';
 import { getBookingLedger, getPaymentLedger, getRefundLedger } from '../helpers/calculations';
+import { formatCurrency } from '../helpers/format';
+import { downloadCSV } from '../helpers/downloadCSV';
 
-function money(value) {
-  return `EUR ${Number(value || 0).toLocaleString()}`;
-}
 
 const STATEMENT_COLUMNS = [
   ['invoice_no', 'Invoice'],
@@ -121,24 +120,20 @@ export default function Statements() {
   };
 
   const renderValue = (booking, key) => {
-    if (key === 'fare_sold') return money(booking[key]);
+    if (key === 'fare_sold') return formatCurrency(booking[key]);
     if (key === 'fare_issued') {
-      return money(statementType === 'supplier' ? supplierPayableForBooking(booking, selectedParty) : booking[key]);
+      return formatCurrency(statementType === 'supplier' ? supplierPayableForBooking(booking, selectedParty) : booking[key]);
     }
-    if (key === 'balance_due') return booking.pnr_n === 1 ? money(booking.balance_due) : '-';
+    if (key === 'balance_due') return booking.pnr_n === 1 ? formatCurrency(booking.balance_due) : '-';
     return booking[key] || '-';
   };
 
   const exportCSV = () => {
-    const header = activeColumns.map(([, label]) => label);
-    const rows = filteredStatementBookings.map((booking) => activeColumns.map(([key]) => renderValue(booking, key)));
-    const csv = [header, ...rows].map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${statementType}-statement-${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadCSV(`${statementType}-statement`, activeColumns, filteredStatementBookings, {
+      fare_sold: (v) => formatCurrency(v),
+      fare_issued: (v) => formatCurrency(statementType === 'supplier' ? v : v),
+      balance_due: (v) => formatCurrency(v),
+    });
   };
 
   return (
@@ -213,11 +208,11 @@ export default function Statements() {
 
         <div className="refund-panel">
           <div><span>Bookings</span><strong>{statementBookings.length}</strong></div>
-          <div><span>Revenue</span><strong>{money(revenue)}</strong></div>
-          <div><span>{statementType === 'supplier' ? 'Payable' : 'Ticket Cost'}</span><strong>{money(payable)}</strong></div>
-          <div><span>Collected</span><strong>{money(collected)}</strong></div>
-          <div><span>Outstanding</span><strong>{money(outstanding)}</strong></div>
-          <div><span>Refund Exposure</span><strong>{money(refundExposure)}</strong></div>
+          <div><span>Revenue</span><strong>{formatCurrency(revenue)}</strong></div>
+          <div><span>{statementType === 'supplier' ? 'Payable' : 'Ticket Cost'}</span><strong>{formatCurrency(payable)}</strong></div>
+          <div><span>Collected</span><strong>{formatCurrency(collected)}</strong></div>
+          <div><span>Outstanding</span><strong>{formatCurrency(outstanding)}</strong></div>
+          <div><span>Refund Exposure</span><strong>{formatCurrency(refundExposure)}</strong></div>
         </div>
 
         <div className="table-scroll" style={{ marginTop: 18 }}>
