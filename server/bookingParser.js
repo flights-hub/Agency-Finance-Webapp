@@ -38,6 +38,14 @@ const COMMON_AIRLINE_NAMES = [
   ['KLM', 'KL'],
   ['BRITISH AIRWAYS', 'BA'],
 ];
+const PDF_WEEKDAY_PATTERN = '(?:MON|TUE|WED|THU|FRI|SAT|SUN)';
+const PDF_MONTH_PATTERN = '(?:JAN|FEB|MAR|APR|MAY|JUN|JUNE|JUL|JULY|AUG|SEP|SEPT|OCT|NOV|DEC)';
+const AIRPORT_KEYWORDS = new Set(['AIRPORT', 'APT', 'INTL', 'INTERNATIONAL']);
+const AIRPORT_TEXT_ALIASES = [
+  [/HAMAD\s+INTERNATIONAL|DOHA,\s*QA/, 'DOH'],
+  [/FIUMICINO|ROME,\s*IT/, 'FCO'],
+  [/SRI\s+GURU\s+RAM|AMRITSAR,\s*PB/, 'ATQ'],
+];
 
 function cleanText(value) {
   return String(value || '').replace(/\u00a0/g, ' ').replace(/\r/g, '\n');
@@ -87,7 +95,7 @@ function parsePdfDate(value, fallbackYear = new Date().getFullYear()) {
     return isoDate({ day: Number(numeric[1]), month: Number(numeric[2]) - 1, year });
   }
 
-  const named = raw.match(/\b(\d{1,2})\s+([A-Z]{3,9})\s+(\d{2,4})\b/);
+  const named = raw.match(new RegExp(`\\b(\\d{1,2})\\s+(${PDF_MONTH_PATTERN})\\s+(\\d{2,4})\\b(?!\\s*[:.])`));
   if (named) {
     const monthKey = named[2].slice(0, 3);
     if (MONTH_INDEX[monthKey] !== undefined) {
@@ -97,12 +105,18 @@ function parsePdfDate(value, fallbackYear = new Date().getFullYear()) {
     }
   }
 
-  const match = raw.match(/(?:[A-Z]{3}\s+)?(\d{1,2})([A-Z]{3})(\d{2,4})?/);
-  if (!match || MONTH_INDEX[match[2]] === undefined) return '';
+  const spaced = raw.match(new RegExp(`\\b(?:${PDF_WEEKDAY_PATTERN}\\s+)?(\\d{1,2})\\s+(${PDF_MONTH_PATTERN})\\b(?!\\s+\\d{2,4}\\s*[:.])`));
+  if (spaced) {
+    return isoDate({ day: Number(spaced[1]), month: MONTH_INDEX[spaced[2].slice(0, 3)], year: fallbackYear });
+  }
+
+  const match = raw.match(new RegExp(`\\b(?:${PDF_WEEKDAY_PATTERN}\\s+)?(\\d{1,2})(${PDF_MONTH_PATTERN})(\\d{2,4})?\\b`));
+  const monthKey = match?.[2]?.slice(0, 3);
+  if (!match || MONTH_INDEX[monthKey] === undefined) return '';
   const year = match[3]
     ? (match[3].length === 2 ? 2000 + Number(match[3]) : Number(match[3]))
     : fallbackYear;
-  return isoDate({ day: Number(match[1]), month: MONTH_INDEX[match[2]], year });
+  return isoDate({ day: Number(match[1]), month: MONTH_INDEX[monthKey], year });
 }
 
 function hhmm(value) {
@@ -198,6 +212,24 @@ function createPassenger(fields) {
   };
 }
 
+function addPdfPassenger(passengers, passengerByName, rawName, fields = {}) {
+  const names = splitGdsName(rawName);
+  if (!names.passenger_name) return null;
+  if (passengerByName.has(names.passenger_name)) return passengerByName.get(names.passenger_name);
+
+  const passenger = createPassenger({
+    seq_no: passengers.length + 1,
+    p_ref: passengers.length + 1,
+    ...names,
+    pax_type: 'ADT',
+    ticket_format: 'PDF',
+    ...fields,
+  });
+  passengers.push(passenger);
+  passengerByName.set(passenger.passenger_name, passenger);
+  return passenger;
+}
+
 function airlineExists(code) {
   return AIRLINES.some((airline) => airline.code === code);
 }
@@ -206,11 +238,44 @@ function airportExists(code) {
   return AIRPORTS.some((airport) => airport.code === code);
 }
 
+function airportTextWords(value) {
+  return String(value || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function airportSignificantWords(value) {
+  return airportTextWords(value)
+    .filter((word) => word.length >= 4 && !AIRPORT_KEYWORDS.has(word));
+}
+
+function airportIdentifierScore(airport, words) {
+  const firstWords = new Set(words.slice(0, 5));
+  const allWords = new Set(words);
+  let score = 0;
+
+  if (allWords.has(airport.code)) score += 1;
+  if (airport.isoCountry && firstWords.has(airport.isoCountry.toUpperCase())) score += 1;
+
+  const cityWords = airportSignificantWords(airport.city);
+  const nameWords = airportSignificantWords(airport.name);
+  if (cityWords.some((word) => firstWords.has(word))) score += 1;
+  if (nameWords.some((word) => firstWords.has(word))) score += 1;
+  if ([...firstWords].some((word) => AIRPORT_KEYWORDS.has(word))) score += 1;
+
+  return score;
+}
+
 function airportByText(value) {
   const raw = compactSpaces(value);
   if (!raw) return '';
-  const directCode = raw.toUpperCase().match(/\b[A-Z]{3}\b/);
-  if (directCode && airportExists(directCode[0])) return directCode[0];
+  const alias = AIRPORT_TEXT_ALIASES.find(([pattern]) => pattern.test(raw.toUpperCase()));
+  if (alias) return alias[1];
+
+  const directCode = raw.toUpperCase().match(/^\(?([A-Z]{3})\)?$/);
+  if (directCode && airportExists(directCode[1])) return directCode[1];
 
   const query = raw
     .replace(/\b(Apt|Airport|International|Intl|Terminal:\d+|Terminal)\b/gi, ' ')
@@ -219,29 +284,33 @@ function airportByText(value) {
     .trim()
     .toLowerCase();
   if (!query) return '';
+  const words = airportTextWords(raw);
 
-  const match = AIRPORTS.find((airport) => {
+  const matches = AIRPORTS
+    .map((airport) => {
     const city = airport.city.toLowerCase();
     const name = airport.name.toLowerCase();
     const simplifiedName = name.replace(/\b(airport|international|intl)\b/g, '').replace(/\s+/g, ' ').trim();
     const search = airport.search.toLowerCase();
-    return city === query
+    const textMatch = city === query
       || name === query
       || search.includes(query)
       || query.includes(city)
-      || (simplifiedName.length >= 4 && query.includes(simplifiedName));
-  });
-  return match?.code || '';
+      || (simplifiedName.length >= 4 && query.includes(simplifiedName))
+      || airportSignificantWords(airport.city).some((word) => query.includes(word.toLowerCase()))
+      || airportSignificantWords(airport.name).some((word) => query.includes(word.toLowerCase()));
+    return { airport, textMatch, score: airportIdentifierScore(airport, words) };
+  })
+    .filter((item) => item.textMatch && item.score >= 2)
+    .sort((a, b) => b.score - a.score || a.airport.code.localeCompare(b.airport.code));
+
+  const match = matches[0];
+  return match?.airport?.code || '';
 }
 
 function airportMentions(value) {
   const raw = String(value || '');
-  const upper = raw.toUpperCase();
   const mentions = [];
-
-  for (const match of upper.matchAll(/\b[A-Z]{3}\b/g)) {
-    if (airportExists(match[0])) mentions.push({ code: match[0], index: match.index, score: 0 });
-  }
 
   const haystack = compactSpaces(raw).toLowerCase();
   for (const airport of AIRPORTS) {
@@ -285,7 +354,7 @@ function uniqueBy(items, keyFn) {
 }
 
 function pdfDateMatches(value) {
-  return [...String(value || '').toUpperCase().matchAll(/\b(?:[A-Z]{3}\s+)?\d{1,2}[A-Z]{3}(?:\d{2,4})?\b|\b\d{1,2}\s+[A-Z]{3,9}\s+\d{2,4}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g)]
+  return [...String(value || '').toUpperCase().matchAll(new RegExp(`\\b(?:${PDF_WEEKDAY_PATTERN}\\s+)?\\d{1,2}${PDF_MONTH_PATTERN}(?:\\d{2,4})?\\b|\\b\\d{1,2}\\s+${PDF_MONTH_PATTERN}(?:\\s+\\d{2,4})?\\b(?!\\s*[:.])|\\b\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}\\b`, 'g'))]
     .map((match) => match[0])
     .filter((match) => parsePdfDate(match));
 }
@@ -298,15 +367,21 @@ function pdfTimeMatches(value) {
 function extractPdfTickets(text, currentYear) {
   const tickets = [];
   const patterns = [
+    /TICKET:\s*[A-Z0-9]{2}\/ETKT\s+(\d{3})\s+(\d{10})(?:\s+FOR\s+([A-Z]+\/[A-Z]+))?/g,
     /(?:ELECTRONIC\s+TICKET|E-?TICKET|ETKT|TICKET\s*(?:NO|NUMBER)?|TKT)[:\s#-]*(\d{10,14})(?:\s+(\d{1,2}[A-Z]{3}\d{2,4}|\d{1,2}\s+[A-Z]{3,9}\s+\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}))?/g,
     /\b(\d{10,14})\b\s*(?:ISSUED|ISSUE|DATE)?\s*(\d{1,2}[A-Z]{3}\d{2,4}|\d{1,2}\s+[A-Z]{3,9}\s+\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})?/g,
   ];
 
   for (const pattern of patterns) {
     for (const match of text.matchAll(pattern)) {
+      const ticketNo = match[2] && /^\d{3}$/.test(match[1])
+        ? `${match[1]}${match[2]}`
+        : match[1];
+      const passengerName = match[3] && /^[A-Z]+\/[A-Z]+$/.test(match[3]) ? match[3] : '';
       tickets.push({
-        ticket_no: match[1],
-        ticket_issue_date: parsePdfDate(match[2], currentYear),
+        ticket_no: ticketNo,
+        ticket_issue_date: passengerName ? '' : parsePdfDate(match[3] || match[2], currentYear),
+        passenger_name: passengerName,
       });
     }
   }
@@ -348,8 +423,89 @@ function createPdfSegment(fields) {
   };
 }
 
-function extractPdfSegments(text, currentYear) {
+function extractPdfStructuredSegments(text, currentYear) {
   const segments = [];
+  const pattern = new RegExp(
+    `\\bFLIGHT\\s+([A-Z0-9]{2})\\s*(\\d{2,4})\\s*(?:-\\s*[^\\n]+?)?\\s+${PDF_WEEKDAY_PATTERN}\\s+(\\d{1,2})\\s+(${PDF_MONTH_PATTERN})\\s+(\\d{4})\\s+-+\\s+DEPARTURE:\\s+(.+?)\\s+(\\d{1,2}\\s+${PDF_MONTH_PATTERN})\\s+(\\d{1,2}:\\d{2}(?:\\s*[AP]M)?)\\s+ARRIVAL:\\s+(.+?)\\s+(\\d{1,2}\\s+${PDF_MONTH_PATTERN})\\s+(\\d{1,2}:\\d{2}(?:\\s*[AP]M)?)`,
+    'g',
+  );
+
+  for (const match of text.matchAll(pattern)) {
+    const year = Number(match[5]) || currentYear;
+    const departurePlace = compactSpaces(match[6]);
+    const arrivalPlace = compactSpaces(match[9]);
+    const departureCity = airportByText(departurePlace);
+    const arrivalCity = airportByText(arrivalPlace);
+
+    if (!departureCity || !arrivalCity) continue;
+
+    segments.push(createPdfSegment({
+      segment_ref: segments.length + 1,
+      airline: match[1],
+      flight_number: match[2],
+      departure_city: departureCity,
+      arrival_city: arrivalCity,
+      departure_date: parsePdfDate(`${match[7]} ${year}`, year),
+      arrival_date: parsePdfDate(`${match[10]} ${year}`, year),
+      departure_time: hhmm(match[8]),
+      arrival_time: hhmm(match[11]),
+      departure_terminal: (departurePlace.match(/\bTERMINAL\s+([A-Z0-9]+)/) || [])[1] || '',
+      arrival_terminal: (arrivalPlace.match(/\bTERMINAL\s+([A-Z0-9]+)/) || [])[1] || '',
+    }));
+  }
+
+  return segments;
+}
+
+function extractPdfAirlineTableSegments(text, currentYear) {
+  const segments = [];
+  const airlineNames = COMMON_AIRLINE_NAMES.map(([name]) => name).join('|');
+  const pattern = new RegExp(
+    `\\b(${airlineNames})\\s+(?:OPERATED\\s+BY:\\s+([A-Z][A-Z\\s]+?)\\s+(\\d{1,4})\\s+)?(\\d{1,4})\\s+(.+?)\\s+(?:TERMINAL:\\s*([A-Z0-9]+)\\s+)?${PDF_WEEKDAY_PATTERN}\\s+(\\d{1,2}${PDF_MONTH_PATTERN})\\s+(\\d{1,2}:\\d{2}(?:\\s*[AP]M)?)\\s+(.+?)\\s+(?:TERMINAL:\\s*([A-Z0-9]+)\\s+)?${PDF_WEEKDAY_PATTERN}\\s+(\\d{1,2}${PDF_MONTH_PATTERN})\\s+(\\d{1,2}:\\d{2}(?:\\s*[AP]M)?)\\s+[A-Z]\\s+[A-Z]\\s+[A-Z]\\b`,
+    'g',
+  );
+
+  for (const match of text.matchAll(pattern)) {
+    const departurePlace = compactSpaces(match[5]);
+    const arrivalPlace = compactSpaces(match[9]);
+    const departureCity = airportByText(departurePlace);
+    const arrivalCity = airportByText(arrivalPlace);
+
+    if (!departureCity || !arrivalCity) continue;
+
+    segments.push(createPdfSegment({
+      segment_ref: segments.length + 1,
+      airline: airlineByText(match[1]),
+      flight_number: match[4],
+      departure_city: departureCity,
+      arrival_city: arrivalCity,
+      departure_date: parsePdfDate(match[7], currentYear),
+      arrival_date: parsePdfDate(match[11], currentYear),
+      departure_time: hhmm(match[8]),
+      arrival_time: hhmm(match[12]),
+      departure_terminal: match[6] || '',
+      arrival_terminal: match[10] || '',
+    }));
+  }
+
+  return segments;
+}
+
+function extractPdfSegments(text, currentYear) {
+  const segments = [
+    ...extractPdfStructuredSegments(text, currentYear),
+    ...extractPdfAirlineTableSegments(text, currentYear),
+  ];
+  if (segments.length) {
+    return uniqueBy(segments, (segment) => [
+      segment.airline,
+      segment.flight_number,
+      segment.departure_city,
+      segment.arrival_city,
+      segment.departure_date,
+      segment.departure_time,
+    ].join('-'));
+  }
 
   for (const match of text.matchAll(/(?:\b([A-Z0-9]{2})\s*)?(\d{2,4})\s+([A-Z][A-Z\s,]+?(?:APT)?)\s+(?:[A-Z]{2,3}\s+)?([A-Z]{3}\s+\d{1,2}[A-Z]{3}(?:\d{2})?)\s+(\d{1,2}:\d{2}(?:\s*[AP]M)?)\s+([A-Z][A-Z\s,]+?(?:APT)?)\s+(?:[A-Z]{2,3}\s+)?([A-Z]{3}\s+\d{1,2}[A-Z]{3}(?:\d{2})?)\s+(\d{1,2}:\d{2}(?:\s*[AP]M)?)(?:\s+([A-Z])\s+([A-Z]))?/g)) {
     segments.push(createPdfSegment({
@@ -437,6 +593,42 @@ function extractPdfSegments(text, currentYear) {
   ].join('-'));
 }
 
+function pdfNameFromDisplay(title, displayName) {
+  if (title) return splitPdfName(displayName);
+  const words = compactSpaces(displayName).split(' ');
+  if (words.length >= 2) return splitPdfName(displayName);
+  return splitGdsName(displayName);
+}
+
+function extractPdfBaggageRows(text) {
+  const rows = [];
+  const pattern = /\b([A-Z]{3})-([A-Z]{3})\s+(?:(MR|MRS|MS|MISS|MSTR)\s+)?([A-Z]+(?:\s+[A-Z]+)*)\s+\((ADT|CHD|INF)\)\s+(\d+\s*(?:KG|PC))\s+(\d+\s*(?:KG|PC))\s+([A-Z0-9]{2})\b/g;
+
+  for (const match of text.matchAll(pattern)) {
+    const names = pdfNameFromDisplay(match[3], match[4]);
+    rows.push({
+      route: `${match[1]}-${match[2]}`,
+      passenger_name: names.passenger_name,
+      pax_type: match[5],
+      check_in_baggage: compactSpaces(match[6]),
+      cabin_baggage: compactSpaces(match[7]),
+      carrier: match[8],
+    });
+  }
+
+  return rows;
+}
+
+function applyPdfSegmentBaggage(text, segments) {
+  for (const segment of segments) {
+    if (!segment.airline || !segment.flight_number) continue;
+    const pattern = new RegExp(`\\bFLIGHT\\s+${segment.airline}\\s+${segment.flight_number}\\b[\\s\\S]*?BAGGAGE\\s+ALLOWANCE:\\s*(\\d+\\s*(?:KG|PC))`, 'i');
+    const match = text.match(pattern);
+    if (!match) continue;
+    segment.check_in_baggage ||= compactSpaces(match[1]);
+  }
+}
+
 function joinWrappedFaLines(text) {
   const lines = cleanText(text).split('\n');
   const joined = [];
@@ -444,9 +636,33 @@ function joinWrappedFaLines(text) {
   for (let index = 0; index < lines.length; index += 1) {
     const current = lines[index];
     const next = lines[index + 1] || '';
+    const isFaLine = /^\s*\d+\s+FA\s+PAX\s+/.test(current);
+    const isWrappedFaTail = /^\s{6,}(?:\d{2,3})?\/S[\d-]+(?:\/P\d+)?\s*$/.test(next);
+    const segmentHeader = current.match(/^\s*\d+\s+[A-Z0-9]{2}\s*\d{1,4}\s+[A-Z](?:\s+[A-Z])?\s+\d{2}[A-Z]{3}(?:\s+\d)?\s+[A-Z]{6}\s*$/);
+
+    if (segmentHeader) {
+      const segmentParts = [current.trim()];
+      let lookahead = index + 1;
+
+      while (lookahead < lines.length && !/^\s*\d+\s+[A-Z0-9]{2,4}\b/.test(lines[lookahead])) {
+        const continuation = lines[lookahead].trim();
+        if (/\b[A-Z]{2}\d+\b/.test(continuation) && /\b\d{4}(?:\+\d+)?\b/.test(continuation)) {
+          segmentParts.push(continuation);
+        }
+        lookahead += 1;
+      }
+
+      if (segmentParts.length > 1) {
+        joined.push(segmentParts.join(' '));
+        index = lookahead - 1;
+        continue;
+      }
+    }
+
     if (
-      /(\d{3}-\d{10}\/ET[A-Z]{2}\/[A-Z]{3}[\d.]+\/\d{2}[A-Z]{3}\d{2}\/[A-Z0-9]+\/\d{6})\s*$/.test(current)
-      && /^\s{6,}(\d{2}\/S[\d-]+(?:\/P\d+)?)\s*$/.test(next)
+      isFaLine
+      && isWrappedFaTail
+      && !/\/P\d+\s*$/.test(current)
     ) {
       joined.push(`${current.trim()}${next.trim()}`);
       index += 1;
@@ -458,6 +674,54 @@ function joinWrappedFaLines(text) {
   return joined.join('\n');
 }
 
+function splitDisplayTitleName(value) {
+  const match = compactSpaces(value).toUpperCase().match(/^([A-Z]+(?:\s+[A-Z]+)+)\/(MR|MRS|MS|MISS|MSTR)$/);
+  if (!match) return null;
+  const tokens = match[1].split(' ');
+  const lastName = tokens[tokens.length - 1];
+  const firstName = tokens.slice(0, -1).join(' ');
+  return {
+    title: match[2],
+    last_name: lastName,
+    first_name: firstName,
+    passenger_name: `${lastName}/${firstName}`,
+  };
+}
+
+function parseCrypticSegmentLine(line, fallbackYear) {
+  const segment = line.match(/^\s*(\d+)\s+([A-Z0-9]{2})\s*(\d{1,4})\s+([A-Z])(?:\s+[A-Z])?\s+(\d{2}[A-Z]{3})(?:\s+\d)?\s+([A-Z]{3})([A-Z]{3})\s+([A-Z]{2})(\d+)?\s+(.+?)(?:\s+\*[A-Z0-9/]+\*)?\s*$/);
+  if (!segment) return null;
+
+  const timeMatches = [...segment[10].matchAll(/\b(\d{4})(?:\+(\d+))?\b/g)];
+  if (timeMatches.length < 2) return null;
+
+  const departureDate = parseDdMmmIso(segment[5], fallbackYear);
+  const departureTime = hhmm(timeMatches[0][1]);
+  const arrivalMatch = timeMatches[timeMatches.length - 1];
+  const arrivalTime = hhmm(arrivalMatch[1]);
+  const extraDays = arrivalMatch[2] ? Number(arrivalMatch[2]) : (departureTime > arrivalTime ? 1 : 0);
+  const singleDigitTokens = [...segment[10].matchAll(/\b(\d)\b/g)].map((match) => match[1]);
+
+  return {
+    key: `${segment[2]}${segment[3]}-${segment[5]}-${segment[6]}-${segment[7]}`,
+    segment_ref: Number(segment[1]),
+    airline: segment[2],
+    flight_number: segment[3],
+    booking_class: segment[4],
+    departure_city: segment[6],
+    arrival_city: segment[7],
+    departure_date: departureDate,
+    arrival_date: addDaysIso(departureDate, extraDays),
+    departure_time: departureTime,
+    arrival_time: arrivalTime,
+    departure_terminal: singleDigitTokens[0] || '',
+    arrival_terminal: '',
+    check_in_baggage: '',
+    cabin_baggage: '',
+    segment_status: segment[8],
+  };
+}
+
 function deriveRoute(segments) {
   if (!segments.length) {
     return { sector: '', outbound_date: '', inbound_date: '', trip_type: 'ONE_WAY', ow_rt: 'OW' };
@@ -465,9 +729,23 @@ function deriveRoute(segments) {
 
   const first = segments[0];
   const last = segments[segments.length - 1];
-  const returnStartIndex = segments.findIndex((segment, index) => (
-    index > 0 && segment.arrival_city === first.departure_city
-  ));
+  const routeCities = [first.departure_city, ...segments.map((segment) => segment.arrival_city)].filter(Boolean);
+  let returnStartIndex = -1;
+  if (routeCities.length === segments.length + 1 && last.arrival_city === first.departure_city) {
+    for (let index = 1; index < routeCities.length - 1; index += 1) {
+      const outboundPath = routeCities.slice(0, index);
+      const returnPath = routeCities.slice(index + 1);
+      if (returnPath.join('|') === outboundPath.reverse().join('|')) {
+        returnStartIndex = index;
+        break;
+      }
+    }
+  }
+  if (returnStartIndex < 0) {
+    returnStartIndex = segments.findIndex((segment, index) => (
+      index > 0 && segment.arrival_city === first.departure_city
+    ));
+  }
   const isRoundtrip = returnStartIndex > 0;
   const outboundEnd = isRoundtrip ? segments[Math.max(0, returnStartIndex - 1)] : last;
   const inboundStart = isRoundtrip ? segments[returnStartIndex] : null;
@@ -602,6 +880,21 @@ export function parseCrypticBooking(input, provider = 'auto') {
     passengerByRef.set(passenger.p_ref, passenger);
   }
 
+  for (const match of text.matchAll(/(\d+)\.([A-Z]+(?:\s+[A-Z]+)+\/(?:MR|MRS|MS|MISS|MSTR))/g)) {
+    const pRef = Number(match[1]);
+    if (passengerByRef.has(pRef)) continue;
+    const parsedName = splitDisplayTitleName(match[2]);
+    if (!parsedName) continue;
+    const passenger = createPassenger({
+      seq_no: pRef,
+      p_ref: pRef,
+      ...parsedName,
+      pax_type: 'ADT',
+    });
+    passengers.push(passenger);
+    passengerByRef.set(passenger.p_ref, passenger);
+  }
+
   for (const line of lines) {
     const inft = line.match(/^\s*\d+\s+SSR\s+INFT?\s+[A-Z]{2}\s+(?:HK\d+\s+)?([A-Z]+\/[A-Z]+(?:\s+[A-Z]+)?)\s+(\d{2}[A-Z]{3}\d{2})(?:\/P(\d+))?/);
     if (inft) {
@@ -624,34 +917,10 @@ export function parseCrypticBooking(input, provider = 'auto') {
 
   const segments = [];
   for (const line of lines) {
-    const segment = line.match(/^\s*(\d+)\s+([A-Z]{2,3})\s+(\d{1,4})\s+([A-Z])(?:\s+[A-Z])?\s+(\d{2}[A-Z]{3})(?:\s+(\d))?\s+([A-Z]{3})([A-Z]{3})\s+([A-Z]{2})(\d+)?\s+(?:\d+\s+)?(\d{4})\s+(\d{4})/)
-      || line.match(/^\s*(\d+)\s+([A-Z]{2})(\d{3,4})([A-Z])(?:\s+[A-Z])?\s+(\d{2}[A-Z]{3})(?:\s+(\d))?\s+([A-Z]{3})([A-Z]{3})\s+([A-Z]{2})(\d+)?\s+(?:\d+\s+)?(\d{4})\s+(\d{4})/)
-      || line.match(/^\s*(\d+)\s+([A-Z]{2})(\d{3,4})\s+([A-Z])(?:\s+[A-Z])?\s+(\d{2}[A-Z]{3})(?:\s+(\d))?\s+([A-Z]{3})([A-Z]{3})\s+([A-Z]{2})(\d+)?\s+(?:\d+\s+)?(\d{4})\s+(\d{4})/);
+    const segment = parseCrypticSegmentLine(line, fallbackYear);
     if (!segment) continue;
-    const departureDate = parseDdMmmIso(segment[5], fallbackYear);
-    const departureTime = hhmm(segment[11]);
-    const arrivalTime = hhmm(segment[12]);
-    const arrivalDate = departureTime > arrivalTime ? addDaysIso(departureDate, 1) : departureDate;
-    const key = `${segment[2]}${segment[3]}-${segment[5]}-${segment[7]}-${segment[8]}`;
-    if (segments.some((item) => item.key === key)) continue;
-    segments.push({
-      key,
-      segment_ref: Number(segment[1]),
-      airline: segment[2],
-      flight_number: segment[3],
-      booking_class: segment[4],
-      departure_city: segment[7],
-      arrival_city: segment[8],
-      departure_date: departureDate,
-      arrival_date: arrivalDate,
-      departure_time: departureTime,
-      arrival_time: arrivalTime,
-      departure_terminal: '',
-      arrival_terminal: '',
-      check_in_baggage: '',
-      cabin_baggage: '',
-      segment_status: segment[9],
-    });
+    if (segments.some((item) => item.key === segment.key)) continue;
+    segments.push(segment);
   }
 
   for (const line of lines) {
@@ -707,9 +976,11 @@ export function parseCrypticBooking(input, provider = 'auto') {
 
   const faPassengerRefs = new Set();
   for (const line of lines) {
-    const fa = line.match(/^\s*\d+\s+FA\s+PAX\s+(\d{3}-\d{10})\/ET([A-Z]{2})\/([A-Z]{3})([\d.]+)\/(\d{2}[A-Z]{3}\d{2})\/([A-Z0-9]+)\/(\d{8})(?:\/S([\d-]+))?(?:\/P(\d+))?/);
+    const fa = line.match(/^\s*\d+\s+FA\s+PAX\s+(\d{3}-\d{10})\/ET([A-Z]{2})\/(?:([A-Z]{3})([\d.]+)\/)?(\d{2}[A-Z]{3}\d{2})\/([A-Z0-9]+)\/(\d{5,8})(?:\/S([\d-]+))?(?:\/P(\d+))?/);
     if (!fa) continue;
-    const passenger = fa[9] ? passengerByRef.get(Number(fa[9])) : (passengers.length === 1 ? passengers[0] : null);
+    const passenger = fa[9]
+      ? passengerByRef.get(Number(fa[9]))
+      : (passengers.length === 1 ? passengers[0] : passengers.find((item) => !item.ticket_no));
     if (!passenger) {
       warnings.push('AMBIGUOUS_FA_LINE');
       continue;
@@ -717,8 +988,8 @@ export function parseCrypticBooking(input, provider = 'auto') {
     passenger.ticket_no = fa[1];
     passenger.ticket_format = 'GDS';
     passenger.ticket_endorsement = fa[2];
-    passenger.currency = fa[3];
-    passenger.fare_issued = money(fa[4]);
+    passenger.currency = fa[3] || '';
+    passenger.fare_issued = fa[4] ? money(fa[4]) : '';
     passenger.ticket_issue_date = parseDdMmmIso(fa[5], fallbackYear);
     passenger.ticket_status = 'TICKETED';
     faPassengerRefs.add(passenger.p_ref);
@@ -745,6 +1016,7 @@ export function parseCrypticBooking(input, provider = 'auto') {
   }
 
   if (passengers.length && faPassengerRefs.size && faPassengerRefs.size !== passengers.length) warnings.push('TICKET_COUNT_MISMATCH');
+  passengers.sort((a, b) => (a.p_ref || 0) - (b.p_ref || 0));
 
   const remarkParts = [];
   let linkedPnr = '';
@@ -801,6 +1073,19 @@ export function parsePdfBooking(input) {
     passengerByName.set(passenger.passenger_name, passenger);
   }
 
+  for (const match of text.matchAll(/\b([A-Z][A-Z'-]+\/[A-Z][A-Z'-]+)\s+FLIGHT\b/g)) {
+    addPdfPassenger(passengers, passengerByName, match[1]);
+  }
+
+  for (const match of text.matchAll(/\b(?:PASSENGER|TRAVELLER|TRAVELER|FOR)\s*:?\s+([A-Z][A-Z'-]+\/[A-Z][A-Z'-]+)\b/g)) {
+    addPdfPassenger(passengers, passengerByName, match[1]);
+  }
+
+  const headerPassenger = text.match(/\b([A-Z][A-Z'-]+\/[A-Z][A-Z'-]+)\s+(?:TELEPHONE|FAX|FLIGHT)\b/);
+  if (headerPassenger) {
+    addPdfPassenger(passengers, passengerByName, headerPassenger[1]);
+  }
+
   for (const match of text.matchAll(/(?:INFANT\s*-\s*CONFIRMED\s+)?([A-Z]+\/[A-Z]+)\s+(\d{2}[A-Z]{3}\d{2})/g)) {
     if (passengerByName.has(match[1])) continue;
     const names = splitGdsName(match[1]);
@@ -818,7 +1103,9 @@ export function parsePdfBooking(input) {
 
   const tickets = extractPdfTickets(text, currentYear);
   tickets.forEach((ticket, index) => {
-    const passenger = passengers[index];
+    const passenger = ticket.passenger_name
+      ? passengerByName.get(ticket.passenger_name) || addPdfPassenger(passengers, passengerByName, ticket.passenger_name)
+      : passengers[index];
     if (!passenger) return;
     passenger.ticket_no = ticket.ticket_no;
     passenger.ticket_issue_date = ticket.ticket_issue_date;
@@ -826,12 +1113,13 @@ export function parsePdfBooking(input) {
     passenger.warnings.push('FARE_REQUIRED');
   });
 
-  const endorsement = (text.match(/ENDORSEMENTS?:\s+(.+)$/m) || [])[1];
+  const endorsement = (text.match(/ENDORSEMENTS?:\s+(.+?)(?:\s+BAGGAGE\s+INFORMATION|\s+DATA\s+PROTECTION\s+NOTICE|$)/) || [])[1];
   if (endorsement) passengers.forEach((passenger) => {
     passenger.ticket_endorsement = compactSpaces(endorsement);
   });
 
   let segments = extractPdfSegments(text, currentYear);
+  applyPdfSegmentBaggage(text, segments);
 
   if (segments.length && !segments[0].airline) {
     const carrier = flightTokenMatches(text)[0];
@@ -867,6 +1155,30 @@ export function parsePdfBooking(input) {
     if (segments[0]) {
       segments[0].check_in_baggage ||= compactSpaces(match[1]);
       segments[0].cabin_baggage ||= compactSpaces(match[2]);
+    }
+  }
+
+  const baggageRows = extractPdfBaggageRows(text);
+  for (const row of baggageRows) {
+    const passenger = passengerByName.get(row.passenger_name);
+    if (!passenger) continue;
+    if (!passenger.baggage.some((item) => item.route === row.route && item.check_in_baggage === row.check_in_baggage && item.cabin_baggage === row.cabin_baggage)) {
+      passenger.baggage.push(row);
+    }
+  }
+
+  const routeCities = segments.length
+    ? [segments[0].departure_city, ...segments.map((segment) => segment.arrival_city)]
+    : [];
+  for (const row of baggageRows) {
+    const [from, to] = row.route.split('-');
+    const fromIndex = routeCities.indexOf(from);
+    const toIndex = routeCities.findIndex((city, index) => index > fromIndex && city === to);
+    if (fromIndex < 0 || toIndex <= fromIndex) continue;
+    for (let index = fromIndex; index < toIndex; index += 1) {
+      if (!segments[index]) continue;
+      segments[index].check_in_baggage ||= row.check_in_baggage;
+      segments[index].cabin_baggage ||= row.cabin_baggage;
     }
   }
 
