@@ -304,3 +304,48 @@ assert.equal(wrappedAmadeusResult.drafts[0].sector, 'FCO-ATQ');
 assert.equal(wrappedAmadeusResult.drafts[0].outbound_date, '2026-06-12');
 
 console.log('bookingParser wrapped Amadeus segment and fareless FA checks passed');
+
+const displayTitleNamePnr = `
+- TST RLR ---
+RP/MILIG21AG/MILIG21AG     DM/SU  27JUN26/1056Z  YHMYGD
+ 1.GURMAIL KAUR/MS  2.MANN/KULWANT SINGH
+ 3.SUKHMINDER SINGH/MR
+ 4  AI 137 Q 28JUN 7 DELMXP HK3  1150 3  1250 1930  *1A/E*
+ 5 AP MIL 0240701719 - TRAVEL EXPERTS - A
+ 6 TK OK27JUN/MILIG21AG//ETAI
+ 7 SSR CTCE AI HK1 BOOKINGS//FLYFORSURE.COM/P1
+ 8 SSR CTCM AI HK1 00393805932640/IT/P1
+ 9 RMZ CONF*FORMAT:PDF
+10 RMZ CONF*LANG:EN
+11 FA PAX 098-9497915117/ETAI/EUR598.05/27JUN26/MILIG21AG/38237
+       931/S4/P1
+12 FA PAX 098-9497915118/ETAI/EUR598.05/27JUN26/MILIG21AG/38237
+       931/S4/P2
+13 FA PAX 098-9497915119/ETAI/EUR598.05/27JUN26/MILIG21AG/38237
+       931/S4/P3
+`;
+
+const displayTitleResult = parseBookingText({ text: displayTitleNamePnr, source: 'CRYPTIC', provider: 'amadeus' });
+
+assert.equal(displayTitleResult.raw.pnr, 'YHMYGD');
+assert.equal(displayTitleResult.meta.passengerCount, 3);
+assert.equal(displayTitleResult.meta.ticketCount, 3);
+assert.equal(displayTitleResult.meta.segmentCount, 1);
+assert.equal(displayTitleResult.drafts.length, 3);
+assert.deepEqual(
+  displayTitleResult.raw.passengers.map((passenger) => `${passenger.p_ref}:${passenger.passenger_name}:${passenger.pax_type}:${passenger.ticket_no}`),
+  [
+    '1:KAUR/GURMAIL:ADT:098-9497915117',
+    '2:MANN/KULWANT SINGH:ADT:098-9497915118',
+    '3:SINGH/SUKHMINDER:ADT:098-9497915119',
+  ],
+);
+assert.deepEqual(
+  displayTitleResult.raw.segments.map((segment) => `${segment.airline}${segment.flight_number}:${segment.departure_city}-${segment.arrival_city}:${segment.departure_time}-${segment.arrival_time}`),
+  ['AI137:DEL-MXP:11:50-19:30'],
+);
+assert.equal(displayTitleResult.drafts[0].sector, 'DEL-MXP');
+assert.equal(displayTitleResult.drafts[0].outbound_date, '2026-06-28');
+assert.deepEqual(displayTitleResult.warnings, []);
+
+console.log('bookingParser display-title names and spaced-airport segment checks passed');

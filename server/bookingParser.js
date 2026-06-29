@@ -689,7 +689,7 @@ function splitDisplayTitleName(value) {
 }
 
 function parseCrypticSegmentLine(line, fallbackYear) {
-  const segment = line.match(/^\s*(\d+)\s+([A-Z0-9]{2})\s*(\d{1,4})\s+([A-Z])(?:\s+[A-Z])?\s+(\d{2}[A-Z]{3})(?:\s+\d)?\s+([A-Z]{3})([A-Z]{3})\s+([A-Z]{2})(\d+)?\s+(.+?)(?:\s+\*[A-Z0-9/]+\*)?\s*$/);
+  const segment = line.match(/^\s*(\d+)\s+([A-Z0-9]{2})\s*(\d{1,4})\s+([A-Z])(?:\s+[A-Z])?\s+(\d{2}[A-Z]{3}\d{0,2})(?:\s+\d)?\s+([A-Z]{3})\s?([A-Z]{3})\s+([A-Z]{2})(\d+)?\s+(.+?)(?:\s+\*[A-Z0-9/]+\*)?\s*$/);
   if (!segment) return null;
 
   const timeMatches = [...segment[10].matchAll(/\b(\d{4})(?:\+(\d+))?\b/g)];
