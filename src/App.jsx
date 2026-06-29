@@ -2,6 +2,7 @@ import { Navigate, Route, Routes, NavLink, useLocation } from 'react-router-dom'
 import { Bell, CreditCard, FileText, LayoutDashboard, LogOut, Plane, Receipt, RefreshCcw, Search, Settings, ShieldCheck, UserCog } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Bookings from './pages/Bookings';
+import BookingDetail from './pages/BookingDetail';
 import Payments from './pages/Payments';
 import Refunds from './pages/Refunds';
 import Expenses from './pages/Expenses';
@@ -107,6 +108,7 @@ function AuthenticatedApp() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/bookings" element={<Bookings />} />
+            <Route path="/bookings/:invoiceNo" element={<BookingDetail />} />
             <Route path="/payments" element={<Payments />} />
             <Route path="/refunds" element={<Refunds />} />
             <Route path="/expenses" element={<Expenses />} />

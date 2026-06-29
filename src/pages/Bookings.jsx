@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { getBookings, getPayments, getUsers, saveBooking, savePayment } from '../helpers/storage';
 import {
   PAYMENT_MODES,
@@ -718,6 +719,7 @@ function makeBookingPayload(formValues, index) {
 }
 
 export default function Bookings() {
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('LIST');
   const [bookings, setBookings] = useState(() => getBookings());
   const [payments, setPayments] = useState(() => getPayments());
@@ -1798,7 +1800,18 @@ export default function Bookings() {
                     <tr key={booking.id}>
                       {activeColumns.map((column) => (
                         <td key={column.key} title={formatCell(booking, column.key)}>
-                          {column.key === 'payment_status' || column.key === 'alert' || column.key === 'ticket_status' ? (
+                          {column.key === 'invoice_no' ? (
+                            <a
+                              href="#"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                navigate(`/bookings/${booking.invoice_no}`);
+                              }}
+                              style={{ color: 'var(--color-text-info)', textDecoration: 'none', cursor: 'pointer' }}
+                            >
+                              {formatCell(booking, column.key)}
+                            </a>
+                          ) : column.key === 'payment_status' || column.key === 'alert' || column.key === 'ticket_status' ? (
                             <span className={`badge ${String(booking[column.key]).toLowerCase()}`}>
                               {formatCell(booking, column.key)}
                             </span>
