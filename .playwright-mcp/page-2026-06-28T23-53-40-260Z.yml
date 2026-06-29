@@ -1,0 +1,15 @@
+- generic [ref=e4]:
+  - img "FlyForSure" [ref=e5]
+  - generic [ref=e6]:
+    - generic [ref=e7]: Admin dashboard
+    - heading "Sign in" [level=1] [ref=e8]
+    - paragraph [ref=e9]: Use your FlyForSure dashboard account.
+  - generic [ref=e10]:
+    - generic [ref=e11]: Email
+    - textbox "Email" [ref=e12]
+  - generic [ref=e13]:
+    - generic [ref=e14]: Password
+    - textbox "Password" [ref=e15]
+  - button "Sign in" [ref=e16] [cursor=pointer]:
+    - img [ref=e17]
+    - text: Sign in

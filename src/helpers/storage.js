@@ -4,6 +4,7 @@ const STORAGE_KEYS = {
   BOOKINGS: 'ffs_bookings',
   PAYMENTS: 'ffs_payments',
   REFUNDS: 'ffs_refunds',
+  AMENDMENTS: 'ffs_amendments',
   EXPENSES: 'ffs_expenses',
   ALERTS: 'ffs_alerts',
   USERS: 'ffs_users',
@@ -48,6 +49,10 @@ export function savePayment(payment) { return save(STORAGE_KEYS.PAYMENTS, paymen
 // Refunds
 export function getRefunds() { return readData(STORAGE_KEYS.REFUNDS); }
 export function saveRefund(refund) { return save(STORAGE_KEYS.REFUNDS, refund); }
+
+// Amendments
+export function getAmendments() { return readData(STORAGE_KEYS.AMENDMENTS); }
+export function saveAmendment(amendment) { return save(STORAGE_KEYS.AMENDMENTS, amendment); }
 
 // Expenses
 export function getExpenses() { return readData(STORAGE_KEYS.EXPENSES); }

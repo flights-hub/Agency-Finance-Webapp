@@ -363,3 +363,43 @@ export function generateAlerts(bookings = [], payments = [], refunds = []) {
 
   return [...bookingAlerts, ...refundAlerts];
 }
+
+// Quote calculation helpers for booking actions
+export function calculateVoidQuote(balance) {
+  return {
+    message: 'Ticket will be voided. Seat released, balance becomes refundable.',
+    refundableAmount: numeric(balance),
+    charges: 0,
+  };
+}
+
+export function calculateCancelQuote(balance, cancellationPercentage = 10, processingFee = 5) {
+  const cancellationCharge = numeric(balance) * (cancellationPercentage / 100);
+  const refundAmount = Math.max(0, numeric(balance) - cancellationCharge - processingFee);
+  return {
+    message: `Cancellation charges applied`,
+    cancellationPercentage,
+    cancellationCharge,
+    processingFee,
+    refundAmount,
+  };
+}
+
+export function calculateAmendQuote(balance, changeFee = 25) {
+  const newBalance = numeric(balance) + numeric(changeFee);
+  return {
+    message: 'Amendment will incur a change fee',
+    changeFee,
+    newBalance,
+  };
+}
+
+export function calculateRefundQuote(balance, penaltyAmount = 10, nonRefundableEmd = 0) {
+  const refundableAmount = Math.max(0, numeric(balance) - numeric(penaltyAmount) - numeric(nonRefundableEmd));
+  return {
+    message: 'Refund calculation',
+    refundable: refundableAmount,
+    penalty: numeric(penaltyAmount),
+    nonRefundableEmd: numeric(nonRefundableEmd),
+  };
+}
