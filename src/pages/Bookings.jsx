@@ -69,6 +69,60 @@ const DEFAULT_COLUMNS = [
   'refund_flag',
 ];
 
+const PAX_TYPES = [
+  ['ADT', 'Adult'],
+  ['CHD', 'Child'],
+  ['INF', 'Infant'],
+];
+
+const PAX_LABELS = Object.fromEntries(PAX_TYPES);
+
+const pricingRowId = (type, index) => `${type}-${index + 1}`;
+
+const createPricingRow = (type = 'ADT', index = 0, values = {}) => ({
+  id: values.id || pricingRowId(type, index),
+  pax_type: type,
+  passenger_name: '',
+  ticket_no: '',
+  buying_price: '',
+  selling_price: '',
+  ...values,
+});
+
+function pricingRowsFromCounts(passengerCounts, currentRows = []) {
+  return PAX_TYPES.flatMap(([type]) => {
+    const count = Math.max(0, Number(passengerCounts[type] || 0));
+    const existingRows = currentRows.filter((row) => row.pax_type === type);
+
+    return Array.from({ length: count }, (_, index) => createPricingRow(type, index, existingRows[index]));
+  });
+}
+
+function pricingRowsFromParsedPassengers(passengers, drafts, currentRows = []) {
+  const byName = new Map(
+    drafts
+      .filter((draft) => draft.passenger_name)
+      .map((draft) => [draft.passenger_name, draft]),
+  );
+  const typeIndexes = {};
+
+  return passengers.map((passenger, index) => {
+    const type = passenger.pax_type || 'ADT';
+    const typeIndex = typeIndexes[type] || 0;
+    typeIndexes[type] = typeIndex + 1;
+    const draft = byName.get(passenger.passenger_name) || drafts[index] || {};
+    const current = currentRows.filter((row) => row.pax_type === type)[typeIndex] || {};
+    const buyingPrice = passenger.fare_issued || draft.buying_price_per_pax || draft.fare_issued || current.buying_price || '';
+
+    return createPricingRow(type, typeIndex, {
+      passenger_name: passenger.passenger_name || draft.passenger_name || current.passenger_name || '',
+      ticket_no: passenger.ticket_no || draft.ticket_no || current.ticket_no || '',
+      buying_price: buyingPrice ? String(buyingPrice) : '',
+      selling_price: current.selling_price || draft.selling_price_per_pax || '',
+    });
+  });
+}
+
 const EMPTY_FORM = {
   booking_date: new Date().toISOString().split('T')[0],
   bill_to_type: 'AGENT',
@@ -89,11 +143,7 @@ const EMPTY_FORM = {
     CHD: 0,
     INF: 0,
   },
-  pricing: {
-    ADT: { passenger_name: '', buying_price: '', selling_price: '' },
-    CHD: { passenger_name: '', buying_price: '', selling_price: '' },
-    INF: { passenger_name: '', buying_price: '', selling_price: '' },
-  },
+  pricing_rows: [createPricingRow('ADT', 0)],
   supplier_segments: [
     { id: 'onward', label: 'Onward', supplier_name: '', pnr: '', buying_price: '' },
   ],
@@ -137,12 +187,6 @@ const EMPTY_FORM = {
   remarks: '',
   refund_flag: false,
 };
-
-const PAX_TYPES = [
-  ['ADT', 'Adult'],
-  ['CHD', 'Child'],
-  ['INF', 'Infant'],
-];
 
 const TRIP_TYPES = [
   ['ONE_WAY', 'One Way'],
@@ -209,39 +253,42 @@ function parsedConnection(segment, index) {
   });
 }
 
+// Mirrors the server's deriveRoute() turnaround detection so the onward/return cards
+// split at the true turnaround on multi-leg roundtrips (e.g. FCO-DEL-ATQ-DEL-FCO) rather
+// than the first leg that merely lands back at the origin.
+function returnStartIndexForConnections(connections) {
+  const first = connections[0];
+  const last = connections[connections.length - 1];
+  const routeCities = [first.departure_city, ...connections.map((connection) => connection.arrival_city)].filter(Boolean);
+
+  if (routeCities.length === connections.length + 1 && last.arrival_city === first.departure_city) {
+    for (let index = 1; index < routeCities.length - 1; index += 1) {
+      const outboundPath = routeCities.slice(0, index);
+      const returnPath = routeCities.slice(index + 1);
+      if (returnPath.join('|') === outboundPath.reverse().join('|')) {
+        return index;
+      }
+    }
+  }
+
+  return connections.findIndex((connection, index) => (
+    index > 0 && connection.arrival_city === first.departure_city
+  ));
+}
+
 function splitConnectionsByTrip(connections, tripType) {
   if (tripType !== 'ROUNDTRIP' || connections.length < 2) {
     return [{ id: 'onward', label: 'Onward', connections }];
   }
 
-  const firstDeparture = connections[0].departure_city;
-  const returnIndex = connections.findIndex((connection, index) => (
-    index > 0 && connection.arrival_city === firstDeparture
-  ));
+  const returnStartIndex = returnStartIndexForConnections(connections);
 
-  if (returnIndex <= 0) return [{ id: 'onward', label: 'Onward', connections }];
+  if (returnStartIndex <= 0) return [{ id: 'onward', label: 'Onward', connections }];
 
   return [
-    { id: 'onward', label: 'Onward', connections: connections.slice(0, returnIndex) },
-    { id: 'return', label: 'Return', connections: connections.slice(returnIndex) },
+    { id: 'onward', label: 'Onward', connections: connections.slice(0, returnStartIndex) },
+    { id: 'return', label: 'Return', connections: connections.slice(returnStartIndex) },
   ];
-}
-
-function namesForType(passengers, type) {
-  return passengers
-    .filter((passenger) => (passenger.pax_type || 'ADT') === type)
-    .map((passenger) => passenger.passenger_name)
-    .filter(Boolean)
-    .join(', ');
-}
-
-function commonFareForType(drafts, type) {
-  const values = drafts
-    .filter((draft) => (draft.pax_type || 'ADT') === type)
-    .map((draft) => numeric(draft.fare_issued || draft.buying_price_per_pax))
-    .filter((value) => value > 0);
-  if (!values.length) return '';
-  return String(values[0]);
 }
 
 function parsedCounts(passengers) {
@@ -917,25 +964,26 @@ export default function Bookings() {
   };
 
   const updatePassengerCount = (type, value) => {
-    setFormValues((current) => ({
-      ...current,
-      passengers: {
+    setFormValues((current) => {
+      const passengers = {
         ...current.passengers,
         [type]: Math.max(0, Number(value || 0)),
-      },
-    }));
+      };
+
+      return {
+        ...current,
+        passengers,
+        pricing_rows: pricingRowsFromCounts(passengers, current.pricing_rows || []),
+      };
+    });
   };
 
-  const updatePricing = (type, key, value) => {
+  const updatePricingRow = (rowId, key, value) => {
     setFormValues((current) => ({
       ...current,
-      pricing: {
-        ...current.pricing,
-        [type]: {
-          ...current.pricing[type],
-          [key]: value,
-        },
-      },
+      pricing_rows: (current.pricing_rows || []).map((row) => (
+        row.id === rowId ? { ...row, [key]: value } : row
+      )),
     }));
   };
 
@@ -1014,11 +1062,17 @@ export default function Bookings() {
       ));
     const flightSegments = connections.length ? splitConnectionsByTrip(connections, tripType) : EMPTY_FORM.flight_segments;
     const firstConnection = flightSegments[0]?.connections[0] || {};
+    const onwardSegment = flightSegments[0];
+    const onwardLastConnection = onwardSegment?.connections[onwardSegment.connections.length - 1] || firstConnection;
     const lastSegment = flightSegments[flightSegments.length - 1] || flightSegments[0];
     const lastConnection = lastSegment?.connections[lastSegment.connections.length - 1] || firstConnection;
+    // For a roundtrip the destination is the onward turnaround point, not the final return arrival (which is the origin).
+    const destinationConnection = tripType === 'ROUNDTRIP' ? onwardLastConnection : lastConnection;
+    // The parser's draft sector (e.g. "FCO-ATQ") is the authoritative origin/destination: deriveRoute()
+    // detects the true roundtrip turnaround, which the client-side connection split can miss on multi-leg trips.
     const sectorParts = String(firstDraft.sector || '').split('-').map((part) => part.trim()).filter(Boolean);
-    const parsedDeparture = firstSegment.departure_city || firstConnection.departure_city || sectorParts[0] || firstDraft.departure_city;
-    const parsedArrival = lastConnection.arrival_city || firstSegment.arrival_city || sectorParts[1] || firstDraft.arrival_city;
+    const parsedDeparture = sectorParts[0] || firstSegment.departure_city || firstConnection.departure_city || firstDraft.departure_city;
+    const parsedArrival = sectorParts[1] || destinationConnection.arrival_city || firstSegment.arrival_city || firstDraft.arrival_city;
     const supplierName = firstDraft.supplier_name || result.raw?.supplierName || '';
     const supplierPnr = firstDraft.pnr || result.meta?.pnr || result.raw?.pnr || '';
     const remarks = [
@@ -1039,23 +1093,7 @@ export default function Bookings() {
       supplier_name: supplierName || current.supplier_name,
       supplier_pnr: supplierPnr || current.supplier_pnr,
       passengers: parsedCounts(passengers),
-      pricing: {
-        ADT: {
-          ...current.pricing.ADT,
-          passenger_name: namesForType(passengers, 'ADT'),
-          buying_price: source === 'PDF' ? current.pricing.ADT.buying_price : commonFareForType(drafts, 'ADT'),
-        },
-        CHD: {
-          ...current.pricing.CHD,
-          passenger_name: namesForType(passengers, 'CHD'),
-          buying_price: source === 'PDF' ? current.pricing.CHD.buying_price : commonFareForType(drafts, 'CHD'),
-        },
-        INF: {
-          ...current.pricing.INF,
-          passenger_name: namesForType(passengers, 'INF'),
-          buying_price: source === 'PDF' ? current.pricing.INF.buying_price : commonFareForType(drafts, 'INF'),
-        },
-      },
+      pricing_rows: pricingRowsFromParsedPassengers(passengers, drafts, current.pricing_rows || []),
       supplier_segments: [{ id: 'single', label: 'Single Supplier', supplier_name: supplierName, pnr: supplierPnr, buying_price: '' }],
       flight_segments: flightSegments,
       passenger_name: firstDraft.passenger_name || current.passenger_name,
@@ -1079,14 +1117,11 @@ export default function Bookings() {
     ? formValues.custom_bill_to_name.trim()
     : formValues.bill_to_name.trim();
 
-  const selectedPaxRows = PAX_TYPES
-    .map(([type, label]) => ({
-      type,
-      label,
-      count: Number(formValues.passengers[type] || 0),
-      ...formValues.pricing[type],
-    }))
-    .filter((row) => row.count > 0);
+  const selectedPaxRows = (formValues.pricing_rows || []).map((row, index) => ({
+    ...row,
+    type: row.pax_type || 'ADT',
+    label: PAX_LABELS[row.pax_type] || row.pax_type || `Passenger ${index + 1}`,
+  }));
 
   const primarySupplierSegment = formValues.supplier_mode === 'MULTI'
     ? formValues.supplier_segments.find((segment) => segment.pnr || segment.supplier_name) || formValues.supplier_segments[0]
@@ -1101,21 +1136,18 @@ export default function Bookings() {
       formValues.arrival_city || lastConnection.arrival_city,
     ].filter(Boolean).join('-');
     const airline = primaryConnection.airline || '';
-    const flightNumber = formValues.flight_segments
-      .flatMap((segment) => segment.connections.map((connection) => connection.flight_number).filter(Boolean))
-      .join(', ');
     const pnr = primarySupplierSegment?.pnr || '';
     const supplierName = primarySupplierSegment?.supplier_name || '';
     const bookingRef = nextBookingRef(bookings);
 
     return selectedPaxRows.map((row) => {
-      const fareSold = row.count * numeric(row.selling_price);
-      const fareIssued = row.count * numeric(row.buying_price);
+      const fareSold = numeric(row.selling_price);
+      const fareIssued = numeric(row.buying_price);
       return makeBookingPayload({
         ...formValues,
         passenger_name: row.passenger_name,
         pax_type: row.type,
-        pax_count: row.count,
+        pax_count: 1,
         buying_price_per_pax: numeric(row.buying_price),
         selling_price_per_pax: numeric(row.selling_price),
         bill_to_type: formValues.bill_to_name === '__CUSTOM__' ? 'CUSTOMER' : 'AGENT',
@@ -1123,7 +1155,7 @@ export default function Bookings() {
         booked_by: formValues.booked_by || selectedBillTo,
         airline,
         pnr,
-        ticket_no: flightNumber,
+        ticket_no: row.ticket_no.trim(),
         sector,
         outbound_date: formValues.onward_date || primaryConnection.departure_date,
         inbound_date: formValues.trip_type === 'ONE_WAY' ? '' : formValues.return_date,
@@ -1443,10 +1475,6 @@ export default function Bookings() {
 
   const renderBookingForm = () => (
     <div className="manual-booking-stack">
-      <datalist id="supplier-options">
-        {supplierOptions.map((supplier) => <option key={supplier} value={supplier} />)}
-      </datalist>
-
       <div className="card manual-section-card">
         <div className="manual-section-head">
           <div>
@@ -1529,22 +1557,19 @@ export default function Bookings() {
           <div className="pricing-row pricing-head">
             <span>Type</span>
             <span>Passenger Name *</span>
-            <span>Count</span>
+            <span>Ticket Number</span>
             <span>Buying / Pax *</span>
             <span>Selling / Pax *</span>
-            <span>Total</span>
           </div>
-          {PAX_TYPES.filter(([type]) => type === 'ADT' || Number(formValues.passengers[type] || 0) > 0).map(([type, label]) => {
-            const count = Number(formValues.passengers[type] || 0);
-            const pricing = formValues.pricing[type];
+          {(formValues.pricing_rows || []).map((row) => {
+            const label = PAX_LABELS[row.pax_type] || row.pax_type;
             return (
-              <div className={`pricing-row ${count === 0 ? 'disabled' : ''}`} key={type}>
+              <div className="pricing-row" key={row.id}>
                 <strong>{label}</strong>
-                <input value={pricing.passenger_name} disabled={count === 0} onChange={(event) => updatePricing(type, 'passenger_name', event.target.value)} />
-                <input type="number" min="0" value={count} onChange={(event) => updatePassengerCount(type, event.target.value)} />
-                <input type="number" min="0" value={pricing.buying_price} disabled={count === 0} onChange={(event) => updatePricing(type, 'buying_price', event.target.value)} />
-                <input type="number" min="0" value={pricing.selling_price} disabled={count === 0} onChange={(event) => updatePricing(type, 'selling_price', event.target.value)} />
-                <span>EUR {(count * numeric(pricing.selling_price)).toLocaleString()}</span>
+                <input value={row.passenger_name} onChange={(event) => updatePricingRow(row.id, 'passenger_name', event.target.value)} />
+                <input value={row.ticket_no} onChange={(event) => updatePricingRow(row.id, 'ticket_no', event.target.value)} />
+                <input type="number" min="0" value={row.buying_price} onChange={(event) => updatePricingRow(row.id, 'buying_price', event.target.value)} />
+                <input type="number" min="0" value={row.selling_price} onChange={(event) => updatePricingRow(row.id, 'selling_price', event.target.value)} />
               </div>
             );
           })}
@@ -1568,7 +1593,10 @@ export default function Bookings() {
           <div className="manual-grid">
             <label>
               <span>Supplier *</span>
-              <input list="supplier-options" value={formValues.supplier_name} onChange={(event) => updateForm('supplier_name', event.target.value)} />
+              <select value={formValues.supplier_name} onChange={(event) => updateForm('supplier_name', event.target.value)}>
+                <option value="">Select supplier</option>
+                {supplierOptions.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
+              </select>
             </label>
             <label>
               <span>PNR *</span>
@@ -1582,7 +1610,10 @@ export default function Bookings() {
                 <strong>{segment.label}</strong>
                 <label>
                   <span>Supplier *</span>
-                  <input list="supplier-options" value={segment.supplier_name} onChange={(event) => updateSupplierSegment(index, 'supplier_name', event.target.value)} />
+                  <select value={segment.supplier_name} onChange={(event) => updateSupplierSegment(index, 'supplier_name', event.target.value)}>
+                    <option value="">Select supplier</option>
+                    {supplierOptions.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
+                  </select>
                 </label>
                 <label>
                   <span>PNR *</span>
