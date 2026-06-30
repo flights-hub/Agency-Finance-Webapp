@@ -145,6 +145,47 @@ export function seedDataIfEmpty() {
     }
   ];
 
+  // A single booking reference (INV-00004) shared by three passengers on one PNR
+  const familyPax = [
+    { passenger_name: "SINGH/HARPREET", pax_type: "ADT", ticket_no: "098-9497419318", dob: "1988-04-12" },
+    { passenger_name: "KAUR/SANDEEP", pax_type: "ADT", ticket_no: "098-9497419319", dob: "1990-09-03" },
+    { passenger_name: "SINGH/GURASEES", pax_type: "CHD", ticket_no: "098-9497419320", dob: "2016-01-22" },
+  ];
+  familyPax.forEach((pax) => {
+    sampleBookings.push({
+      pnr: "ZQFV6U",
+      invoice_no: "INV-00004",
+      booking_ref: "INV-00004",
+      booking_date: getRelativeDate(-1),
+      passenger_name: pax.passenger_name,
+      pax_type: pax.pax_type,
+      gender: "M",
+      mobile: "+39 345 5550100",
+      airline: "ITA Airways",
+      ticket_no: pax.ticket_no,
+      flight_no: "AZ 765",
+      ow_rt: "OW",
+      sector: "BRI-DEL",
+      outbound_date: getRelativeDate(14),
+      dob: pax.dob,
+      nationality: "Indian",
+      fare_type: "BASIC",
+      services_incl: "1PC 23kg",
+      supplier: "SU0001 - Almate SRL",
+      fare_sold: pax.pax_type === "CHD" ? 380 : 450,
+      fare_issued: pax.pax_type === "CHD" ? 330 : 400,
+      total_paid: 0,
+      balance_due: pax.pax_type === "CHD" ? 380 : 450,
+      payment_status: "UNPAID",
+      ticket_status: "TICKETED",
+      booked_by: "Meena Patel",
+      agent_issued_by: "Admin Peter",
+      remarks: "Family booking, single PNR",
+      refund_flag: false,
+      created_at: getRelativeDate(-1),
+    });
+  });
+
   sampleBookings.forEach(b => saveBooking(b));
 
   // Seed Payments

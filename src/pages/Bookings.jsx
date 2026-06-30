@@ -494,6 +494,19 @@ function invoiceNumber(index) {
   return `INV-${String(index + 1).padStart(5, '0')}`;
 }
 
+// One booking event (manual save, cryptic batch, PDF batch) shares a single
+// booking reference. The reference IS the invoice number. Derived from the
+// highest existing numeric suffix so it survives gaps in the sequence.
+function nextBookingRef(bookings) {
+  let max = 0;
+  bookings.forEach((booking) => {
+    const ref = booking.booking_ref || booking.invoice_no || '';
+    const match = /(\d+)\s*$/.exec(ref);
+    if (match) max = Math.max(max, Number(match[1]));
+  });
+  return `INV-${String(max + 1).padStart(5, '0')}`;
+}
+
 function normalizePnr(value = '') {
   return value.replace(/[^a-z0-9]/gi, '').toUpperCase();
 }
@@ -669,6 +682,7 @@ function deriveBooking(rawBooking, index, payments) {
     ...rawBooking,
     sl: index + 1,
     invoice_no: rawBooking.invoice_no || invoiceNumber(index),
+    booking_ref: rawBooking.booking_ref || rawBooking.invoice_no || invoiceNumber(index),
     booking_date: rawBooking.booking_date || rawBooking.created_at?.slice(0, 10) || '',
     pax_type: rawBooking.pax_type || 'ADT',
     ow_rt: rawBooking.inbound_date ? 'RT' : 'OW',
@@ -696,13 +710,14 @@ function formatCell(row, key) {
   return row[key] === '' || row[key] === undefined || row[key] === null ? '-' : row[key];
 }
 
-function makeBookingPayload(formValues, index) {
+function makeBookingPayload(formValues, bookingRef) {
   const fareSold = numeric(formValues.fare_sold);
   const fareIssued = numeric(formValues.fare_issued);
 
   return {
     ...formValues,
-    invoice_no: invoiceNumber(index),
+    invoice_no: bookingRef,
+    booking_ref: bookingRef,
     pnr: formValues.pnr.trim().toUpperCase(),
     pnr_n: normalizePnr(formValues.pnr),
     fare_sold: fareSold,
@@ -784,37 +799,66 @@ export default function Bookings() {
   const filteredBookings = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    return normalizedBookings
-      .filter((booking) => {
-        const matchesQuery = !query || [
-          booking.invoice_no,
-          booking.passenger_name,
-          booking.mobile,
-          booking.airline,
-          booking.pnr,
-          booking.ticket_no,
-          booking.sector,
-          booking.booked_by,
-          booking.agent_issued_by,
-          booking.remarks,
-        ].some((value) => String(value || '').toLowerCase().includes(query));
+    const filtered = normalizedBookings.filter((booking) => {
+      const matchesQuery = !query || [
+        booking.invoice_no,
+        booking.passenger_name,
+        booking.mobile,
+        booking.airline,
+        booking.pnr,
+        booking.ticket_no,
+        booking.sector,
+        booking.booked_by,
+        booking.agent_issued_by,
+        booking.remarks,
+      ].some((value) => String(value || '').toLowerCase().includes(query));
 
-        return matchesQuery
-          && (!airlineFilter || booking.airline === airlineFilter)
-          && (!paymentFilter || booking.payment_status === paymentFilter)
-          && (!alertFilter || booking.alert === alertFilter);
-      })
-      .sort((a, b) => {
-        const aValue = a[sortKey];
-        const bValue = b[sortKey];
-        const result = typeof aValue === 'number' && typeof bValue === 'number'
-          ? aValue - bValue
-          : String(aValue || '').localeCompare(String(bValue || ''), undefined, { numeric: true });
-        return sortDir === 'asc' ? result : -result;
-      });
+      return matchesQuery
+        && (!airlineFilter || booking.airline === airlineFilter)
+        && (!paymentFilter || booking.payment_status === paymentFilter)
+        && (!alertFilter || booking.alert === alertFilter);
+    });
+
+    const compare = (aValue, bValue) => {
+      const result = typeof aValue === 'number' && typeof bValue === 'number'
+        ? aValue - bValue
+        : String(aValue || '').localeCompare(String(bValue || ''), undefined, { numeric: true });
+      return sortDir === 'asc' ? result : -result;
+    };
+
+    // Group-stable sort: passengers of one booking (shared booking_ref) always
+    // stay together. Groups are ordered by their lead row's sort column; rows
+    // within a group keep their natural order.
+    const groups = new Map();
+    filtered.forEach((booking) => {
+      const ref = booking.booking_ref || booking.invoice_no || booking.id;
+      if (!groups.has(ref)) groups.set(ref, []);
+      groups.get(ref).push(booking);
+    });
+
+    return [...groups.values()]
+      .sort((groupA, groupB) => compare(groupA[0]?.[sortKey], groupB[0]?.[sortKey]))
+      .flat();
   }, [airlineFilter, alertFilter, normalizedBookings, paymentFilter, search, sortDir, sortKey]);
 
-  const draftPreview = deriveBooking(makeBookingPayload(formValues, bookings.length), bookings.length, []);
+  const groupMeta = useMemo(() => {
+    const counts = new Map();
+    filteredBookings.forEach((booking) => {
+      const ref = booking.booking_ref || booking.invoice_no;
+      counts.set(ref, (counts.get(ref) || 0) + 1);
+    });
+
+    const meta = {};
+    let prevRef = null;
+    filteredBookings.forEach((booking) => {
+      const ref = booking.booking_ref || booking.invoice_no;
+      meta[booking.id] = { ref, size: counts.get(ref) || 1, isStart: ref !== prevRef };
+      prevRef = ref;
+    });
+    return meta;
+  }, [filteredBookings]);
+
+  const draftPreview = deriveBooking(makeBookingPayload(formValues, nextBookingRef(bookings)), bookings.length, []);
 
   const refreshBookings = () => {
     setBookings(getBookings());
@@ -1062,8 +1106,9 @@ export default function Bookings() {
       .join(', ');
     const pnr = primarySupplierSegment?.pnr || '';
     const supplierName = primarySupplierSegment?.supplier_name || '';
+    const bookingRef = nextBookingRef(bookings);
 
-    return selectedPaxRows.map((row, index) => {
+    return selectedPaxRows.map((row) => {
       const fareSold = row.count * numeric(row.selling_price);
       const fareIssued = row.count * numeric(row.buying_price);
       return makeBookingPayload({
@@ -1090,7 +1135,7 @@ export default function Bookings() {
           ? formValues.supplier_segments
           : [{ id: 'single', label: 'Single Supplier', supplier_name: supplierName, pnr, buying_price: '' }],
         flight_segments: formValues.flight_segments,
-      }, bookings.length + index);
+      }, bookingRef);
     });
   };
 
@@ -1320,8 +1365,9 @@ export default function Bookings() {
       return;
     }
 
-    crypticDrafts.forEach((draft, index) => {
-      saveBooking(makeBookingPayload(draft, bookings.length + index));
+    const bookingRef = nextBookingRef(bookings);
+    crypticDrafts.forEach((draft) => {
+      saveBooking(makeBookingPayload(draft, bookingRef));
     });
     refreshBookings();
     setCrypticText('');
@@ -1796,21 +1842,38 @@ export default function Bookings() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredBookings.map((booking) => (
-                    <tr key={booking.id}>
-                      {activeColumns.map((column) => (
-                        <td key={column.key} title={formatCell(booking, column.key)}>
+                  {filteredBookings.map((booking, rowIndex) => {
+                    const meta = groupMeta[booking.id] || {};
+                    const grouped = meta.size > 1;
+                    return (
+                    <tr
+                      key={booking.id}
+                      style={meta.isStart && rowIndex > 0 ? { borderTop: '2px solid var(--color-border-secondary)' } : undefined}
+                    >
+                      {activeColumns.map((column, colIndex) => (
+                        <td
+                          key={column.key}
+                          title={formatCell(booking, column.key)}
+                          style={colIndex === 0 && grouped ? { boxShadow: 'inset 3px 0 0 var(--color-text-info)' } : undefined}
+                        >
                           {column.key === 'invoice_no' ? (
-                            <a
-                              href="#"
-                              onClick={(e) => {
-                                e.preventDefault();
-                                navigate(`/bookings/${booking.invoice_no}`);
-                              }}
-                              style={{ color: 'var(--color-text-info)', textDecoration: 'none', cursor: 'pointer' }}
-                            >
-                              {formatCell(booking, column.key)}
-                            </a>
+                            meta.isStart ? (
+                              <a
+                                href="#"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  navigate(`/bookings/${booking.booking_ref || booking.invoice_no}`);
+                                }}
+                                style={{ color: 'var(--color-text-info)', textDecoration: 'none', cursor: 'pointer' }}
+                              >
+                                {booking.booking_ref || booking.invoice_no}
+                                {grouped && (
+                                  <span style={{ color: 'var(--color-text-tertiary)', fontWeight: 400 }}> · {meta.size} pax</span>
+                                )}
+                              </a>
+                            ) : (
+                              <span style={{ color: 'var(--color-text-tertiary)' }} title="Same booking reference">↳</span>
+                            )
                           ) : column.key === 'payment_status' || column.key === 'alert' || column.key === 'ticket_status' ? (
                             <span className={`badge ${String(booking[column.key]).toLowerCase()}`}>
                               {formatCell(booking, column.key)}
@@ -1827,7 +1890,8 @@ export default function Bookings() {
                         </td>
                       ))}
                     </tr>
-                  ))}
+                    );
+                  })}
                   {filteredBookings.length === 0 && (
                     <tr>
                       <td colSpan={activeColumns.length} className="empty-table-cell">No bookings found.</td>

@@ -70,3 +70,34 @@ export function saveUser(user) { return save(STORAGE_KEYS.USERS, user); }
 export function clearAllData() {
   Object.values(STORAGE_KEYS).forEach(key => localStorage.removeItem(key));
 }
+
+// One-time backfill: bookings created before booking_ref existed each have their
+// own invoice number. Passengers of the same booking share a PNR, so group flat
+// rows by normalized PNR and assign the group's lowest invoice number as the
+// shared booking_ref. Rows without a PNR fall back to their own invoice number.
+// Idempotent — skips records that already carry a booking_ref.
+export function migrateBookingRefs() {
+  const bookings = readData(STORAGE_KEYS.BOOKINGS);
+  if (!bookings.length || bookings.every(b => b.booking_ref)) return;
+
+  const normalizePnr = (value = '') => value.replace(/[^a-z0-9]/gi, '').toUpperCase();
+
+  // Lowest invoice number per PNR group becomes that group's canonical ref.
+  const canonicalRef = {};
+  bookings.forEach((booking) => {
+    const pnr = normalizePnr(booking.pnr);
+    if (!pnr) return;
+    const invoice = booking.invoice_no || '';
+    if (!canonicalRef[pnr] || invoice.localeCompare(canonicalRef[pnr], undefined, { numeric: true }) < 0) {
+      canonicalRef[pnr] = invoice;
+    }
+  });
+
+  const migrated = bookings.map((booking) => {
+    if (booking.booking_ref) return booking;
+    const pnr = normalizePnr(booking.pnr);
+    return { ...booking, booking_ref: (pnr && canonicalRef[pnr]) || booking.invoice_no };
+  });
+
+  writeData(STORAGE_KEYS.BOOKINGS, migrated);
+}

@@ -33,7 +33,15 @@ export default function BookingDetail() {
   const bookings = getBookings();
   const payments = getPayments();
   const refunds = getRefunds();
-  const booking = bookings.find(b => b.invoice_no === invoiceNo);
+  // invoiceNo from the route is the booking reference. A booking groups every
+  // passenger that shares this reference (one PNR, or several across suppliers).
+  const normPnr = (value = '') => value.replace(/[^a-z0-9]/gi, '').toUpperCase();
+  const groupBookings = bookings.filter(b => (b.booking_ref || b.invoice_no) === invoiceNo);
+  const group = groupBookings.length
+    ? groupBookings
+    : (bookings.find(b => b.invoice_no === invoiceNo) ? [bookings.find(b => b.invoice_no === invoiceNo)] : []);
+  const booking = group[0];
+  const groupPnrs = [...new Set(group.map(b => normPnr(b.pnr)).filter(Boolean))];
 
   // Modal states
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -73,9 +81,9 @@ export default function BookingDetail() {
     );
   }
 
-  // Calculate payment ledger and balance
-  const bookingPayments = payments.filter(p => p.pnr === booking.pnr);
-  const total = numeric(booking.fare_sold || 0);
+  // Calculate payment ledger and balance across every passenger/PNR in the booking
+  const bookingPayments = payments.filter(p => groupPnrs.includes(normPnr(p.pnr)));
+  const total = group.reduce((sum, b) => sum + numeric(b.fare_sold || 0), 0);
   const paid = bookingPayments.reduce((sum, p) => sum + numeric(p.amount_paid), 0);
   const balance = total - paid;
 
@@ -261,7 +269,12 @@ export default function BookingDetail() {
         marginBottom: '12px'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '15px', fontWeight: '500' }}>PNR {booking.pnr || '-'}</span>
+          <span style={{ fontSize: '15px', fontWeight: '500' }}>
+            PNR {booking.pnr || '-'}
+            {groupPnrs.length > 1 && (
+              <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--color-text-secondary)' }}> +{groupPnrs.length - 1} more</span>
+            )}
+          </span>
           <span style={{
             fontSize: '12px',
             padding: '3px 10px',
@@ -531,29 +544,25 @@ export default function BookingDetail() {
 
           {/* Passengers & Baggage */}
           <div className="card">
-            <h3 style={{ margin: '0 0 9px', fontSize: '13px', fontWeight: '500' }}>👥 Passengers, tickets & baggage</h3>
-            {booking.passengers && Array.isArray(booking.passengers) && booking.passengers.length > 0 ? (
-              booking.passengers.map((pax, idx) => (
-                <div key={idx} style={{ padding: '7px 0', borderTop: '0.5px solid var(--color-border-tertiary)' }}>
-                  <p style={{ margin: '0', fontSize: '13px' }}>
-                    {pax.passenger_name || 'N/A'} <span style={{ fontSize: '11px', color: 'var(--color-text-secondary)' }}>· {pax.pax_type || 'ADT'}</span>
-                  </p>
-                  <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
-                    <span style={{ fontFamily: 'monospace' }}>{booking.ticket_no || '-'}</span> · {pax.check_in_baggage || '23'}kg
-                    {pax.mobile && <span> · {pax.mobile}</span>}
-                  </p>
-                </div>
-              ))
-            ) : (
-              <div style={{ padding: '8px 0', fontSize: '12px', color: 'var(--color-text-secondary)' }}>
+            <h3 style={{ margin: '0 0 9px', fontSize: '13px', fontWeight: '500' }}>
+              👥 Passengers, tickets & baggage
+              {group.length > 1 && (
+                <span style={{ fontSize: '11px', fontWeight: 400, color: 'var(--color-text-secondary)' }}> · {group.length} passengers</span>
+              )}
+            </h3>
+            {group.map((pax, idx) => (
+              <div key={pax.id || idx} style={{ padding: '7px 0', borderTop: '0.5px solid var(--color-border-tertiary)' }}>
                 <p style={{ margin: '0', fontSize: '13px' }}>
-                  {booking.passenger_name || 'N/A'} <span style={{ fontSize: '11px' }}>· {booking.pax_type || 'ADT'}</span>
+                  {pax.passenger_name || 'N/A'} <span style={{ fontSize: '11px', color: 'var(--color-text-secondary)' }}>· {pax.pax_type || 'ADT'}</span>
                 </p>
                 <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
-                  <span style={{ fontFamily: 'monospace' }}>{booking.ticket_no || '-'}</span> · 23kg
+                  <span style={{ fontFamily: 'monospace' }}>{pax.ticket_no || '-'}</span>
+                  {groupPnrs.length > 1 && pax.pnr && <span> · PNR {pax.pnr}</span>}
+                  <span> · {pax.check_in_baggage || '23'}kg</span>
+                  {pax.mobile && <span> · {pax.mobile}</span>}
                 </p>
               </div>
-            )}
+            ))}
           </div>
 
           {/* Fare & Ledger */}
