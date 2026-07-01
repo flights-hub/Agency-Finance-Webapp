@@ -349,3 +349,85 @@ assert.equal(displayTitleResult.drafts[0].outbound_date, '2026-06-28');
 assert.deepEqual(displayTitleResult.warnings, []);
 
 console.log('bookingParser display-title names and spaced-airport segment checks passed');
+
+const infantFaTicketPnr = `
+RP/MILIG21AG/MILIG21AG     DM/SU  01JUL26/1056Z  YINFNT
+ 1.KAUR/NARINDER   2.SINGH/MANRAJ
+ 3  QR 116 O 01JUL 5 FCODOH HK4       3  1045 1720   *1A/E*
+ 4  QR 548 O 01JUL 5 DOHATQ HK4          2010 0230+1 *1A/E*
+ 5 AP VCE 049.8840733 -  ALMATE SRL - A
+ 6 TK PAX OK01JUL/MILIG21AG//ETQR/S3-4/P1-2
+ 7 SSR INFT QR HK1 KAUR/BABY 12MAR26/P1
+ 8 SSR INFT QR HK1 SINGH/CHILD 05JAN26/P2
+ 16 FA PAX 157-9497963758/ETQR/01JUL26/MILIG21AG/38237931
+       /S3-4/P1
+ 17 FA PAX 157-9497963759/ETQR/01JUL26/MILIG21AG/38237931
+       /S3-4/P2
+ 20 FA INF 157-9497963760/ETQR/01JUL26/MILIG21AG/38237931
+       /S3-4/P2
+ 21 FA INF 157-9497963761/ETQR/01JUL26/MILIG21AG/38237931
+       /S3-4/P1
+)>
+`;
+
+const infantFaResult = parseBookingText({ text: infantFaTicketPnr, source: 'CRYPTIC', provider: 'amadeus' });
+const infantPax = infantFaResult.raw.passengers.find((passenger) => passenger.passenger_name === 'KAUR/BABY');
+const infantByAdult = new Map(
+  infantFaResult.raw.passengers
+    .filter((passenger) => passenger.pax_type === 'INF')
+    .map((passenger) => [passenger.infant_of_p_ref, passenger]),
+);
+
+// Adult tickets from FA PAX lines are unchanged / not clobbered by the infant lines
+assert.equal(infantFaResult.raw.passengers.find((p) => p.passenger_name === 'KAUR/NARINDER').ticket_no, '157-9497963758');
+assert.equal(infantFaResult.raw.passengers.find((p) => p.passenger_name === 'SINGH/MANRAJ').ticket_no, '157-9497963759');
+// Infant tickets on FA INF lines are retrieved and routed to the infant of the referenced adult
+assert.ok(infantPax, 'infant passenger should be created from SSR INFT');
+assert.equal(infantByAdult.get(1).ticket_no, '157-9497963761'); // FA INF .../P1 -> infant of adult 1
+assert.equal(infantByAdult.get(2).ticket_no, '157-9497963760'); // FA INF .../P2 -> infant of adult 2
+assert.equal(infantFaResult.meta.ticketCount, 4);
+assert.ok(!infantFaResult.warnings.includes('AMBIGUOUS_FA_LINE'));
+
+console.log('bookingParser FA INF infant ticket checks passed');
+
+// Header variants that the stricter regex used to reject: indented RP line, a duty
+// code containing a digit (1A/SU), and a single-digit day (1JUL).
+const looseHeaderPnr = `
+--- RLR ---
+   RP/LON1A0980/LON1A0980            1A/SU  1JUL26/0900Z   ABC123
+ 1.KAUR/NARINDER
+ 2  QR 116 O 01JUL 5 FCODOH HK1       3  1045 1720   *1A/E*
+ 3 FA PAX 157-9497963758/ETQR/01JUL26/LON1A0980/38237931
+       /S2/P1
+)>
+`;
+
+const looseHeaderResult = parseBookingText({ text: looseHeaderPnr, source: 'CRYPTIC', provider: 'amadeus' });
+assert.equal(looseHeaderResult.raw.pnr, 'ABC123');
+assert.ok(!looseHeaderResult.warnings.includes('No record locator was detected.'));
+
+console.log('bookingParser loose RP header record-locator checks passed');
+
+// Multi-word surname before the slash (PATEL KHAMBHOLJA/DHYAN) must still be detected,
+// while GIVEN SURNAME/TITLE display names keep going to the title handler.
+const multiWordSurnamePnr = `
+TST RLR MSC SFP ---
+RP/VCEIG2265/VCEIG2265            SY/SU  1JUL26/1440Z   XKTRGO
+ 1.PATEL KHAMBHOLJA/DHYAN
+ 2  AA 125 L 02JUL 4 MADORD HK1     4S 1335 1600   *1A/E*
+ 3  AA4590 L 28AUG 5 ORDJFK HK1      3 1115 1455   *1A/E*
+ 4  AA 094 L 28AUG 5 JFKMAD HK1      8 1630 0535+1 *1A/E*
+ 5 AP VCE 049.8840733 -  ALMATE SRL - A
+ 7 TK OK01JUL/VCEIG2265//ETAA
+`;
+
+const multiWordSurnameResult = parseBookingText({ text: multiWordSurnamePnr, source: 'CRYPTIC', provider: 'amadeus' });
+assert.equal(multiWordSurnameResult.raw.pnr, 'XKTRGO');
+assert.equal(multiWordSurnameResult.raw.passengers.length, 1);
+assert.deepEqual(
+  multiWordSurnameResult.raw.passengers.map((p) => `${p.last_name}|${p.first_name}|${p.passenger_name}`),
+  ['PATEL KHAMBHOLJA|DHYAN|PATEL KHAMBHOLJA/DHYAN'],
+);
+assert.ok(!multiWordSurnameResult.warnings.includes('No passenger names were detected.'));
+
+console.log('bookingParser multi-word surname passenger checks passed');
