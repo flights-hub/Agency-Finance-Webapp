@@ -636,7 +636,7 @@ function joinWrappedFaLines(text) {
   for (let index = 0; index < lines.length; index += 1) {
     const current = lines[index];
     const next = lines[index + 1] || '';
-    const isFaLine = /^\s*\d+\s+FA\s+PAX\s+/.test(current);
+    const isFaLine = /^\s*\d+\s+FA\s+(?:PAX|INF)\s+/.test(current);
     const isWrappedFaTail = /^\s{6,}(?:\d{2,3})?\/S[\d-]+(?:\/P\d+)?\s*$/.test(next);
     const segmentHeader = current.match(/^\s*\d+\s+[A-Z0-9]{2}\s*\d{1,4}\s+[A-Z](?:\s+[A-Z])?\s+\d{2}[A-Z]{3}(?:\s+\d)?\s+[A-Z]{6}\s*$/);
 
@@ -851,7 +851,7 @@ export function parseCrypticBooking(input, provider = 'auto') {
   const lines = text.split('\n');
   const warnings = [];
 
-  const headerMatch = text.match(/^RP\/[A-Z0-9]{8,10}\/[A-Z0-9]{8,10}\s+[A-Z]{2}\/[A-Z]{2}\s+\d{2}[A-Z]{3}\d{2}\/\d{4}Z\s+([A-Z0-9]{6})/m)
+  const headerMatch = text.match(/^\s*RP\/[A-Z0-9]+\/[A-Z0-9]+\b.*?\d{1,2}[A-Z]{3}\d{2}\/\d{4}Z\s+([A-Z0-9]{6})\b/m)
     || text.match(/(?:RECORD\s+LOCATOR|PNR)[:\s]+([A-Z0-9]{6})/);
   const pnr = headerMatch?.[1] || '';
   const bookingDateMatch = text.match(/\b(\d{2}[A-Z]{3}\d{2})\/(\d{4})Z\b/);
@@ -863,9 +863,11 @@ export function parseCrypticBooking(input, provider = 'auto') {
 
   const passengers = [];
   const passengerByRef = new Map();
-  const nameElementRegex = /(\d+)\.([A-Z]+\/[A-Z]+(?:\s+[A-Z]+)?(?:\((?:CHD|INF)\/\d{2}[A-Z]{3}\d{2}\))?)/g;
+  // Surname may be multi-word (e.g. PATEL KHAMBHOLJA/DHYAN). The negative lookahead
+  // after "/" leaves the "GIVEN SURNAME/TITLE" display format to the loop below.
+  const nameElementRegex = /(\d+)\.([A-Z]+(?:\s+[A-Z]+)*\/(?!(?:MR|MRS|MS|MISS|MSTR)\b)[A-Z]+(?:\s+[A-Z]+)?(?:\((?:CHD|INF)\/\d{2}[A-Z]{3}\d{2}\))?)/g;
   for (const match of text.matchAll(nameElementRegex)) {
-    const parsed = match[0].match(/^(\d+)\.(([A-Z]+)\/(([A-Z]+)(?:\s+([A-Z]+))?)(?:\((CHD|INF)\/(\d{2}[A-Z]{3}\d{2})\))?)$/);
+    const parsed = match[0].match(/^(\d+)\.(([A-Z]+(?:\s+[A-Z]+)*)\/(?!(?:MR|MRS|MS|MISS|MSTR)\b)(([A-Z]+)(?:\s+([A-Z]+))?)(?:\((CHD|INF)\/(\d{2}[A-Z]{3}\d{2})\))?)$/);
     if (!parsed) continue;
     const passenger = createPassenger({
       seq_no: Number(parsed[1]),
@@ -976,21 +978,29 @@ export function parseCrypticBooking(input, provider = 'auto') {
 
   const faPassengerRefs = new Set();
   for (const line of lines) {
-    const fa = line.match(/^\s*\d+\s+FA\s+PAX\s+(\d{3}-\d{10})\/ET([A-Z]{2})\/(?:([A-Z]{3})([\d.]+)\/)?(\d{2}[A-Z]{3}\d{2})\/([A-Z0-9]+)\/(\d{5,8})(?:\/S([\d-]+))?(?:\/P(\d+))?/);
+    const fa = line.match(/^\s*\d+\s+FA\s+(PAX|INF)\s+(\d{3}-\d{10})\/ET([A-Z]{2})\/(?:([A-Z]{3})([\d.]+)\/)?(\d{2}[A-Z]{3}\d{2})\/([A-Z0-9]+)\/(\d{5,8})(?:\/S([\d-]+))?(?:\/P(\d+))?/);
     if (!fa) continue;
-    const passenger = fa[9]
-      ? passengerByRef.get(Number(fa[9]))
-      : (passengers.length === 1 ? passengers[0] : passengers.find((item) => !item.ticket_no));
+    const isInfant = fa[1] === 'INF';
+    const pRef = fa[10] ? Number(fa[10]) : null;
+    const byRef = pRef ? passengerByRef.get(pRef) : null;
+    // On an FA INF line the /P ref identifies the accompanying adult, so the ticket
+    // belongs to that adult's infant (never the adult, whose ticket comes from FA PAX).
+    const passenger = isInfant
+      ? (pRef && passengers.find((item) => item.pax_type === 'INF' && item.infant_of_p_ref === pRef))
+        || (byRef?.pax_type === 'INF' ? byRef : null)
+        || passengers.find((item) => item.pax_type === 'INF' && !item.ticket_no)
+      : byRef
+        || (passengers.length === 1 ? passengers[0] : passengers.find((item) => item.pax_type !== 'INF' && !item.ticket_no));
     if (!passenger) {
       warnings.push('AMBIGUOUS_FA_LINE');
       continue;
     }
-    passenger.ticket_no = fa[1];
+    passenger.ticket_no = fa[2];
     passenger.ticket_format = 'GDS';
-    passenger.ticket_endorsement = fa[2];
-    passenger.currency = fa[3] || '';
-    passenger.fare_issued = fa[4] ? money(fa[4]) : '';
-    passenger.ticket_issue_date = parseDdMmmIso(fa[5], fallbackYear);
+    passenger.ticket_endorsement = fa[3];
+    passenger.currency = fa[4] || '';
+    passenger.fare_issued = fa[5] ? money(fa[5]) : '';
+    passenger.ticket_issue_date = parseDdMmmIso(fa[6], fallbackYear);
     passenger.ticket_status = 'TICKETED';
     faPassengerRefs.add(passenger.p_ref);
   }

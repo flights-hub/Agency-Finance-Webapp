@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getBookings, getPayments, getUsers, saveBooking, savePayment } from '../helpers/storage';
+import { getBookings, getPayments, saveBooking, savePayment } from '../helpers/storage';
 import {
   PAYMENT_MODES,
   createPaymentEntry,
@@ -785,7 +785,7 @@ export default function Bookings() {
   const [activeTab, setActiveTab] = useState('LIST');
   const [bookings, setBookings] = useState(() => getBookings());
   const [payments, setPayments] = useState(() => getPayments());
-  const [users] = useState(() => getUsers());
+  const [registeredUsers, setRegisteredUsers] = useState([]);
   const [formValues, setFormValues] = useState(EMPTY_FORM);
   const [search, setSearch] = useState('');
   const [airlineFilter, setAirlineFilter] = useState('');
@@ -820,28 +820,37 @@ export default function Bookings() {
     alerts: [...new Set(normalizedBookings.map((booking) => booking.alert).filter(Boolean))],
   }), [normalizedBookings]);
 
-  const agentOptions = useMemo(
-    () => users.filter((user) => user.role === 'AGENT').map((user) => user.name).filter(Boolean),
-    [users],
-  );
+  // Agents and suppliers are managed on the Users page (server), not in localStorage,
+  // so these dropdowns must load them from the same source rather than seeded booking data.
+  useEffect(() => {
+    let active = true;
+    api.listUsers()
+      .then((data) => {
+        if (active) setRegisteredUsers(data.users || []);
+      })
+      .catch(() => {
+        if (active) setRegisteredUsers([]);
+      });
+    return () => { active = false; };
+  }, []);
 
-  const supplierOptions = useMemo(() => {
-    const userSuppliers = users.filter((user) => user.role === 'SUPPLIER').map((user) => user.name).filter(Boolean);
-    const bookingSuppliers = bookings.flatMap((booking) => [
-      booking.supplier_name,
-      booking.supplier,
-      booking.airline,
-      ...(booking.supplier_segments || []).map((segment) => segment.supplier_name),
-    ]).filter(Boolean);
-    return [...new Set([...userSuppliers, ...bookingSuppliers])];
-  }, [bookings, users]);
+  const registeredNamesByRole = (roles) => {
+    const roleSet = new Set(Array.isArray(roles) ? roles : [roles]);
+    return [...new Set(
+      registeredUsers
+        .filter((user) => roleSet.has(user.role) && user.status === 'ACTIVE')
+        .map((user) => user.name)
+        .filter(Boolean),
+    )].sort((a, b) => a.localeCompare(b));
+  };
 
-  const employeeOptions = useMemo(() => {
-    const staffRoles = new Set(['ADMIN', 'EMPLOYEE', 'FINANCE_MANAGER']);
-    const userEmployees = users.filter((user) => staffRoles.has(user.role)).map((user) => user.name).filter(Boolean);
-    const bookingEmployees = bookings.flatMap((booking) => [booking.booked_by, booking.agent_issued_by]).filter(Boolean);
-    return [...new Set([...userEmployees, ...bookingEmployees])];
-  }, [bookings, users]);
+  const agentOptions = registeredNamesByRole('AGENT');
+
+  const supplierOptions = registeredNamesByRole('SUPPLIER');
+
+  // Manual booking form is only used by Admin/Employee staff, so Booked By and
+  // Issued By list registered Admin and Employee users from the same API.
+  const employeeOptions = registeredNamesByRole(['ADMIN', 'EMPLOYEE']);
 
   const filteredBookings = useMemo(() => {
     const query = search.trim().toLowerCase();

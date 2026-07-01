@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ArrowUpDown, Download, FileText, Search, SlidersHorizontal } from 'lucide-react';
 import { getBookings, getPayments, getRefunds } from '../helpers/storage';
 import { getBookingLedger, getPaymentLedger, getRefundLedger } from '../helpers/calculations';
 import { formatCurrency } from '../helpers/format';
 import { downloadCSV } from '../helpers/downloadCSV';
+import { api } from '../helpers/api';
 
 
 const STATEMENT_COLUMNS = [
@@ -20,10 +21,11 @@ const STATEMENT_COLUMNS = [
 
 function supplierNamesForBooking(booking) {
   const segmentSuppliers = (booking.supplier_segments || []).map((segment) => segment.supplier_name).filter(Boolean);
+  // Match only real supplier fields, never the airline, so a supplier statement
+  // pulls bookings by actual supplier assignment rather than a shared airline name.
   return [...new Set([
     booking.supplier_name,
     booking.supplier,
-    booking.airline,
     ...segmentSuppliers,
   ].filter(Boolean))];
 }
@@ -47,20 +49,38 @@ export default function Statements() {
   const [visibleColumns, setVisibleColumns] = useState(() => new Set(STATEMENT_COLUMNS.map(([key]) => key)));
   const [sortKey, setSortKey] = useState('invoice_no');
   const [sortDir, setSortDir] = useState('asc');
+  const [registeredUsers, setRegisteredUsers] = useState([]);
   const bookings = getBookings();
   const payments = getPayments();
   const refunds = getRefunds();
+
+  // Agents and suppliers are managed on the Users page (server); statements are
+  // generated per registered user, not from names found in seeded booking data.
+  useEffect(() => {
+    let active = true;
+    api.listUsers()
+      .then((data) => {
+        if (active) setRegisteredUsers(data.users || []);
+      })
+      .catch(() => {
+        if (active) setRegisteredUsers([]);
+      });
+    return () => { active = false; };
+  }, []);
 
   const bookingLedger = useMemo(() => getBookingLedger(bookings, payments), [bookings, payments]);
   const paymentLedger = useMemo(() => getPaymentLedger(bookings, payments), [bookings, payments]);
   const refundLedger = useMemo(() => getRefundLedger(bookings, refunds), [bookings, refunds]);
 
   const parties = useMemo(() => {
-    if (statementType === 'agent') {
-      return [...new Set(bookingLedger.map((booking) => booking.bill_to_name || booking.booked_by).filter(Boolean))];
-    }
-    return [...new Set(bookingLedger.flatMap((booking) => supplierNamesForBooking(booking)).filter(Boolean))];
-  }, [bookingLedger, statementType]);
+    const role = statementType === 'agent' ? 'AGENT' : 'SUPPLIER';
+    return [...new Set(
+      registeredUsers
+        .filter((user) => user.role === role && user.status === 'ACTIVE')
+        .map((user) => user.name)
+        .filter(Boolean),
+    )].sort((a, b) => a.localeCompare(b));
+  }, [registeredUsers, statementType]);
 
   const selectedParty = party || parties[0] || '';
   const statementBookings = bookingLedger.filter((booking) => (
