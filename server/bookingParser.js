@@ -639,6 +639,10 @@ function joinWrappedFaLines(text) {
     const isFaLine = /^\s*\d+\s+FA\s+(?:PAX|INF)\s+/.test(current);
     const isWrappedFaTail = /^\s{6,}(?:\d{1,8})?\/S[\d-]+(?:\/P\d+)?\s*$/.test(next);
     const segmentHeader = current.match(/^\s*\d+\s+[A-Z0-9]{2}\s*\d{1,4}\s+[A-Z](?:\s+[A-Z])?\s+\d{2}[A-Z]{3}(?:\s+\d)?\s+[A-Z]{6}\s*$/);
+    // A segment header can also appear bare (just "N  XX ###"), with the rest of the
+    // segment (class/date/route/status/times) pushed to a later line by unrelated
+    // filler lines (e.g. stray OSI remarks) wedged in between during copy/paste.
+    const partialSegmentHeader = !segmentHeader && current.match(/^\s*\d+\s+[A-Z0-9]{2}\s*\d{1,4}\s*$/);
 
     if (segmentHeader) {
       const segmentParts = [current.trim()];
@@ -655,6 +659,30 @@ function joinWrappedFaLines(text) {
       if (segmentParts.length > 1) {
         joined.push(segmentParts.join(' '));
         index = lookahead - 1;
+        continue;
+      }
+    }
+
+    if (partialSegmentHeader) {
+      const detailPattern = /^\s*[A-Z](?:\s+[A-Z])?\s+\d{2}[A-Z]{3}\d{0,2}(?:\s+\d)?\s+[A-Z]{3}\s?[A-Z]{3}\s+[A-Z]{2}\d*\s+\d{4}/;
+      let lookahead = index + 1;
+      let matchedLine = -1;
+
+      while (
+        lookahead < lines.length
+        && lookahead < index + 12
+        && !/^\s*\d+\s+[A-Z0-9]{2,4}\b/.test(lines[lookahead])
+      ) {
+        if (detailPattern.test(lines[lookahead])) {
+          matchedLine = lookahead;
+          break;
+        }
+        lookahead += 1;
+      }
+
+      if (matchedLine >= 0) {
+        joined.push(`${current.trim()} ${lines[matchedLine].trim()}`);
+        index = matchedLine;
         continue;
       }
     }
