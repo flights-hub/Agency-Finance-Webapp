@@ -637,7 +637,7 @@ function joinWrappedFaLines(text) {
     const current = lines[index];
     const next = lines[index + 1] || '';
     const isFaLine = /^\s*\d+\s+FA\s+(?:PAX|INF)\s+/.test(current);
-    const isWrappedFaTail = /^\s{6,}(?:\d{2,3})?\/S[\d-]+(?:\/P\d+)?\s*$/.test(next);
+    const isWrappedFaTail = /^\s{6,}(?:\d{1,8})?\/S[\d-]+(?:\/P\d+)?\s*$/.test(next);
     const segmentHeader = current.match(/^\s*\d+\s+[A-Z0-9]{2}\s*\d{1,4}\s+[A-Z](?:\s+[A-Z])?\s+\d{2}[A-Z]{3}(?:\s+\d)?\s+[A-Z]{6}\s*$/);
 
     if (segmentHeader) {
@@ -978,7 +978,9 @@ export function parseCrypticBooking(input, provider = 'auto') {
 
   const faPassengerRefs = new Set();
   for (const line of lines) {
-    const fa = line.match(/^\s*\d+\s+FA\s+(PAX|INF)\s+(\d{3}-\d{10})\/ET([A-Z]{2})\/(?:([A-Z]{3})([\d.]+)\/)?(\d{2}[A-Z]{3}\d{2})\/([A-Z0-9]+)\/(\d{5,8})(?:\/S([\d-]+))?(?:\/P(\d+))?/);
+    // Ticket may be a conjunction pair (e.g. 014-9497880800-01) on itineraries
+    // with more than four coupons; the airline code may contain a digit (6E, W6).
+    const fa = line.match(/^\s*\d+\s+FA\s+(PAX|INF)\s+(\d{3}-\d{10}(?:-\d{1,2})?)\/ET([A-Z0-9]{2})\/(?:([A-Z]{3})([\d.]+)\/)?(\d{2}[A-Z]{3}\d{2})\/([A-Z0-9]+)\/(\d{5,8})(?:\/S([\d-]+))?(?:\/P(\d+))?/);
     if (!fa) continue;
     const isInfant = fa[1] === 'INF';
     const pRef = fa[10] ? Number(fa[10]) : null;

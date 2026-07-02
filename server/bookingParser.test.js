@@ -431,3 +431,48 @@ assert.deepEqual(
 assert.ok(!multiWordSurnameResult.warnings.includes('No passenger names were detected.'));
 
 console.log('bookingParser multi-word surname passenger checks passed');
+
+// Conjunction tickets (014-9497880800-01) on a 6-coupon itinerary, with FA lines
+// wrapped mid-invoice-number (".../MILIG21AG/3" + "8237931/S4-9/P1"). Both the
+// wrap join and the ticket regex must handle these, including the FA INF line.
+const conjunctionTicketPnr = `
+--- TST RLR MSC SFP ---
+RP/ROMIG21NZ/ROMIG21NZ            DM/SU  25JUN26/0802Z   ZW9XE5
+  1.SINGH/HARLEEN(INFDHILLON/GURFATEH/30APR25)   2.DHILLON/JASKARAN
+  3.DHILLON/KIRPAL(CHD/11MAR19)
+  4  AC 891 K 09JUL 4 FCOYYZ HK3       3  1225 1600   *1A/E*
+  5  AC 123 K 09JUL 4 YYZYVR HK3       1  1830 2035   *1A/E*
+  6  AC8349 K 09JUL 4 YVRYXS HK3       M  2210 2329   *1A/E*
+  7  AC8342 T 11AUG 2 YXSYVR HK3          0550 0715   *1A/E*
+  8  AC 034 T 11AUG 2 YVRYYZ HK3       M  0900 1624   *1A/E*
+  9  AC 890 T 11AUG 2 YYZFCO HK3       1  2000 1020+1 *1A/E*
+ 10 AP ROM TBA - SKY HIGH JOURNEYS - A
+ 11 TK PAX OK25JUN/MILIG21AG//ETAC/S4-9/P1-3
+ 13 SSR CHLD AC HK1 11MAR19/P3
+ 16 SSR INFT AC HK1 DHILLON/GURFATEH 30APR25/S4/P1
+ 28 FA PAX 014-9497880800-01/ETAC/EUR1209.81/25JUN26/MILIG21AG/3
+       8237931/S4-9/P1
+ 29 FA PAX 014-9497880802-03/ETAC/EUR1209.81/25JUN26/MILIG21AG/3
+       8237931/S4-9/P2
+ 30 FA PAX 014-9497880804-05/ETAC/EUR1009.23/25JUN26/MILIG21AG/3
+       8237931/S4-9/P3
+ 31 FA INF 014-9497880806-07/ETAC/EUR112.71/25JUN26/MILIG21AG/38
+       237931/S4-9/P1
+)>
+`;
+
+const conjunctionResult = parseBookingText({ text: conjunctionTicketPnr, source: 'CRYPTIC', provider: 'amadeus' });
+assert.equal(conjunctionResult.raw.pnr, 'ZW9XE5');
+assert.equal(conjunctionResult.meta.ticketCount, 4);
+const conjunctionTickets = new Map(
+  conjunctionResult.raw.passengers.map((p) => [`${p.passenger_name}:${p.pax_type}`, p.ticket_no]),
+);
+assert.equal(conjunctionTickets.get('SINGH/HARLEEN:ADT'), '014-9497880800-01');
+assert.equal(conjunctionTickets.get('DHILLON/JASKARAN:ADT'), '014-9497880802-03');
+assert.equal(conjunctionTickets.get('DHILLON/KIRPAL:CHD'), '014-9497880804-05');
+assert.equal(conjunctionTickets.get('DHILLON/GURFATEH:INF'), '014-9497880806-07');
+assert.ok(conjunctionResult.raw.passengers.every((p) => p.ticket_status === 'TICKETED'));
+assert.equal(conjunctionResult.raw.passengers.find((p) => p.pax_type === 'INF').fare_issued, 112.71);
+assert.ok(!conjunctionResult.warnings.includes('TICKET_COUNT_MISMATCH'));
+
+console.log('bookingParser conjunction ticket checks passed');

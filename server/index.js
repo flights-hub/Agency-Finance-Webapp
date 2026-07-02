@@ -1,6 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { parseBookingText } from './bookingParser.js';
+import { scopedFinanceData } from './financeAccess.js';
 import { loadEnvFile } from './env.js';
 import { signJwt, verifyJwt } from './jwt.js';
 import {
@@ -10,6 +11,22 @@ import {
   authPasswordGrant,
   supabaseRequest,
 } from './supabase.js';
+import {
+  LOCKOUT_THRESHOLD,
+  assessLoginRisk,
+  auditEvent,
+  countRecentLoginFailures,
+  createAlert,
+  createSession,
+  endSession,
+  getRequestContext,
+  raiseFailedLoginAlerts,
+  raiseLoginAlerts,
+  recordLoginAttempt,
+  revokeUserSessions,
+  validateSession,
+} from './security.js';
+import { handleSecurityRoute } from './securityRoutes.js';
 
 loadEnvFile();
 
@@ -245,16 +262,33 @@ async function setUserPermissions(userId, permissions) {
   });
 }
 
-async function audit(actorId, action, targetUserId, metadata = {}) {
-  return supabaseRequest('/rest/v1/audit_logs', {
-    method: 'POST',
-    body: {
-      actor_id: actorId,
-      action,
-      target_user_id: targetUserId,
-      metadata,
-    },
+const ACTION_MODULES = {
+  login: 'auth',
+  logout: 'auth',
+  change_password: 'user_management',
+  create_user: 'user_management',
+  update_user: 'user_management',
+  reset_password: 'user_management',
+  suspend_user: 'user_management',
+  reactivate_user: 'user_management',
+  update_role_template: 'user_management',
+  bulk_import_finance: 'finance',
+};
+
+async function audit(req, actor, action, targetUserId, extras = {}) {
+  const ctx = await getRequestContext(req);
+  return auditEvent(ctx, actor, {
+    action,
+    module: ACTION_MODULES[action] || 'general',
+    targetUserId,
+    ...extras,
   });
+}
+
+function sessionIdFromRequest(req) {
+  const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+  const payload = verifyJwt(token, process.env.APP_SESSION_SECRET);
+  return payload?.sid || null;
 }
 
 async function currentUser(req) {
@@ -262,6 +296,15 @@ async function currentUser(req) {
   const payload = verifyJwt(token, process.env.APP_SESSION_SECRET);
   if (!payload?.sub) {
     const error = new Error('Not authenticated');
+    error.status = 401;
+    throw error;
+  }
+
+  // Tokens carry a server-side session id so sessions can be revoked or
+  // expired centrally; a valid signature alone is not enough.
+  const session = await validateSession(payload.sid);
+  if (!session || session.user_id !== payload.sub) {
+    const error = new Error('Session expired or revoked');
     error.status = 401;
     throw error;
   }
@@ -289,35 +332,74 @@ async function requireAdmin(req) {
 
 async function handleLogin(req, res) {
   const body = await readBody(req);
-  const auth = await authPasswordGrant(body.email, body.password);
-  const profile = await getProfile(auth.user.id);
+  const email = String(body.email || '').trim().toLowerCase();
+  const ctx = await getRequestContext(req);
 
+  // Account lockout: block before even attempting the password grant.
+  const recentFailures = (await countRecentLoginFailures({ username: email })).length;
+  if (recentFailures >= LOCKOUT_THRESHOLD) {
+    await recordLoginAttempt(ctx, { username: email, status: 'BLOCKED', failureReason: 'locked_account' });
+    await raiseFailedLoginAlerts(ctx, email);
+    const error = new Error('Too many failed attempts. Account temporarily locked — try again later.');
+    error.status = 429;
+    throw error;
+  }
+
+  let auth;
+  try {
+    auth = await authPasswordGrant(email, body.password);
+  } catch {
+    await recordLoginAttempt(ctx, { username: email, status: 'FAILED', failureReason: 'wrong_password' });
+    await raiseFailedLoginAlerts(ctx, email);
+    const error = new Error('Invalid email or password.');
+    error.status = 401;
+    throw error;
+  }
+
+  const profile = await getProfile(auth.user.id);
   if (!profile) {
+    await recordLoginAttempt(ctx, { username: email, status: 'FAILED', failureReason: 'missing_profile' });
     const error = new Error('Supabase user is missing an app profile.');
     error.status = 403;
     throw error;
   }
   if (profile.status !== 'ACTIVE') {
+    await recordLoginAttempt(ctx, { profile, username: email, status: 'FAILED', failureReason: 'inactive_user' });
     const error = new Error('Account is inactive or suspended.');
     error.status = 403;
     throw error;
   }
 
   const permissions = await getEffectivePermissions(profile.id, profile.role);
+  const assessment = await assessLoginRisk(profile, ctx, recentFailures);
+  const { sid, sessionHash } = await createSession(profile, ctx, SESSION_SECONDS);
+
+  await recordLoginAttempt(ctx, { profile, status: 'SUCCESS', sessionHash, assessment });
+  await raiseLoginAlerts(ctx, profile, assessment, recentFailures);
   await supabaseRequest(`/rest/v1/profiles?id=eq.${encodeURIComponent(profile.id)}`, {
     method: 'PATCH',
     prefer: 'return=minimal',
     body: { last_login: new Date().toISOString() },
   });
-  await audit(profile.id, 'login', profile.id, { method: 'password' });
+  await audit(req, profile, 'login', profile.id, {
+    metadata: { method: 'password' },
+    risk: assessment.riskScore,
+    remarks: assessment.isNewDevice || assessment.isNewLocation ? 'Login from new device or location' : null,
+  });
 
   const token = signJwt(
-    { sub: profile.id, email: profile.email, role: profile.role },
+    { sub: profile.id, email: profile.email, role: profile.role, sid },
     process.env.APP_SESSION_SECRET,
     SESSION_SECONDS,
   );
 
   json(res, 200, { user: publicProfile(profile, permissions) }, { 'Set-Cookie': sessionCookie(token) });
+}
+
+async function handleLogout(req, res) {
+  const sid = sessionIdFromRequest(req);
+  if (sid) await endSession(sid, 'logout');
+  json(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookie() });
 }
 
 async function handleCreateUser(req, res) {
@@ -349,7 +431,19 @@ async function handleCreateUser(req, res) {
 
   const permissions = normalizePermissions(body.permissions);
   await setUserPermissions(authUser.id, permissions);
-  await audit(actor.id, 'create_user', authUser.id, { role, email: body.email });
+  await audit(req, actor, 'create_user', authUser.id, {
+    recordType: 'profile',
+    recordId: authUser.id,
+    newValue: { role, email: body.email, permissions },
+    risk: role === 'ADMIN' ? 'critical' : 'medium',
+  });
+  if (role === 'ADMIN') {
+    await createAlert(await getRequestContext(req), actor, {
+      type: 'new_admin_created',
+      reason: `New ADMIN user ${body.email} created by ${actor.email}`,
+      risk: 'critical',
+    });
+  }
 
   json(res, 201, {
     user: publicProfile(profile[0], permissions),
@@ -380,6 +474,7 @@ async function handleListUsers(req, res) {
 async function handleUpdateUser(req, res, id) {
   const actor = await requireAdmin(req);
   const body = await readBody(req);
+  const before = await getProfile(id);
   const patch = {};
 
   if (body.name !== undefined) patch.name = body.name;
@@ -395,7 +490,10 @@ async function handleUpdateUser(req, res, id) {
     body: patch,
   });
 
-  if (body.status === 'SUSPENDED') await adminUpdateAuthUser(id, { ban_duration: '876000h' });
+  if (body.status === 'SUSPENDED') {
+    await adminUpdateAuthUser(id, { ban_duration: '876000h' });
+    await revokeUserSessions(id, { revokedBy: actor.id, reason: 'user_suspended' });
+  }
   if (body.status === 'ACTIVE') await adminUpdateAuthUser(id, { ban_duration: 'none' });
 
   let permissions = null;
@@ -404,7 +502,24 @@ async function handleUpdateUser(req, res, id) {
     await setUserPermissions(id, permissions);
   }
 
-  await audit(actor.id, 'update_user', id, { patch, permissions });
+  const roleChanged = patch.role && before && patch.role !== before.role;
+  await audit(req, actor, 'update_user', id, {
+    recordType: 'profile',
+    recordId: id,
+    oldValue: before ? { name: before.name, role: before.role, status: before.status } : null,
+    newValue: { ...patch, permissions },
+    risk: roleChanged || permissions !== null ? 'high' : 'low',
+    remarks: roleChanged ? `Role changed ${before.role} -> ${patch.role}` : null,
+  });
+  if (roleChanged || permissions !== null) {
+    await createAlert(await getRequestContext(req), actor, {
+      type: roleChanged ? 'role_changed' : 'permissions_changed',
+      reason: roleChanged
+        ? `Role of ${before?.email || id} changed from ${before.role} to ${patch.role} by ${actor.email}`
+        : `Permissions of ${before?.email || id} changed by ${actor.email}`,
+      risk: patch.role === 'ADMIN' ? 'critical' : 'high',
+    });
+  }
   json(res, 200, { user: publicProfile(profile[0], permissions || []) });
 }
 
@@ -417,7 +532,20 @@ async function handleResetPassword(req, res, id) {
     prefer: 'return=minimal',
     body: { must_change_password: true },
   });
-  await audit(actor.id, 'reset_password', id);
+  // Password reset invalidates every existing session for the target user.
+  const revoked = await revokeUserSessions(id, { revokedBy: actor.id, reason: 'password_reset' });
+  const target = await getProfile(id);
+  await audit(req, actor, 'reset_password', id, {
+    recordType: 'profile',
+    recordId: id,
+    newValue: { password: 'changed from existing value to new value', sessions_revoked: revoked },
+    risk: target?.role === 'ADMIN' ? 'critical' : 'high',
+  });
+  await createAlert(await getRequestContext(req), actor, {
+    type: 'password_reset',
+    reason: `Password of ${target?.email || id} reset by ${actor.email} (${revoked} sessions revoked)`,
+    risk: target?.role === 'ADMIN' ? 'critical' : 'medium',
+  });
   json(res, 200, { temporaryPassword: password });
 }
 
@@ -437,7 +565,13 @@ async function handleBulk(req, res) {
         body: { status },
       });
       await adminUpdateAuthUser(id, { ban_duration: status === 'SUSPENDED' ? '876000h' : 'none' });
-      await audit(actor.id, action === 'suspend' ? 'suspend_user' : 'reactivate_user', id);
+      if (status === 'SUSPENDED') await revokeUserSessions(id, { revokedBy: actor.id, reason: 'user_suspended' });
+      await audit(req, actor, action === 'suspend' ? 'suspend_user' : 'reactivate_user', id, {
+        recordType: 'profile',
+        recordId: id,
+        newValue: { status },
+        risk: 'medium',
+      });
       results.push({ id, status });
     }
   }
@@ -468,13 +602,136 @@ async function handleUpdateTemplate(req, res, role) {
   const body = await readBody(req);
   const roleKey = normalizeRole(role);
   const permissionKeys = normalizePermissions(body.permission_keys);
+  const beforeTemplates = await getRoleTemplates();
+  const beforeTemplate = beforeTemplates.find((item) => item.role === roleKey);
   const result = await supabaseRequest(`/rest/v1/role_templates?role=eq.${encodeURIComponent(roleKey)}`, {
     method: 'PATCH',
     prefer: 'return=representation',
     body: { permission_keys: permissionKeys },
   });
-  await audit(actor.id, 'update_role_template', null, { role: roleKey, permissionKeys });
+  await audit(req, actor, 'update_role_template', null, {
+    recordType: 'role_template',
+    recordId: roleKey,
+    oldValue: { permission_keys: beforeTemplate?.permission_keys || [] },
+    newValue: { permission_keys: permissionKeys },
+    risk: 'high',
+  });
+  await createAlert(await getRequestContext(req), actor, {
+    type: 'permissions_changed',
+    reason: `Role template ${roleKey} permissions changed by ${actor.email}`,
+    risk: 'high',
+  });
   json(res, 200, { template: result[0] });
+}
+
+const FINANCE_COLLECTIONS = {
+  bookings: { view: 'view_bookings', write: ['create_bookings', 'edit_bookings'] },
+  payments: { view: 'view_payments', write: ['record_payments'] },
+  refunds: { view: 'view_refunds', write: ['process_refunds'] },
+  expenses: { view: 'view_financials', write: ['edit_financials'] },
+};
+
+function hasAnyPermission(user, keys) {
+  if (user.role === 'ADMIN') return true;
+  return keys.some((key) => user.permissions.includes(key));
+}
+
+function financeCollection(name) {
+  const config = FINANCE_COLLECTIONS[name];
+  if (!config) {
+    const error = new Error(`Unknown finance collection: ${name}`);
+    error.status = 404;
+    throw error;
+  }
+  return config;
+}
+
+function flattenFinanceRow(row) {
+  return { ...row.data, id: row.id };
+}
+
+async function listFinanceRows(collection) {
+  const rows = await supabaseRequest(`/rest/v1/${collection}?select=id,data&order=created_at.asc`);
+  return (rows || []).map(flattenFinanceRow);
+}
+
+async function upsertFinanceRow(collection, record, userId) {
+  const { id, ...data } = record;
+  const existing = await supabaseRequest(
+    `/rest/v1/${collection}?id=eq.${encodeURIComponent(id)}&select=id`,
+  );
+
+  if (existing?.length) {
+    const rows = await supabaseRequest(`/rest/v1/${collection}?id=eq.${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      prefer: 'return=representation',
+      body: { data },
+    });
+    return flattenFinanceRow(rows[0]);
+  }
+
+  const rows = await supabaseRequest(`/rest/v1/${collection}`, {
+    method: 'POST',
+    prefer: 'return=representation',
+    body: { id, data, created_by: userId },
+  });
+  return flattenFinanceRow(rows[0]);
+}
+
+async function handleFinanceData(req, res) {
+  const user = await currentUser(req);
+  const canView = (name) => hasAnyPermission(user, [financeCollection(name).view]);
+
+  const [bookings, payments, refunds, expenses] = await Promise.all(
+    ['bookings', 'payments', 'refunds', 'expenses'].map((name) => (
+      canView(name) ? listFinanceRows(name) : Promise.resolve([])
+    )),
+  );
+
+  json(res, 200, scopedFinanceData(user, { bookings, payments, refunds, expenses }));
+}
+
+async function requireFinanceWriter(req, collection) {
+  const user = await currentUser(req);
+  if (['AGENT', 'SUPPLIER'].includes(user.role) || !hasAnyPermission(user, financeCollection(collection).write)) {
+    const error = new Error(`You do not have permission to write ${collection}.`);
+    error.status = 403;
+    throw error;
+  }
+  return user;
+}
+
+async function handleSaveFinanceRecord(req, res, collection, id) {
+  const user = await requireFinanceWriter(req, collection);
+  const body = await readBody(req);
+
+  if (!id || body.id !== id) {
+    const error = new Error('Record id is required and must match the URL.');
+    error.status = 400;
+    throw error;
+  }
+
+  const record = await upsertFinanceRow(collection, body, user.id);
+  json(res, 200, { record });
+}
+
+async function handleBulkImportFinance(req, res, collection) {
+  const user = await requireFinanceWriter(req, collection);
+  const body = await readBody(req);
+  const records = Array.isArray(body.records) ? body.records : [];
+  const imported = [];
+
+  for (const record of records) {
+    if (!record || !record.id) continue;
+    imported.push(await upsertFinanceRow(collection, record, user.id));
+  }
+
+  await audit(req, user, 'bulk_import_finance', null, {
+    recordType: collection,
+    newValue: { collection, count: imported.length },
+    risk: imported.length > 50 ? 'medium' : 'low',
+  });
+  json(res, 200, { records: imported });
 }
 
 async function handleChangePassword(req, res) {
@@ -491,7 +748,24 @@ async function handleChangePassword(req, res) {
     prefer: 'return=minimal',
     body: { must_change_password: false },
   });
-  await audit(user.id, 'change_password', user.id);
+  // Force re-login everywhere else: only the session that changed the
+  // password survives.
+  const revoked = await revokeUserSessions(user.id, {
+    exceptSid: sessionIdFromRequest(req),
+    revokedBy: user.id,
+    reason: 'password_changed',
+  });
+  await audit(req, user, 'change_password', user.id, {
+    newValue: { password: 'changed from existing value to new value', other_sessions_revoked: revoked },
+    risk: user.role === 'ADMIN' ? 'high' : 'medium',
+  });
+  if (user.role === 'ADMIN') {
+    await createAlert(await getRequestContext(req), user, {
+      type: 'admin_password_changed',
+      reason: `Admin ${user.email} changed their password`,
+      risk: 'high',
+    });
+  }
   json(res, 200, { ok: true });
 }
 
@@ -500,13 +774,21 @@ async function route(req, res) {
   const path = url.pathname;
 
   if (req.method === 'POST' && path === '/api/auth/login') return handleLogin(req, res);
-  if (req.method === 'POST' && path === '/api/auth/logout') {
-    return json(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookie() });
-  }
+  if (req.method === 'POST' && path === '/api/auth/logout') return handleLogout(req, res);
   if (req.method === 'GET' && path === '/api/auth/me') return json(res, 200, { user: await currentUser(req) });
+
+  if (await handleSecurityRoute(req, res, path, url, { currentUser, readBody, json, sessionIdFromRequest })) return undefined;
   if (req.method === 'POST' && path === '/api/auth/change-password') return handleChangePassword(req, res);
   if (req.method === 'POST' && path === '/api/bookings/parse-pnr') return handleParsePnr(req, res);
   if (req.method === 'POST' && path === '/api/bookings/parse-text') return handleParseBookingText(req, res);
+  if (req.method === 'GET' && path === '/api/finance/data') return handleFinanceData(req, res);
+
+  const bulkFinanceMatch = path.match(/^\/api\/finance\/([a-z]+)\/bulk$/);
+  if (bulkFinanceMatch && req.method === 'POST') return handleBulkImportFinance(req, res, bulkFinanceMatch[1]);
+
+  const financeMatch = path.match(/^\/api\/finance\/([a-z]+)\/([^/]+)$/);
+  if (financeMatch && req.method === 'PUT') return handleSaveFinanceRecord(req, res, financeMatch[1], financeMatch[2]);
+
   if (req.method === 'POST' && path === '/api/admin/users') return handleCreateUser(req, res);
   if (req.method === 'GET' && path === '/api/admin/users') return handleListUsers(req, res);
   if (req.method === 'POST' && path === '/api/admin/users/bulk') return handleBulk(req, res);

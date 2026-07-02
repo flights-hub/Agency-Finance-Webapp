@@ -4,11 +4,10 @@ import { BrowserRouter } from 'react-router-dom'
 import App from './App.jsx'
 import { AuthProvider } from './AuthContext.jsx'
 import './index.css'
-import { seedDataIfEmpty } from './helpers/seedData.js'
 import { migrateBookingRefs } from './helpers/storage.js'
 
-// Run one-time mock data seeding
-seedDataIfEmpty();
+// Mock data seeding is retired: finance records now live in the database and
+// are loaded after login (see loadFinanceData in helpers/storage.js).
 
 // Backfill booking_ref on bookings created before grouping existed
 migrateBookingRefs();

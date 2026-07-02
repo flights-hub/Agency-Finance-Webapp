@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Navigate, Route, Routes, NavLink, useLocation } from 'react-router-dom';
 import { Bell, CreditCard, FileText, LayoutDashboard, LogOut, Plane, Receipt, RefreshCcw, Search, Settings, ShieldCheck, UserCog } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
@@ -10,10 +11,12 @@ import Alerts from './pages/Alerts';
 import Statements from './pages/Statements';
 import SettingsPage from './pages/Settings';
 import Users from './pages/Users';
+import Security from './pages/Security';
 import Login from './pages/Login';
 import ChangePassword from './pages/ChangePassword';
 import { useAuth } from './AuthContext';
 import { hasPermission } from './helpers/permissions';
+import { loadFinanceData } from './helpers/storage';
 import brandLogo from '../Fly for Sure Logo no background no tagline.png';
 
 export default function App() {
@@ -32,6 +35,18 @@ export default function App() {
 
 function AuthenticatedApp() {
   const { user, loading, logout } = useAuth();
+  const [dataReady, setDataReady] = useState(false);
+
+  const canLoadData = Boolean(user) && !user?.must_change_password;
+
+  useEffect(() => {
+    if (!canLoadData) return;
+    let cancelled = false;
+    loadFinanceData()
+      .catch((error) => console.error('[app] Failed to load finance data:', error))
+      .finally(() => { if (!cancelled) setDataReady(true); });
+    return () => { cancelled = true; };
+  }, [canLoadData]);
 
   if (loading) {
     return <div className="auth-screen"><div className="auth-card"><h1>Loading workspace</h1><p>Checking your secure session.</p></div></div>;
@@ -39,6 +54,10 @@ function AuthenticatedApp() {
 
   if (!user) return <Navigate to="/login" replace />;
   if (user.must_change_password) return <ChangePassword />;
+
+  if (!dataReady) {
+    return <div className="auth-screen"><div className="auth-card"><h1>Loading workspace</h1><p>Fetching bookings and finance records.</p></div></div>;
+  }
 
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard, permission: null },
@@ -49,6 +68,7 @@ function AuthenticatedApp() {
     { path: '/alerts', label: 'Alerts', icon: Bell, permission: 'view_bookings' },
     { path: '/statements', label: 'Statements', icon: FileText, permission: 'view_statements' },
     { path: '/users', label: 'Users', icon: UserCog, permission: 'manage_users' },
+    { path: '/security', label: 'Security', icon: ShieldCheck, permission: 'view_audit_logs' },
     { path: '/settings', label: 'Settings', icon: Settings, permission: 'configure_settings' },
   ].filter((item) => !item.permission || hasPermission(user, item.permission));
 
@@ -115,6 +135,7 @@ function AuthenticatedApp() {
             <Route path="/alerts" element={<Alerts />} />
             <Route path="/statements" element={<Statements />} />
             <Route path="/users" element={<PermissionGate permission="manage_users"><Users /></PermissionGate>} />
+            <Route path="/security" element={<PermissionGate permission="view_audit_logs"><Security /></PermissionGate>} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

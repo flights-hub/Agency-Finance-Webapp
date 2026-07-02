@@ -37,6 +37,15 @@ export const api = {
     method: 'PUT',
     body: { permission_keys },
   }),
+  financeData: () => request('/api/finance/data'),
+  saveFinanceRecord: (collection, record) => request(`/api/finance/${collection}/${encodeURIComponent(record.id)}`, {
+    method: 'PUT',
+    body: record,
+  }),
+  bulkImportFinance: (collection, records) => request(`/api/finance/${collection}/bulk`, {
+    method: 'POST',
+    body: { records },
+  }),
   parsePnr: (text, provider = 'auto') => request('/api/bookings/parse-pnr', {
     method: 'POST',
     body: { text, provider },
@@ -45,4 +54,14 @@ export const api = {
     method: 'POST',
     body: { text, source, provider },
   }),
+  securityOverview: () => request('/api/security/overview'),
+  securityLoginHistory: (params = {}) => request(`/api/security/login-history?${new URLSearchParams(params)}`),
+  securityAuditTrail: (params = {}) => request(`/api/security/audit-trail?${new URLSearchParams(params)}`),
+  securitySessions: () => request('/api/security/sessions'),
+  securityAlerts: (params = {}) => request(`/api/security/alerts?${new URLSearchParams(params)}`),
+  updateSecurityAlert: (id, payload) => request(`/api/security/alerts/${id}`, { method: 'PATCH', body: payload }),
+  revokeSecuritySession: (id) => request(`/api/security/sessions/${id}/revoke`, { method: 'POST' }),
+  revokeUserSecuritySessions: (userId) => request(`/api/security/users/${userId}/revoke-sessions`, { method: 'POST' }),
+  revokeAllSecuritySessions: () => request('/api/security/sessions/revoke-all', { method: 'POST' }),
+  securityTimeline: (user) => request(`/api/security/timeline?user=${encodeURIComponent(user)}`),
 };
