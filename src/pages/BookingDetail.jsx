@@ -1,6 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useMemo } from 'react';
-import { getBookings, getPayments, savePayment, saveBooking, getRefunds, saveRefund } from '../helpers/storage';
+import { useAuth } from '../AuthContext';
+import { getBookings, getPayments, savePayment, saveBooking, getRefunds, saveRefund, getAmendments, saveAmendment } from '../helpers/storage';
 import { formatCurrency, formatDate } from '../helpers/format';
 import { getPaymentLedger, createPaymentEntry, PAYMENT_MODES, numeric, REFUND_CATEGORIES, daysBetween, calculateVoidQuote, calculateCancelQuote, calculateAmendQuote, calculateRefundQuote } from '../helpers/calculations';
 import { ArrowLeft, Download, Plus, MoreVertical, Printer, FileText, Mail, AlertCircle, ChevronDown, X } from 'lucide-react';
@@ -27,12 +28,41 @@ const CANCEL_SCOPES = [
   { id: 'passenger', label: 'Single Passenger' },
 ];
 
+// Locally hosted, verified-current logos take priority over the third-party
+// CDN fallback below - add more IATA codes here as logos are sourced.
+const LOCAL_AIRLINE_LOGOS = {
+  AI: '/airlines/AI.png',
+};
+
+const TIMELINE_ICONS = {
+  CREATED: '🆕',
+  STATUS: '📍',
+  PAYMENT: '💵',
+  REFUND: '💰',
+  AMENDMENT: '✏️',
+  NOTE: '📝',
+  COMMS: '💬',
+};
+
+const TIMELINE_DOT_COLORS = {
+  CREATED: '#DBEAFE',
+  STATUS: '#F3F4F6',
+  PAYMENT: '#DCFCE7',
+  REFUND: '#FEE2E2',
+  AMENDMENT: '#EDE9FE',
+  NOTE: '#FEF3C7',
+  COMMS: '#DBEAFE',
+};
+
 export default function BookingDetail() {
   const { invoiceNo } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const actorName = user?.name || user?.email || 'Admin';
   const bookings = getBookings();
   const payments = getPayments();
   const refunds = getRefunds();
+  const amendments = getAmendments();
   // invoiceNo from the route is the booking reference. A booking groups every
   // passenger that shares this reference (one PNR, or several across suppliers).
   const normPnr = (value = '') => value.replace(/[^a-z0-9]/gi, '').toUpperCase();
@@ -87,6 +117,88 @@ export default function BookingDetail() {
   const paid = bookingPayments.reduce((sum, p) => sum + numeric(p.amount_paid), 0);
   const balance = total - paid;
 
+  // Every refund case and amendment tied to this booking's PNR(s) - a booking
+  // can go through more than one of each, so these are lists, not single records.
+  const bookingRefunds = refunds.filter(r => groupPnrs.includes(normPnr(r.pnr)));
+  const bookingAmendments = amendments.filter(a => groupPnrs.includes(normPnr(a.pnr)));
+  // Older bookings stored a single amendment directly on the record before the
+  // dedicated amendments collection existed - still surface it in the timeline.
+  const legacyAmendment = booking.amendment_request && !bookingAmendments.some(a => a.id === booking.amendment_request.id)
+    ? booking.amendment_request
+    : null;
+
+  // Builds one merged, chronological view of everything that happened on this
+  // booking - status changes, payments, refunds, amendments, notes and comms -
+  // so support/admin staff have a single timeline instead of hunting across cards.
+  const buildTimeline = () => {
+    const items = [];
+    const createdDate = booking.booking_date || booking.created_at?.split('T')[0];
+
+    if (createdDate) {
+      items.push({ date: createdDate, type: 'CREATED', label: 'Booking created' });
+    }
+    if (booking.ticket_status === 'HELD') {
+      items.push({ date: booking.updated_at?.split('T')[0] || createdDate, type: 'STATUS', label: 'Booking held' });
+    }
+    if (booking.ticket_status === 'TICKETED' && booking.ticket_no) {
+      items.push({ date: booking.updated_at?.split('T')[0] || createdDate, type: 'STATUS', label: `Ticket issued · ${booking.ticket_no}` });
+    }
+    if (booking.ticket_status === 'VOIDED' && booking.void_date) {
+      items.push({ date: booking.void_date, type: 'STATUS', label: 'Booking voided', tone: 'negative' });
+    }
+    if (booking.ticket_status === 'CANCELLED' && booking.cancel_date) {
+      items.push({ date: booking.cancel_date, type: 'STATUS', label: 'Booking cancelled', tone: 'negative' });
+    }
+    if (booking.remarks) {
+      items.push({ date: createdDate, type: 'NOTE', label: 'Note added', detail: booking.remarks });
+    }
+    items.push({
+      date: createdDate,
+      type: 'COMMS',
+      label: booking.ticket_status === 'TICKETED' ? 'Ticket confirmation sent' : 'Booking confirmation sent',
+    });
+
+    bookingPayments.forEach((p) => {
+      items.push({
+        date: p.payment_date,
+        type: 'PAYMENT',
+        label: `${p.instalment_type || 'Payment'} received`,
+        detail: [formatCurrency(p.amount_paid), p.payment_mode, p.remarks].filter(Boolean).join(' · '),
+        actor: p.received_by,
+      });
+    });
+
+    bookingRefunds.forEach((r) => {
+      items.push({
+        date: r.request_date,
+        type: 'REFUND',
+        label: `Refund ${(r.refund_status || 'applied').replace(/_/g, ' ').toLowerCase()}`,
+        detail: [r.refund_category?.replace(/_/g, ' '), `Refundable ${formatCurrency(r.refundable_amount || 0)}`, r.remarks].filter(Boolean).join(' · '),
+        actor: r.requested_by,
+        tone: 'negative',
+      });
+    });
+
+    [...bookingAmendments, ...(legacyAmendment ? [legacyAmendment] : [])].forEach((a) => {
+      items.push({
+        date: a.executed_date || a.request_date,
+        type: 'AMENDMENT',
+        label: `Amendment ${(a.status || 'requested').toLowerCase()}`,
+        detail: Object.entries(a.requested_changes || {})
+          .filter(([, value]) => value)
+          .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${value}`)
+          .join(' · '),
+        actor: a.requested_by,
+      });
+    });
+
+    return items
+      .filter((item) => item.date)
+      .sort((a, b) => b.date.localeCompare(a.date));
+  };
+
+  const timeline = buildTimeline();
+
   // Helper function to format segments for display
   const getSegmentDisplay = () => {
     if (!booking.flight_segments || booking.flight_segments.length === 0) {
@@ -96,6 +208,16 @@ export default function BookingDetail() {
       .flatMap(seg => seg.connections || [])
       .map(conn => `${conn.departure_city || conn.origin || ''} → ${conn.arrival_city || conn.destination || ''}`)
       .join(' > ');
+  };
+
+  // Flight duration from parsed departure/arrival date+time, when both are known.
+  const getFlightDuration = (conn) => {
+    if (!conn.departure_date || !conn.departure_time || !conn.arrival_date || !conn.arrival_time) return '';
+    const departure = new Date(`${conn.departure_date}T${conn.departure_time}:00`);
+    const arrival = new Date(`${conn.arrival_date}T${conn.arrival_time}:00`);
+    const minutes = Math.round((arrival - departure) / 60000);
+    if (!Number.isFinite(minutes) || minutes <= 0) return '';
+    return `${Math.floor(minutes / 60)}Hr ${minutes % 60}Min`;
   };
 
 
@@ -111,7 +233,7 @@ export default function BookingDetail() {
         pnr: booking.pnr,
         amount_paid: amount,
         payment_mode: paymentForm.payment_mode,
-        received_by: 'Finance Admin',
+        received_by: actorName,
         remarks: paymentForm.remarks,
         payment_date: new Date().toISOString().split('T')[0],
       },
@@ -187,6 +309,7 @@ export default function BookingDetail() {
       quote: calculateAmendQuote(),
       request_date: new Date().toISOString().split('T')[0],
       executed_date: new Date().toISOString().split('T')[0],
+      requested_by: actorName,
     };
 
     const updatedBooking = {
@@ -194,10 +317,10 @@ export default function BookingDetail() {
       outbound_date: amendForm.outbound_date || booking.outbound_date,
       inbound_date: amendForm.inbound_date || booking.inbound_date,
       passenger_name: amendForm.passenger_name || booking.passenger_name,
-      amendment_request: amendmentRequest,
       updated_at: new Date().toISOString(),
     };
 
+    saveAmendment(amendmentRequest);
     saveBooking(updatedBooking);
     setShowAmendForm(false);
     setShowQuoteModal(null);
@@ -218,6 +341,7 @@ export default function BookingDetail() {
       non_refundable_emd: quote.nonRefundableEmd,
       remarks: refundForm.remarks,
       request_date: new Date().toISOString().split('T')[0],
+      requested_by: actorName,
     };
 
     saveRefund(refundCase);
@@ -511,30 +635,87 @@ export default function BookingDetail() {
               ✈️ Itinerary
             </h3>
             {booking.flight_segments && booking.flight_segments.length > 0 ? (
-              booking.flight_segments.map((segment, segIdx) => (
-                <div key={segIdx}>
-                  <p style={{ margin: '8px 0 4px', fontSize: '11px', fontWeight: '500', color: 'var(--color-text-secondary)' }}>
-                    {segment.label || `Leg ${segIdx + 1}`}
-                  </p>
-                  {segment.connections && segment.connections.map((conn, connIdx) => (
-                    <div key={connIdx} style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      padding: '6px 0',
-                      borderTop: connIdx === 0 ? '0.5px solid var(--color-border-tertiary)' : 'none',
-                      fontSize: '12.5px'
-                    }}>
-                      <span>
-                        {conn.departure_city || conn.origin || '-'} → {conn.arrival_city || conn.destination || '-'} · {conn.flight_number || conn.airline || '-'} · {conn.departure_date || '-'}
-                      </span>
-                      <span style={{ fontSize: '11px', padding: '1px 7px', borderRadius: '9px', background: '#E1F5EE', color: '#085041' }}>
-                        HK
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ))
+              booking.flight_segments.map((segment, segIdx) => {
+                const legBaggage = (segment.connections || []).find(c => c.check_in_baggage || c.cabin_baggage);
+                return (
+                  <div key={segIdx}>
+                    <p style={{ margin: '8px 0 4px', fontSize: '11px', fontWeight: '500', color: 'var(--color-text-secondary)' }}>
+                      {segment.label || `Leg ${segIdx + 1}`}
+                    </p>
+                    {segment.connections && segment.connections.map((conn, connIdx) => {
+                      const duration = getFlightDuration(conn);
+                      return (
+                        <div key={connIdx} style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: '8px',
+                          padding: '6px 0',
+                          borderTop: connIdx === 0 ? '0.5px solid var(--color-border-tertiary)' : 'none',
+                        }}>
+                          <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '5px',
+                            minWidth: 0,
+                            fontSize: '12.5px',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}>
+                            <span style={{ position: 'relative', width: '32px', height: '18px', flexShrink: 0 }}>
+                              {conn.airline && (
+                                <img
+                                  src={LOCAL_AIRLINE_LOGOS[conn.airline] || `https://images.kiwi.com/airlines/64/${conn.airline}.png`}
+                                  alt={conn.airline}
+                                  style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                                  // Local logos are verified-current; the CDN fallback covers codes we
+                                  // haven't sourced a local logo for yet, and itself falls back to a
+                                  // generic airplane icon for codes it doesn't recognise. This onError
+                                  // only fires if the CDN is unreachable entirely.
+                                  onError={(e) => {
+                                    e.currentTarget.style.display = 'none';
+                                    e.currentTarget.nextElementSibling.style.display = 'flex';
+                                  }}
+                                />
+                              )}
+                              <span style={{
+                                display: conn.airline ? 'none' : 'flex',
+                                position: 'absolute',
+                                inset: 0,
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                borderRadius: '5px',
+                                background: 'var(--color-background-secondary)',
+                                fontSize: '8.5px',
+                                fontWeight: 600,
+                              }}>
+                                {conn.airline || '--'}
+                              </span>
+                            </span>
+                            <span>{conn.airline || ''}{conn.flight_number || '-'}</span>
+                            <span>·</span>
+                            <span>{conn.departure_date || '-'}</span>
+                            <span>·</span>
+                            <span>{conn.departure_city || conn.origin || '-'} → {conn.arrival_city || conn.destination || '-'}</span>
+                            <span>·</span>
+                            <span>{conn.departure_time || '--:--'} – {conn.arrival_time || '--:--'}</span>
+                            {duration && (<><span>·</span><span>{duration}</span></>)}
+                          </div>
+                          <span style={{ fontSize: '11px', padding: '1px 7px', borderRadius: '9px', background: '#E1F5EE', color: '#085041', flexShrink: 0 }}>
+                            {conn.segment_status || 'HK'}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {legBaggage && (
+                      <p style={{ margin: '4px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
+                        🧳 Check-in {legBaggage.check_in_baggage || '-'} · Cabin {legBaggage.cabin_baggage || '-'}
+                      </p>
+                    )}
+                  </div>
+                );
+              })
             ) : (
               <div style={{ padding: '8px 0', fontSize: '12px', color: 'var(--color-text-secondary)' }}>
                 {booking.sector || 'No flight segments defined'}
@@ -602,16 +783,22 @@ export default function BookingDetail() {
           {/* Contact */}
           <div className="card">
             <h3 style={{ margin: '0 0 8px', fontSize: '13px', fontWeight: '500' }}>📋 Contact</h3>
-            <p style={{ margin: '0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>Bill To</p>
-            <p style={{ margin: '1px 0 0', fontSize: '12.5px' }}>{booking.bill_to_name || 'N/A'}</p>
-            <p style={{ margin: '1px 0 6px', fontSize: '11.5px', color: 'var(--color-text-info)' }}>
-              {booking.mobile || 'N/A'}
-            </p>
-            <p style={{ margin: '6px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)', borderTop: '0.5px solid var(--color-border-tertiary)', paddingTop: '6px' }}>Lead passenger</p>
-            <p style={{ margin: '1px 0 0', fontSize: '12.5px' }}>{booking.passenger_name || 'N/A'}</p>
-            <p style={{ margin: '1px 0 0', fontSize: '11.5px', color: 'var(--color-text-info)' }}>
-              {booking.mobile || 'N/A'}
-            </p>
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <div style={{ flex: 1 }}>
+                <p style={{ margin: '0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>Bill To</p>
+                <p style={{ margin: '1px 0 0', fontSize: '12.5px' }}>{booking.bill_to_name || 'N/A'}</p>
+                <p style={{ margin: '1px 0 0', fontSize: '11.5px', color: 'var(--color-text-info)' }}>
+                  {booking.mobile || 'N/A'}
+                </p>
+              </div>
+              <div style={{ flex: 1, borderLeft: '0.5px solid var(--color-border-tertiary)', paddingLeft: '12px' }}>
+                <p style={{ margin: '0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>Lead passenger</p>
+                <p style={{ margin: '1px 0 0', fontSize: '12.5px' }}>{booking.passenger_name || 'N/A'}</p>
+                <p style={{ margin: '1px 0 0', fontSize: '11.5px', color: 'var(--color-text-info)' }}>
+                  {booking.mobile || 'N/A'}
+                </p>
+              </div>
+            </div>
           </div>
 
           {/* Documents */}
@@ -629,83 +816,55 @@ export default function BookingDetail() {
             </div>
           </div>
 
-          {/* Refund Status */}
-          {booking.refund_flag && (
-            <div className="card">
-              <h3 style={{ margin: '0 0 8px', fontSize: '13px', fontWeight: '500' }}>💰 Refund Case</h3>
-              {refunds.find(r => r.pnr === booking.pnr) ? (
-                (() => {
-                  const refundCase = refunds.find(r => r.pnr === booking.pnr);
-                  return (
-                    <>
-                      <p style={{ margin: '0', fontSize: '12px' }}>
-                        Status: <span style={{ fontWeight: '500', color: refundCase.refund_status === 'REFUNDED_TO_CLIENT' ? '#0F6E56' : '#854F0B' }}>
-                          {refundCase.refund_status?.replace(/_/g, ' ') || 'APPLIED'}
-                        </span>
-                      </p>
-                      <p style={{ margin: '3px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
-                        Category: {refundCase.refund_category?.replace(/_/g, ' ') || 'N/A'}
-                      </p>
-                      <p style={{ margin: '3px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
-                        Refundable: {formatCurrency(refundCase.refundable_amount || 0)}
-                      </p>
-                    </>
-                  );
-                })()
-              ) : (
-                <p style={{ margin: '0', fontSize: '12px', color: 'var(--color-text-secondary)' }}>Refund marked but no case created yet</p>
-              )}
-            </div>
-          )}
-
-          {/* Amendment Requests */}
-          {booking.amendment_request && (
-            <div className="card">
-              <h3 style={{ margin: '0 0 8px', fontSize: '13px', fontWeight: '500' }}>
-                ✏️ Amendment
-                <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '6px', background: booking.amendment_request.status === 'EXECUTED' ? '#DBEAFE' : '#FAEEDA', color: booking.amendment_request.status === 'EXECUTED' ? '#1E40AF' : '#854F0B', marginLeft: '4px' }}>
-                  {booking.amendment_request.status}
-                </span>
-              </h3>
-              <p style={{ margin: '0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
-                Requested: {booking.amendment_request.request_date}
-              </p>
-              {booking.amendment_request.executed_date && (
-                <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
-                  Executed: {booking.amendment_request.executed_date}
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Comms */}
+          {/* Activity Timeline - merges audit log, comms, remarks, refunds and amendments
+              into one chronological history so support/admin can see everything here */}
           <div className="card">
-            <h3 style={{ margin: '0 0 8px', fontSize: '13px', fontWeight: '500' }}>💬 Comms</h3>
-            <p style={{ margin: '0', fontSize: '12px' }}>
-              {booking.ticket_status === 'TICKETED' ? 'Ticket confirmation sent' : 'Booking confirmation sent'}
-            </p>
-            <p style={{ margin: '1px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
-              {booking.booking_date || booking.created_at?.split('T')[0]} · Latest update
-            </p>
-          </div>
+            <h3 style={{ margin: '0 0 8px', fontSize: '13px', fontWeight: '500' }}>🕐 Activity timeline</h3>
+            {timeline.length === 0 ? (
+              <p style={{ margin: 0, fontSize: '12px', color: 'var(--color-text-secondary)' }}>No activity recorded yet</p>
+            ) : (
+              timeline.map((item, idx) => {
+                const isLast = idx === timeline.length - 1;
+                return (
+                  <div key={idx} style={{ display: 'flex', gap: '10px', alignItems: 'stretch' }}>
+                    {/* Rail: dot + connecting line down to the next entry */}
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                      <div
+                        style={{
+                          width: '20px',
+                          height: '20px',
+                          minHeight: '20px',
+                          borderRadius: '50%',
+                          background: TIMELINE_DOT_COLORS[item.type] || '#F3F4F6',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: '10.5px',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {TIMELINE_ICONS[item.type] || '•'}
+                      </div>
+                      {!isLast && (
+                        <div style={{ flex: 1, width: '2px', minHeight: '10px', background: 'var(--color-border-tertiary)', margin: '2px 0' }} />
+                      )}
+                    </div>
 
-          {/* Audit Log */}
-          <div className="card">
-            <h3 style={{ margin: '0 0 8px', fontSize: '13px', fontWeight: '500' }}>📜 Audit log</h3>
-            <p style={{ margin: '0', fontSize: '11.5px' }}>
-              {booking.booking_date || booking.created_at?.split('T')[0]} · Booking created
-            </p>
-            {booking.ticket_status === 'HELD' && (
-              <p style={{ margin: '3px 0 0', fontSize: '11.5px' }}>Booking held</p>
-            )}
-            {booking.ticket_status === 'TICKETED' && booking.ticket_no && (
-              <p style={{ margin: '3px 0 0', fontSize: '11.5px' }}>Ticket issued · {booking.ticket_no}</p>
-            )}
-            {booking.ticket_status === 'VOIDED' && booking.void_date && (
-              <p style={{ margin: '3px 0 0', fontSize: '11.5px', color: '#991B1B' }}>Voided on {booking.void_date}</p>
-            )}
-            {booking.ticket_status === 'CANCELLED' && booking.cancel_date && (
-              <p style={{ margin: '3px 0 0', fontSize: '11.5px', color: '#991B1B' }}>Cancelled on {booking.cancel_date}</p>
+                    {/* Content */}
+                    <div style={{ flex: 1, paddingBottom: isLast ? 0 : '12px' }}>
+                      <p style={{ margin: 0, fontSize: '12px', color: item.tone === 'negative' ? '#991B1B' : 'inherit', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        <span style={{ color: 'var(--color-text-tertiary)' }}>{item.date}</span>
+                        {' · '}
+                        {item.label}
+                        {item.actor && <span style={{ color: 'var(--color-text-tertiary)' }}>{' · '}{item.actor}</span>}
+                      </p>
+                      {item.detail && (
+                        <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>{item.detail}</p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
