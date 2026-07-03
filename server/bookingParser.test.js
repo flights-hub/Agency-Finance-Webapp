@@ -476,3 +476,76 @@ assert.equal(conjunctionResult.raw.passengers.find((p) => p.pax_type === 'INF').
 assert.ok(!conjunctionResult.warnings.includes('TICKET_COUNT_MISMATCH'));
 
 console.log('bookingParser conjunction ticket checks passed');
+
+const fullMonthRoundtripText = `
+ALMATE SRL BOOKING REF: ZY2FM4 VIA NICCOLO TOMMASEO 22 DATE: 01 JULY 2026 IT-35100 PADOVA ITALY SINGH/JASKARAN SINGH/SURINDER FLIGHT AI 122 - AIR INDIA FRI 31 JULY 2026 ----------------------------------------------------------------------------- DEPARTURE: ROME, IT (FIUMICINO), TERMINAL 3 31 JUL 20:50 ARRIVAL: DELHI, DL (INDIRA GANDHI INTL), TERMINAL 3 01 AUG 09:45 FLIGHT BOOKING REF: AI/ZY2FM4 LAST CHECK IN TIME: 19:50 RESERVATION CONFIRMED, ECONOMY (L) DURATION: 09:25 - - - BAGGAGE ALLOWANCE: 2PC NON STOP ROME TO DELHI, DL EQUIPMENT: BOEING 787-8 FLIGHT AI 123 - AIR INDIA MON 24 AUGUST 2026 ----------------------------------------------------------------------------- DEPARTURE: DELHI, DL (INDIRA GANDHI INTL), TERMINAL 3 24 AUG 13:10 ARRIVAL: ROME, IT (FIUMICINO), TERMINAL 3 24 AUG 19:00 FLIGHT BOOKING REF: AI/ZY2FM4 LAST CHECK IN TIME: 12:10 RESERVATION CONFIRMED, ECONOMY (G) DURATION: 09:20 - - - BAGGAGE ALLOWANCE: 2PC NON STOP DELHI, DL TO ROME EQUIPMENT: BOEING 787-8 FLIGHT TICKET(S) ----------------------------------------------------------------------------- TICKET: AI/ETKT 098 9497963763 FOR SINGH/JASKARAN TICKET: AI/ETKT 098 9497963764 FOR SINGH/SURINDER
+`;
+
+const fullMonthResult = parseBookingText({ text: fullMonthRoundtripText, source: 'PDF' });
+const fullMonthSegments = fullMonthResult.raw.segments;
+assert.equal(fullMonthResult.raw.pnr, 'ZY2FM4');
+assert.equal(fullMonthSegments.length, 2);
+assert.deepEqual(
+  fullMonthSegments.map((segment) => `${segment.departure_city}-${segment.arrival_city}`),
+  ['FCO-DEL', 'DEL-FCO'],
+);
+assert.deepEqual(
+  fullMonthSegments.map((segment) => segment.departure_date),
+  ['2026-07-31', '2026-08-24'],
+);
+assert.equal(fullMonthResult.drafts[0].trip_type, 'ROUNDTRIP');
+
+console.log('bookingParser full month name roundtrip checks passed');
+
+const eurowingsReceiptText = `
+Passenger Receipt Confirmation of Booking Hello ghai travels, Thank you for booking with Eurowings. Overview of your flight information Your booking code for check-in: JG2WSI Date of booking: 01.07.2026 20:52 (CEST) Date of change: 01.07.2026 20:52 (CEST) Flight data (times are local times) Flight: 03.07.2026 | Flight Number EW 7886 (BASIC\\ G ) * Operated by GetJet (GW) Departure 12:00 Hamburg Arrival 14:15 Rome Fiumicino Passenger: Passenger 1 : MRS arvinder kaur arvinder kaur Additionally booked extras: Hamburg ( HAM ) - Rome Fiumicino ( FCO ) (BASIC)
+`;
+
+const eurowingsResult = parseBookingText({ text: eurowingsReceiptText, source: 'PDF' });
+assert.equal(eurowingsResult.raw.pnr, 'JG2WSI');
+assert.equal(eurowingsResult.raw.passengers.length, 1);
+assert.equal(eurowingsResult.raw.passengers[0].passenger_name, 'KAUR/ARVINDER');
+assert.equal(eurowingsResult.raw.segments.length, 1);
+const eurowingsSegment = eurowingsResult.raw.segments[0];
+assert.equal(`${eurowingsSegment.airline} ${eurowingsSegment.flight_number}`, 'EW 7886');
+assert.equal(`${eurowingsSegment.departure_city}-${eurowingsSegment.arrival_city}`, 'HAM-FCO');
+assert.equal(eurowingsSegment.departure_date, '2026-07-03');
+assert.equal(eurowingsSegment.departure_time, '12:00');
+assert.equal(eurowingsSegment.arrival_time, '14:15');
+assert.equal(eurowingsSegment.booking_class, 'G');
+assert.equal(eurowingsResult.drafts[0].booking_date, '2026-07-01');
+
+console.log('bookingParser Eurowings receipt checks passed');
+
+// Ryanair roundtrip confirmation: side-by-side flight cards arrive interleaved
+// from OCR/pdf.js reading order.
+const ryanairRoundtripText = `
+RYANAIR myRyanair Destination:: Athens Reservation: C3385T Your flight information To Athens FR1198 To Rome (Fiumicino) FR1299 Rome (Fiumicino) - Athens Athens - Rome (Fiumicino) Wed, 12 Aug 26 Sat, 05 Sep 26 Departure time - 13:00 Departure time - 18:50 Arrival time - 16:00 Arrival time - 20:00 (FCO) - (ATH) (ATH) - (FCO) Passenger(s): Mr SARVJIT SINGH Flight out: FR1198 Flight back: FR1299 Receipt: Total price of your trip purchased via PayPal Billing Agreement ending in: 0000 177.65 EUR
+`;
+
+const ryanairRoundtrip = parseBookingText({ text: ryanairRoundtripText, source: 'PDF' });
+assert.equal(ryanairRoundtrip.raw.pnr, 'C3385T');
+assert.equal(ryanairRoundtrip.raw.passengers[0].passenger_name, 'SINGH/SARVJIT');
+assert.equal(ryanairRoundtrip.raw.passengers[0].ticket_no, 'C3385T');
+assert.equal(ryanairRoundtrip.raw.passengers[0].fare_issued, 177.65);
+assert.deepEqual(
+  ryanairRoundtrip.raw.segments.map((s) => `${s.airline}${s.flight_number} ${s.departure_city}-${s.arrival_city} ${s.departure_date} ${s.departure_time}`),
+  ['FR1198 FCO-ATH 2026-08-12 13:00', 'FR1299 ATH-FCO 2026-09-05 18:50'],
+);
+assert.equal(ryanairRoundtrip.drafts[0].trip_type, 'ROUNDTRIP');
+assert.ok(!ryanairRoundtrip.warnings.includes('NO_TICKET_FOUND'));
+
+const ryanairOneWayText = `
+myRyanair Destination:: Girona (Barcelona) Reservation: Y4R4XW Your flight information To Girona (Barcelona) FR4966 Bari - Girona (Barcelona) Sat, 04 Jul 26 Departure time - 20:05 Arrival time - 22:15 (BRI) - (GRO) Passenger(s): Mr RAMJIT SINGH Flight out: FR4966 Checked Bag (20kg) Receipt: Total price of your trip purchased via PayPal Billing Agreement ending in: 0000 66.98 EUR
+`;
+
+const ryanairOneWay = parseBookingText({ text: ryanairOneWayText, source: 'PDF' });
+assert.equal(ryanairOneWay.raw.pnr, 'Y4R4XW');
+assert.equal(ryanairOneWay.raw.passengers[0].passenger_name, 'SINGH/RAMJIT');
+assert.equal(ryanairOneWay.raw.passengers[0].ticket_no, 'Y4R4XW');
+assert.equal(ryanairOneWay.raw.segments.length, 1);
+assert.equal(ryanairOneWay.raw.segments[0].check_in_baggage, '20KG');
+assert.equal(ryanairOneWay.raw.segments[0].departure_date, '2026-07-04');
+assert.equal(ryanairOneWay.drafts[0].trip_type, 'ONE_WAY');
+
+console.log('bookingParser Ryanair confirmation checks passed');

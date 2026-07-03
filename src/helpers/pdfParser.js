@@ -4,6 +4,31 @@ import * as pdfjsLib from 'pdfjs-dist';
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
 
 /**
+ * Extracts text from an uploaded ticket file. PDFs go through text-layer
+ * extraction with an OCR fallback; images go straight to OCR.
+ * @param {File} file - The uploaded PDF or image file
+ * @returns {Promise<string>} - The extracted raw text
+ */
+export async function extractTextFromFile(file) {
+  if (file.type.startsWith('image/')) {
+    return extractTextFromImage(file);
+  }
+  return extractTextFromPDF(file);
+}
+
+async function extractTextFromImage(file) {
+  try {
+    const result = await Tesseract.recognize(file, 'eng', {
+      logger: (message) => console.log(message),
+    });
+    return result.data.text;
+  } catch (error) {
+    console.error('Error parsing image:', error);
+    throw new Error(error?.message || 'Failed to extract text from image', { cause: error });
+  }
+}
+
+/**
  * Extracts text from a PDF file using OCR (Tesseract) or direct text extraction
  * @param {File} file - The uploaded PDF file
  * @returns {Promise<string>} - The extracted raw text

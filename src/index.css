@@ -2167,6 +2167,36 @@ textarea:focus {
   color: var(--ink-500);
 }
 
+.upload-ticket-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.upload-ticket-row > div:first-child {
+  flex: 1;
+  min-width: 260px;
+}
+
+.upload-dropzone.compact {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  text-align: left;
+}
+
+.upload-dropzone.compact h4 {
+  margin: 0;
+}
+
+.upload-dropzone.compact p {
+  margin: 0;
+  font-size: 13px;
+}
+
 .booking-entry-grid {
   align-items: start;
 }

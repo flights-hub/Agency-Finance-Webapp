@@ -9,7 +9,7 @@ import {
   getBookingLedger,
   getPaymentStatus,
 } from '../helpers/calculations';
-import { extractTextFromPDF } from '../helpers/pdfParser';
+import { extractTextFromFile } from '../helpers/pdfParser';
 import { api } from '../helpers/api';
 import { AIRLINES } from '../data/airlines';
 import { AIRPORTS } from '../data/airports';
@@ -796,6 +796,7 @@ export default function Bookings() {
   const [sortKey, setSortKey] = useState('sl');
   const [sortDir, setSortDir] = useState('asc');
   const [pdfStatus, setPdfStatus] = useState('');
+  const [uploadDragActive, setUploadDragActive] = useState(false);
   const [crypticText, setCrypticText] = useState('');
   const [crypticProvider, setCrypticProvider] = useState('auto');
   const [crypticStatus, setCrypticStatus] = useState('idle');
@@ -1301,9 +1302,15 @@ export default function Bookings() {
     URL.revokeObjectURL(url);
   };
 
-  const handlePdfUpload = async (event) => {
-    const file = event.target.files[0];
+  const UPLOAD_TYPES = ['application/pdf', 'image/jpeg', 'image/png'];
+
+  const processTicketFile = async (file) => {
     if (!file) return;
+    if (!UPLOAD_TYPES.includes(file.type)) {
+      setCrypticError('Unsupported file type. Upload a PDF, JPG, JPEG, or PNG file.');
+      setPdfStatus('error');
+      return;
+    }
 
     setPdfStatus('processing');
     setCrypticError('');
@@ -1312,8 +1319,8 @@ export default function Bookings() {
     setCrypticMeta(null);
 
     try {
-      const text = await extractTextFromPDF(file);
-      if (!text.trim()) throw new Error('No selectable text was found in this PDF.');
+      const text = await extractTextFromFile(file);
+      if (!text.trim()) throw new Error('No readable text was found in this file.');
       const result = await api.parseBookingText(text, 'PDF');
       setCrypticDrafts(result.drafts || []);
       setCrypticWarnings(result.warnings || []);
@@ -1333,18 +1340,28 @@ export default function Bookings() {
         ticketCount: result.meta?.ticketCount || 0,
       });
       if (!hasUsefulPdfDetails(result)) {
-        setCrypticError('PDF parsed only passenger and PNR. Route, flight, or ticket details were not found in the extracted text.');
+        setCrypticError('Only passenger and PNR were parsed. Route, flight, or ticket details were not found in the extracted text.');
         setPdfStatus('error');
         return;
       }
       setPdfStatus('success');
     } catch (err) {
       console.error(err);
-      setCrypticError(err.message || 'Unable to parse ticket PDF.');
+      setCrypticError(err.message || 'Unable to parse the ticket file.');
       setPdfStatus('error');
-    } finally {
-      event.target.value = '';
     }
+  };
+
+  const handlePdfUpload = async (event) => {
+    const file = event.target.files[0];
+    await processTicketFile(file);
+    event.target.value = '';
+  };
+
+  const handleUploadDrop = async (event) => {
+    event.preventDefault();
+    setUploadDragActive(false);
+    await processTicketFile(event.dataTransfer.files?.[0]);
   };
 
   const handleCrypticParse = async () => {
@@ -1785,7 +1802,7 @@ export default function Bookings() {
             <FileText size={16} /> Cryptic
           </button>
           <button className={`btn ${activeTab === 'UPLOAD' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('UPLOAD')}>
-            <UploadCloud size={16} /> Upload PDF
+            <UploadCloud size={16} /> Upload
           </button>
           <button className={`btn ${activeTab === 'LIST' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchBookingTab('LIST')}>
             List
@@ -2012,21 +2029,34 @@ export default function Bookings() {
       )}
 
       {activeTab === 'UPLOAD' && (
-        <div className="grid-2">
+        <div className="manual-booking-stack">
           <div className="card">
-            <h3>Upload Ticket PDF</h3>
-            <p style={{ color: 'var(--zinc-500)', marginBottom: 20 }}>
-              Upload a PDF ticket. Extracted values populate the same manual booking fields before saving.
-            </p>
-            <div className="upload-dropzone" onClick={() => document.getElementById('pdfInput').click()}>
-              <UploadCloud size={48} color="var(--zinc-400)" style={{ marginBottom: 10 }} />
-              <h4>Click or Drag & Drop PDF</h4>
-              <p>Only .pdf files are supported</p>
-              <input id="pdfInput" type="file" accept="application/pdf" style={{ display: 'none' }} onChange={handlePdfUpload} />
+            <div className="upload-ticket-row">
+              <div>
+                <h3>Upload Ticket</h3>
+                <p style={{ color: 'var(--zinc-500)' }}>
+                  Upload a ticket as PDF or image. Extracted values populate the same manual booking fields before saving.
+                </p>
+              </div>
+              <div
+                className="upload-dropzone compact"
+                style={uploadDragActive ? { borderColor: 'var(--coral)' } : undefined}
+                onClick={() => document.getElementById('pdfInput').click()}
+                onDragOver={(e) => { e.preventDefault(); setUploadDragActive(true); }}
+                onDragLeave={() => setUploadDragActive(false)}
+                onDrop={handleUploadDrop}
+              >
+                <UploadCloud size={24} color="var(--zinc-400)" />
+                <div>
+                  <h4>Click or Drag & Drop</h4>
+                  <p>PDF, JPG, JPEG & PNG files are supported</p>
+                </div>
+                <input id="pdfInput" type="file" accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png" style={{ display: 'none' }} onChange={handlePdfUpload} />
+              </div>
             </div>
-            {pdfStatus === 'processing' && <p style={{ marginTop: 20, color: 'var(--coral)' }}>Extracting text... please wait.</p>}
-            {pdfStatus === 'success' && <p style={{ marginTop: 20, color: 'var(--success)' }}>Extracted values were added to the manual form.</p>}
-            {pdfStatus === 'error' && <p style={{ marginTop: 20, color: '#FF3B30' }}>Failed to extract data. Is it a valid PDF?</p>}
+            {pdfStatus === 'processing' && <p style={{ marginTop: 12, color: 'var(--coral)' }}>Extracting text... please wait.</p>}
+            {pdfStatus === 'success' && <p style={{ marginTop: 12, color: 'var(--success)' }}>Extracted values were added to the manual form.</p>}
+            {pdfStatus === 'error' && <p style={{ marginTop: 12, color: '#FF3B30' }}>Failed to extract data. Is it a valid PDF or image?</p>}
           </div>
           {renderBookingForm()}
         </div>

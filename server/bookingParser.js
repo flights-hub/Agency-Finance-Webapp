@@ -38,8 +38,11 @@ const COMMON_AIRLINE_NAMES = [
   ['KLM', 'KL'],
   ['BRITISH AIRWAYS', 'BA'],
 ];
-const PDF_WEEKDAY_PATTERN = '(?:MON|TUE|WED|THU|FRI|SAT|SUN)';
-const PDF_MONTH_PATTERN = '(?:JAN|FEB|MAR|APR|MAY|JUN|JUNE|JUL|JULY|AUG|SEP|SEPT|OCT|NOV|DEC)';
+// Low-cost carriers issue no e-ticket numbers; the reservation code doubles
+// as the ticket reference.
+const LOW_COST_AIRLINES = new Set(['FR', 'EW', 'W6', 'U2', 'VY', '6E', 'IX', 'PC', 'FZ', 'G9', 'SG', 'TR', 'HV', 'AK', 'QP']);
+const PDF_WEEKDAY_PATTERN = '(?:MON(?:DAY)?|TUE(?:S(?:DAY)?)?|WED(?:NESDAY)?|THU(?:RS(?:DAY)?)?|FRI(?:DAY)?|SAT(?:URDAY)?|SUN(?:DAY)?)';
+const PDF_MONTH_PATTERN = '(?:JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER|T)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)';
 const AIRPORT_KEYWORDS = new Set(['AIRPORT', 'APT', 'INTL', 'INTERNATIONAL']);
 const AIRPORT_TEXT_ALIASES = [
   [/HAMAD\s+INTERNATIONAL|DOHA,\s*QA/, 'DOH'],
@@ -88,7 +91,7 @@ function parseDdMmmIso(value, fallbackYear) {
 
 function parsePdfDate(value, fallbackYear = new Date().getFullYear()) {
   const raw = String(value || '').toUpperCase().trim();
-  const numeric = raw.match(/\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/);
+  const numeric = raw.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b/);
   if (numeric) {
     const yearValue = Number(numeric[3]);
     const year = numeric[3].length === 2 ? 2000 + yearValue : yearValue;
@@ -160,6 +163,19 @@ function splitGdsName(value) {
     first_name: firstName || '',
     passenger_name: lastName && firstName ? `${lastName}/${firstName}` : compactSpaces(value),
   };
+}
+
+// Eurowings prints "firstname lastname" twice in the passenger line; collapse
+// an exactly doubled token sequence back to a single name.
+function dedupeDoubledName(value) {
+  const tokens = compactSpaces(value).split(' ');
+  if (tokens.length >= 2 && tokens.length % 2 === 0) {
+    const half = tokens.length / 2;
+    if (tokens.slice(0, half).join(' ') === tokens.slice(half).join(' ')) {
+      return tokens.slice(0, half).join(' ');
+    }
+  }
+  return compactSpaces(value);
 }
 
 function splitPdfName(value) {
@@ -491,10 +507,90 @@ function extractPdfAirlineTableSegments(text, currentYear) {
   return segments;
 }
 
+// Eurowings passenger receipts: "Flight: 03.07.2026 | Flight Number EW 7886 (BASIC\ G )"
+// followed by "Departure 12:00 Hamburg Arrival 14:15 Rome Fiumicino" and a route
+// line with IATA codes like "Hamburg ( HAM ) - Rome Fiumicino ( FCO )".
+function extractEurowingsSegments(text) {
+  const segments = [];
+  const codeByPlace = new Map();
+  for (const match of text.matchAll(/([A-Z][A-Z\s.'-]+?)\s*\(\s*([A-Z]{3})\s*\)/g)) {
+    if (airportExists(match[2])) codeByPlace.set(compactSpaces(match[1]), match[2]);
+  }
+  const placeCode = (place) => {
+    const cleaned = compactSpaces(place);
+    if (codeByPlace.has(cleaned)) return codeByPlace.get(cleaned);
+    for (const [name, code] of codeByPlace) {
+      if (cleaned.includes(name) || name.includes(cleaned)) return code;
+    }
+    return airportByText(cleaned) || '';
+  };
+
+  const pattern = /FLIGHT:\s*(\d{1,2})\.(\d{1,2})\.(\d{2,4})\s*\|\s*FLIGHT\s+NUMBER\s+([A-Z0-9]{2})\s*(\d{1,4})(?:\s*\(\s*[A-Z]+[^A-Z)]*([A-Z])?\s*\))?[\s\S]{0,240}?DEPARTURE\s+(\d{1,2}:\d{2})\s+(.+?)\s+ARRIVAL\s+(\d{1,2}:\d{2})\s+(.+?)(?=\s+(?:PASSENGER\b|FLIGHT:|ADDITIONALLY\b|$))/g;
+  for (const match of text.matchAll(pattern)) {
+    const departureCity = placeCode(match[8]);
+    const arrivalCity = placeCode(match[10]);
+    if (!departureCity || !arrivalCity) continue;
+    const year = match[3].length === 2 ? 2000 + Number(match[3]) : Number(match[3]);
+    const date = isoDate({ day: Number(match[1]), month: Number(match[2]) - 1, year });
+    segments.push(createPdfSegment({
+      segment_ref: segments.length + 1,
+      airline: match[4],
+      flight_number: match[5],
+      booking_class: match[6] || '',
+      departure_city: departureCity,
+      arrival_city: arrivalCity,
+      departure_date: date,
+      arrival_date: date,
+      departure_time: hhmm(match[7]),
+      arrival_time: hhmm(match[9]),
+    }));
+  }
+  return segments;
+}
+
+// Ryanair confirmations render flight cards side by side, so extracted text
+// interleaves them line by line ("Wed, 12 Aug 26 Sat, 05 Sep 26"). Fields are
+// collected per category in reading order and zipped back into segments:
+// "To Athens FR1198", "Departure time - 13:00", "(FCO) - (ATH)".
+function extractRyanairSegments(text, currentYear) {
+  if (!/DEPARTURE\s+TIME\s*[-–]/.test(text)) return [];
+
+  const flights = [...text.matchAll(/\bTO\s+[A-Z][A-Z\s().'-]*?\s+([A-Z0-9]{2})\s?(\d{1,4})\b/g)]
+    .filter((match) => airlineExists(match[1]));
+  const codePairs = [...text.matchAll(/\(\s*([A-Z]{3})\s*\)\s*[-–]\s*\(\s*([A-Z]{3})\s*\)/g)]
+    .filter((match) => airportExists(match[1]) && airportExists(match[2]));
+  const dates = [...text.matchAll(new RegExp(`\\b${PDF_WEEKDAY_PATTERN},?\\s+(\\d{1,2})\\s+(${PDF_MONTH_PATTERN})\\s+(\\d{2,4})\\b`, 'g'))];
+  const departureTimes = [...text.matchAll(/DEPARTURE\s+TIME\s*[-–]\s*(\d{1,2}:\d{2})/g)];
+  const arrivalTimes = [...text.matchAll(/ARRIVAL\s+TIME\s*[-–]\s*(\d{1,2}:\d{2})/g)];
+
+  const count = codePairs.length;
+  if (!count || flights.length !== count || dates.length !== count
+    || departureTimes.length !== count || arrivalTimes.length !== count) return [];
+
+  const segments = [];
+  for (let index = 0; index < count; index += 1) {
+    const date = parsePdfDate(`${dates[index][1]} ${dates[index][2]} ${dates[index][3]}`, currentYear);
+    segments.push(createPdfSegment({
+      segment_ref: index + 1,
+      airline: flights[index][1],
+      flight_number: flights[index][2],
+      departure_city: codePairs[index][1],
+      arrival_city: codePairs[index][2],
+      departure_date: date,
+      arrival_date: date,
+      departure_time: hhmm(departureTimes[index][1]),
+      arrival_time: hhmm(arrivalTimes[index][1]),
+    }));
+  }
+  return segments;
+}
+
 function extractPdfSegments(text, currentYear) {
   const segments = [
     ...extractPdfStructuredSegments(text, currentYear),
     ...extractPdfAirlineTableSegments(text, currentYear),
+    ...extractEurowingsSegments(text),
+    ...extractRyanairSegments(text, currentYear),
   ];
   if (segments.length) {
     return uniqueBy(segments, (segment) => [
@@ -1094,7 +1190,7 @@ export function parsePdfBooking(input) {
   const text = original.toUpperCase();
   const warnings = [];
   const currentYear = new Date().getFullYear();
-  const pnr = (text.match(/(?:RECORD\s+LOCATOR|PNR|BOOKING\s+REF|LOCATOR|REFERENCE)[:\s]+([A-Z0-9]{6})/) || [])[1] || '';
+  const pnr = (text.match(/(?:RECORD\s+LOCATOR|PNR|BOOKING\s+REF|BOOKING\s+CODE(?:\s+FOR\s+CHECK[-\s]*IN)?|LOCATOR|RESERVATION|REFERENCE)[:\s]+([A-Z0-9]{6})/) || [])[1] || '';
   const passengers = [];
   const passengerByName = new Map();
 
@@ -1121,6 +1217,22 @@ export function parsePdfBooking(input) {
     addPdfPassenger(passengers, passengerByName, match[1]);
   }
 
+  // Eurowings receipts: "Passenger 1 : MRS arvinder kaur arvinder kaur"
+  for (const match of text.matchAll(/\bPASSENGER\s+\d+\s*:\s*(MR|MRS|MS|MISS|MSTR)\.?\s+([A-Z][A-Z\s'-]*[A-Z])(?=\s+(?:ADDITIONALLY\b|PASSENGER\s+\d|HAND\s+LUGGAGE\b|BAGGAGE\b|$))/g)) {
+    const names = splitPdfName(dedupeDoubledName(match[2]));
+    if (!names.passenger_name || passengerByName.has(names.passenger_name)) continue;
+    const passenger = createPassenger({
+      seq_no: passengers.length + 1,
+      p_ref: passengers.length + 1,
+      title: match[1],
+      ...names,
+      pax_type: 'ADT',
+      ticket_format: 'PDF',
+    });
+    passengers.push(passenger);
+    passengerByName.set(passenger.passenger_name, passenger);
+  }
+
   const headerPassenger = text.match(/\b([A-Z][A-Z'-]+\/[A-Z][A-Z'-]+)\s+(?:TELEPHONE|FAX|FLIGHT)\b/);
   if (headerPassenger) {
     addPdfPassenger(passengers, passengerByName, headerPassenger[1]);
@@ -1135,6 +1247,22 @@ export function parsePdfBooking(input) {
       ...names,
       pax_type: 'INF',
       dob: parseDdMmmIso(match[2], currentYear),
+      ticket_format: 'PDF',
+    });
+    passengers.push(passenger);
+    passengerByName.set(passenger.passenger_name, passenger);
+  }
+
+  // Ryanair confirmations: "Passenger(s): Mr SARVJIT SINGH Flight out: FR1198"
+  for (const match of text.matchAll(/\b(MR|MRS|MS|MISS|MSTR)\.?\s+([A-Z][A-Z\s'-]*[A-Z])\s+FLIGHT\s+(?:OUT|BACK)\s*:/g)) {
+    const names = splitPdfName(dedupeDoubledName(match[2]));
+    if (!names.passenger_name || passengerByName.has(names.passenger_name)) continue;
+    const passenger = createPassenger({
+      seq_no: passengers.length + 1,
+      p_ref: passengers.length + 1,
+      title: match[1],
+      ...names,
+      pax_type: 'ADT',
       ticket_format: 'PDF',
     });
     passengers.push(passenger);
@@ -1177,6 +1305,29 @@ export function parsePdfBooking(input) {
     segment.departure_date,
     segment.departure_time,
   ].join('-'));
+
+  // Ryanair extras: "Flight out: FR4966 Checked Bag (20kg)"
+  for (const match of text.matchAll(/FLIGHT\s+(?:OUT|BACK)\s*:\s*([A-Z0-9]{2})\s?(\d{1,4})\s+CHECKED\s+BAG\s*\(\s*(\d+\s*KG)\s*\)/g)) {
+    const segment = segments.find((item) => item.airline === match[1] && item.flight_number === match[2]);
+    if (segment) segment.check_in_baggage ||= compactSpaces(match[3]);
+  }
+
+  // Low-cost carriers issue no e-ticket; carry the reservation code as the
+  // ticket reference so downstream fields are not left blank.
+  const usePnrAsTicket = !tickets.length && pnr && passengers.length
+    && segments.length && segments.every((segment) => LOW_COST_AIRLINES.has(segment.airline));
+  if (usePnrAsTicket) {
+    passengers.forEach((passenger) => {
+      passenger.ticket_no = pnr;
+      passenger.ticket_status = 'TICKETED';
+    });
+  }
+
+  const totalPrice = text.match(/TOTAL\s+PRICE\b[^]*?(\d+[.,]\d{2})\s*(EUR|USD|GBP|CHF|INR)\b/);
+  if (totalPrice && passengers.length === 1 && !passengers[0].fare_issued) {
+    passengers[0].fare_issued = money(totalPrice[1].replace(',', '.'));
+    passengers[0].currency = totalPrice[2];
+  }
 
   const seats = [...text.matchAll(/SEAT\s+([0-9]{1,3}[A-Z])\s*-\s*(CONFIRMED|PENDING|REQUEST)/g)];
   seats.forEach((match, index) => {
@@ -1224,7 +1375,7 @@ export function parsePdfBooking(input) {
 
   if (!passengers.length) warnings.push('No passenger names were detected.');
   if (!pnr) warnings.push('No record locator was detected.');
-  if (!tickets.length) warnings.push('NO_TICKET_FOUND');
+  if (!tickets.length && !usePnrAsTicket) warnings.push('NO_TICKET_FOUND');
   if (!segments.length) warnings.push('NO_SEGMENTS_FOUND');
   if ((passengers.length || pnr) && !segments.some((segment) => segment.departure_city && segment.arrival_city)) warnings.push('NO_ROUTE_FIELDS_FOUND');
   if (segments.length && (!segments[0].departure_date || !segments[0].departure_time || !segments[0].airline || !segments[0].flight_number)) {
@@ -1234,7 +1385,9 @@ export function parsePdfBooking(input) {
   return mapDrafts({
     source: 'PDF',
     pnr,
-    bookingDate: tickets[0]?.ticket_issue_date || new Date().toISOString().slice(0, 10),
+    bookingDate: tickets[0]?.ticket_issue_date
+      || parsePdfDate((text.match(/DATE\s+OF\s+BOOKING[:\s]+(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})/) || [])[1] || '', currentYear)
+      || new Date().toISOString().slice(0, 10),
     passengers,
     segments,
     supplierName: '',
