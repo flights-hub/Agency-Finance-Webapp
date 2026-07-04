@@ -116,7 +116,10 @@ export default function Statements() {
       ? supplierPayableForBooking(booking, selectedParty)
       : Number(booking.fare_issued || 0))
   ), 0);
-  const collected = statementPayments.reduce((sum, payment) => sum + Number(payment.amount_paid || 0), 0);
+  // Only verified, ledger-posted payments count as collected.
+  const collected = statementPayments
+    .filter((payment) => payment.posted)
+    .reduce((sum, payment) => sum + Number(payment.amount_paid || 0), 0);
   const outstanding = statementBookings
     .filter((booking) => booking.pnr_n === 1)
     .reduce((sum, booking) => sum + Number(booking.balance_due || 0), 0);

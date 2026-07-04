@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Navigate, Route, Routes, NavLink, useLocation } from 'react-router-dom';
-import { Bell, CreditCard, FileText, LayoutDashboard, LogOut, Plane, Receipt, RefreshCcw, Search, Settings, ShieldCheck, UserCog } from 'lucide-react';
+import { BadgeCheck, Bell, BookOpenText, CreditCard, FileText, LayoutDashboard, LogOut, Plane, Receipt, RefreshCcw, Search, Settings, ShieldCheck, UserCog } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Bookings from './pages/Bookings';
 import BookingDetail from './pages/BookingDetail';
+import Accounts from './pages/Accounts';
 import Payments from './pages/Payments';
+import PaymentVerification from './pages/PaymentVerification';
 import Refunds from './pages/Refunds';
 import Expenses from './pages/Expenses';
 import Alerts from './pages/Alerts';
@@ -62,7 +64,9 @@ function AuthenticatedApp() {
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard, permission: null },
     { path: '/bookings', label: 'Bookings', icon: Plane, permission: 'view_bookings' },
+    { path: '/accounts', label: 'Ledgers', icon: BookOpenText, permission: 'view_payments' },
     { path: '/payments', label: 'Payments', icon: CreditCard, permission: 'view_payments' },
+    { path: '/payments/verification', label: 'Verification', icon: BadgeCheck, permission: 'verify_payments' },
     { path: '/refunds', label: 'Refunds', icon: RefreshCcw, permission: 'view_refunds' },
     { path: '/expenses', label: 'Expenses', icon: Receipt, permission: 'view_financials' },
     { path: '/alerts', label: 'Alerts', icon: Bell, permission: 'view_bookings' },
@@ -129,7 +133,10 @@ function AuthenticatedApp() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/bookings" element={<Bookings />} />
             <Route path="/bookings/:invoiceNo" element={<BookingDetail />} />
+            <Route path="/accounts" element={<Accounts />} />
+            <Route path="/accounts/:accountKey" element={<Accounts />} />
             <Route path="/payments" element={<Payments />} />
+            <Route path="/payments/verification" element={<PermissionGate permission="verify_payments"><PaymentVerification /></PermissionGate>} />
             <Route path="/refunds" element={<Refunds />} />
             <Route path="/expenses" element={<Expenses />} />
             <Route path="/alerts" element={<Alerts />} />

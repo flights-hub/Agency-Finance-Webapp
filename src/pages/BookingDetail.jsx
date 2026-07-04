@@ -1,9 +1,11 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useMemo } from 'react';
 import { useAuth } from '../AuthContext';
-import { getBookings, getPayments, savePayment, saveBooking, getRefunds, saveRefund, getAmendments, saveAmendment } from '../helpers/storage';
+import { getBookings, getPayments, saveBooking, getRefunds, saveRefund, getAmendments, saveAmendment } from '../helpers/storage';
 import { formatCurrency, formatDate } from '../helpers/format';
-import { getPaymentLedger, createPaymentEntry, PAYMENT_MODES, numeric, REFUND_CATEGORIES, daysBetween, calculateVoidQuote, calculateCancelQuote, calculateAmendQuote, calculateRefundQuote } from '../helpers/calculations';
+import { getPaymentLedger, numeric, REFUND_CATEGORIES, daysBetween, calculateVoidQuote, calculateCancelQuote, calculateAmendQuote, calculateRefundQuote } from '../helpers/calculations';
+import { isPostedPayment } from '../helpers/paymentVerification';
+import PaymentRecordModal from '../components/PaymentRecordModal';
 import { ArrowLeft, Download, Plus, MoreVertical, Printer, FileText, Mail, AlertCircle, ChevronDown, X } from 'lucide-react';
 
 const STATUS_COLORS = {
@@ -88,12 +90,6 @@ export default function BookingDetail() {
   const [showCancelMenu, setShowCancelMenu] = useState(false);
 
   // Form states
-  const [paymentForm, setPaymentForm] = useState({
-    amount_paid: '',
-    payment_mode: 'CASH',
-    remarks: '',
-  });
-
   const [amendForm, setAmendForm] = useState({
     outbound_date: booking?.outbound_date || '',
     inbound_date: booking?.inbound_date || '',
@@ -117,10 +113,11 @@ export default function BookingDetail() {
     );
   }
 
-  // Calculate payment ledger and balance across every passenger/PNR in the booking
+  // Calculate payment ledger and balance across every passenger/PNR in the booking.
+  // Only verified, ledger-eligible payments count toward the paid position.
   const bookingPayments = payments.filter(p => groupPnrs.includes(normPnr(p.pnr)));
   const total = group.reduce((sum, b) => sum + numeric(b.fare_sold || 0), 0);
-  const paid = bookingPayments.reduce((sum, p) => sum + numeric(p.amount_paid), 0);
+  const paid = bookingPayments.filter(isPostedPayment).reduce((sum, p) => sum + numeric(p.amount_paid), 0);
   const balance = total - paid;
 
   // Every refund case and amendment tied to this booking's PNR(s) - a booking
@@ -165,11 +162,12 @@ export default function BookingDetail() {
     });
 
     bookingPayments.forEach((p) => {
+      const pending = !isPostedPayment(p);
       items.push({
         date: p.payment_date,
         type: 'PAYMENT',
-        label: `${p.instalment_type || 'Payment'} received`,
-        detail: [formatCurrency(p.amount_paid), p.payment_mode, p.remarks].filter(Boolean).join(' · '),
+        label: `${p.instalment_type || 'Payment'} ${pending ? 'submitted' : 'received'}`,
+        detail: [formatCurrency(p.amount_paid), p.payment_mode, pending ? 'PENDING VERIFICATION' : '', p.remarks].filter(Boolean).join(' · '),
         actor: p.received_by,
       });
     });
@@ -226,30 +224,6 @@ export default function BookingDetail() {
     return `${Math.floor(minutes / 60)}Hr ${minutes % 60}Min`;
   };
 
-  const handleAddPayment = () => {
-    const amount = Number(paymentForm.amount_paid);
-    if (!amount || amount <= 0) {
-      alert('Enter a positive payment amount.');
-      return;
-    }
-
-    const payment = createPaymentEntry(
-      {
-        pnr: booking.pnr,
-        amount_paid: amount,
-        payment_mode: paymentForm.payment_mode,
-        received_by: actorName,
-        remarks: paymentForm.remarks,
-        payment_date: new Date().toISOString().split('T')[0],
-      },
-      [booking],
-      bookingPayments
-    );
-    savePayment(payment);
-    setPaymentForm({ amount_paid: '', payment_mode: 'CASH', remarks: '' });
-    setShowPaymentModal(false);
-    window.location.reload();
-  };
 
   const handleHoldBooking = () => {
     saveBooking({
@@ -893,59 +867,20 @@ export default function BookingDetail() {
         </div>
       </div>
 
-      {/* Add Payment Modal */}
+      {/* Add Payment Modal: full payment record form with verification workflow,
+          locked to this booking's PNR */}
       {showPaymentModal && (
-        <div className="modal-backdrop" style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 100
-        }}>
-          <div className="card modal-card" style={{ width: '520px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <h3>Add Payment</h3>
-              <button
-                onClick={() => setShowPaymentModal(false)}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0' }}
-              >
-                <X size={18} />
-              </button>
-            </div>
-            <div className="modal-form-grid">
-              <label>
-                <span>Amount Paid</span>
-                <input
-                  type="number"
-                  value={paymentForm.amount_paid}
-                  onChange={(e) => setPaymentForm({ ...paymentForm, amount_paid: e.target.value })}
-                  min="0"
-                />
-              </label>
-              <label>
-                <span>Payment Mode</span>
-                <select
-                  value={paymentForm.payment_mode}
-                  onChange={(e) => setPaymentForm({ ...paymentForm, payment_mode: e.target.value })}
-                >
-                  {PAYMENT_MODES.map((mode) => (
-                    <option key={mode} value={mode}>{mode.replace(/_/g, ' ')}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={{ gridColumn: '1 / -1' }}>
-                <span>Remarks</span>
-                <input
-                  value={paymentForm.remarks}
-                  onChange={(e) => setPaymentForm({ ...paymentForm, remarks: e.target.value })}
-                />
-              </label>
-            </div>
-
-            <div className="form-actions">
-              <button className="btn btn-secondary" onClick={() => setShowPaymentModal(false)}>Cancel</button>
-              <button className="btn btn-primary" onClick={handleAddPayment}>Add Payment</button>
-            </div>
-          </div>
-        </div>
+        <PaymentRecordModal
+          user={user}
+          bookings={bookings}
+          payments={payments}
+          lockedPnr={booking.pnr}
+          onClose={() => setShowPaymentModal(false)}
+          onSaved={() => {
+            setShowPaymentModal(false);
+            window.location.reload();
+          }}
+        />
       )}
 
       {/* Quote Modal - Void */}

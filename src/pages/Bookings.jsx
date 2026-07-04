@@ -10,6 +10,9 @@ import {
   getPaymentStatus,
 } from '../helpers/calculations';
 import { extractTextFromFile } from '../helpers/pdfParser';
+import { isPostedPayment, withRecordedBy, withVerification } from '../helpers/paymentVerification';
+import { canVerifyPayments } from '../helpers/access';
+import { useAuth } from '../AuthContext';
 import { api } from '../helpers/api';
 import { AIRLINES } from '../data/airlines';
 import { AIRPORTS } from '../data/airports';
@@ -713,7 +716,8 @@ function AirlineAutocomplete({ label, value, onChange }) {
 
 function deriveBooking(rawBooking, index, payments) {
   const pnrPayments = payments.filter((payment) => payment.pnr === rawBooking.pnr);
-  const ledgerPaid = pnrPayments.reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);
+  // Only verified, ledger-eligible payments reduce the balance due.
+  const ledgerPaid = pnrPayments.filter(isPostedPayment).reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);
   const totalPaid = ledgerPaid || numeric(rawBooking.total_paid);
   const fareSold = numeric(rawBooking.fare_sold);
   const fareIssued = numeric(rawBooking.fare_issued);
@@ -782,6 +786,7 @@ function makeBookingPayload(formValues, bookingRef) {
 
 export default function Bookings() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState('LIST');
   const [bookings, setBookings] = useState(() => getBookings());
   const [payments, setPayments] = useState(() => getPayments());
@@ -1221,7 +1226,7 @@ export default function Bookings() {
     const savedRows = bookingRows.map((booking) => saveBooking(booking));
 
     if (numeric(formValues.amount_paid) > 0) {
-      savePayment(createPaymentEntry({
+      const initialPayment = createPaymentEntry({
         payment_date: formValues.booking_date,
         pnr: savedRows[0].pnr,
         amount_paid: numeric(formValues.amount_paid),
@@ -1229,7 +1234,10 @@ export default function Bookings() {
         receipt_ref: '',
         received_by: formValues.agent_issued_by || 'Finance Desk',
         remarks: formValues.remarks,
-      }, [...bookings, ...savedRows], payments));
+      }, [...bookings, ...savedRows], payments);
+      // Verifiers record the opening payment as confirmed; others submit it
+      // into the verification queue.
+      savePayment(withVerification(withRecordedBy(initialPayment, user), user, canVerifyPayments(user)));
     }
 
     refreshBookings();

@@ -4,6 +4,7 @@ insert into public.permissions (permission_key, label, description) values
   ('edit_bookings', 'Edit bookings', 'Update booking passenger, ticket, and flight fields.'),
   ('view_payments', 'View payments', 'Read incoming payment records.'),
   ('record_payments', 'Record payments', 'Create and update incoming payment records.'),
+  ('verify_payments', 'Verify payments', 'Approve payment records so they post to the financial ledger.'),
   ('view_refunds', 'View refunds', 'Read refund records and lifecycle states.'),
   ('process_refunds', 'Process refunds', 'Create and update refund records.'),
   ('view_financials', 'View financials', 'See fares, profit, payables, balances, and settlement values.'),
@@ -23,7 +24,7 @@ insert into public.role_templates (role, name, permission_keys) values
     'Admin',
     array[
       'view_bookings', 'create_bookings', 'edit_bookings',
-      'view_payments', 'record_payments',
+      'view_payments', 'record_payments', 'verify_payments',
       'view_refunds', 'process_refunds',
       'view_financials', 'edit_financials',
       'view_statements', 'send_statements',
@@ -47,6 +48,7 @@ insert into public.role_templates (role, name, permission_keys) values
     array[
       'view_bookings',
       'view_payments',
+      'record_payments',
       'view_statements'
     ]
   ),

@@ -14,6 +14,7 @@ const STORAGE_KEYS = {
   REFUNDS: 'ffs_refunds',
   AMENDMENTS: 'ffs_amendments',
   EXPENSES: 'ffs_expenses',
+  ALLOCATIONS: 'ffs_allocations',
   ALERTS: 'ffs_alerts',
   USERS: 'ffs_users',
 };
@@ -25,6 +26,7 @@ const SERVER_COLLECTIONS = {
   [STORAGE_KEYS.PAYMENTS]: 'payments',
   [STORAGE_KEYS.REFUNDS]: 'refunds',
   [STORAGE_KEYS.EXPENSES]: 'expenses',
+  [STORAGE_KEYS.ALLOCATIONS]: 'allocations',
 };
 
 const cache = new Map();
@@ -149,6 +151,10 @@ export function saveAmendment(amendment) { return save(STORAGE_KEYS.AMENDMENTS, 
 // Expenses
 export function getExpenses() { return readData(STORAGE_KEYS.EXPENSES); }
 export function saveExpense(expense) { return save(STORAGE_KEYS.EXPENSES, expense); }
+
+// Allocations (payment/credit -> open item settlement records)
+export function getAllocations() { return readData(STORAGE_KEYS.ALLOCATIONS); }
+export function saveAllocation(allocation) { return save(STORAGE_KEYS.ALLOCATIONS, allocation); }
 
 // Alerts
 export function getAlerts() { return readData(STORAGE_KEYS.ALERTS); }

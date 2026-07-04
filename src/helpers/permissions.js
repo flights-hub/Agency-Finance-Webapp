@@ -4,6 +4,7 @@ export const PERMISSION_LABELS = {
   edit_bookings: 'Edit bookings',
   view_payments: 'View payments',
   record_payments: 'Record payments',
+  verify_payments: 'Verify payments',
   view_refunds: 'View refunds',
   process_refunds: 'Process refunds',
   view_financials: 'View financials',

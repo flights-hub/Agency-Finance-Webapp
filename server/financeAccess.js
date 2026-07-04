@@ -62,11 +62,11 @@ export function filterBookingsForUser(user, bookings = []) {
 }
 
 function isSupplierPayment(payment) {
-  return payment?.payment_direction === 'SUPPLIER_OUT';
+  return payment?.payment_direction === 'SUPPLIER_OUT' || payment?.party_type === 'SUPPLIER';
 }
 
-export function scopedFinanceData(user, { bookings = [], payments = [], refunds = [], expenses = [] }) {
-  if (canSeeAll(user)) return { bookings, payments, refunds, expenses };
+export function scopedFinanceData(user, { bookings = [], payments = [], refunds = [], expenses = [], allocations = [] }) {
+  if (canSeeAll(user)) return { bookings, payments, refunds, expenses, allocations };
 
   const scopedBookings = filterBookingsForUser(user, bookings);
   const pnrs = new Set(scopedBookings.map((booking) => token(booking.pnr)).filter(Boolean));
@@ -81,12 +81,32 @@ export function scopedFinanceData(user, { bookings = [], payments = [], refunds 
         || aliases.has(token(payment.supplier_id))
       )
     ))
-    : payments.filter((payment) => !isSupplierPayment(payment) && pnrs.has(token(payment.pnr)));
+    : payments.filter((payment) => !isSupplierPayment(payment) && (
+      pnrs.has(token(payment.pnr))
+      // Agents always see payments they submitted themselves, plus payments
+      // recorded against them as the party.
+      || aliases.has(token(payment.recorded_by_user_id))
+      || (payment.party_type === 'AGENT' && aliases.has(token(payment.party_name)))
+    ));
+
+  // Allocations follow the documents the user can already see: settlements
+  // that touch one of their scoped payments, or one of their scoped
+  // bookings/PNRs, or that name them as the counterparty.
+  const paymentIds = new Set(scopedPayments.map((payment) => token(payment.id)));
+  const bookingIds = new Set(scopedBookings.map((booking) => token(booking.id)));
+  const scopedAllocations = allocations.filter((allocation) => (
+    paymentIds.has(token(allocation.source_id))
+    || bookingIds.has(token(allocation.booking_id))
+    || pnrs.has(token(allocation.pnr))
+    || tickets.has(token(allocation.ticket_no))
+    || aliases.has(token(allocation.counterparty_name))
+  ));
 
   return {
     bookings: scopedBookings,
     payments: scopedPayments,
     refunds: refunds.filter((refund) => pnrs.has(token(refund.pnr)) || tickets.has(token(refund.ticket_no))),
     expenses: [],
+    allocations: scopedAllocations,
   };
 }

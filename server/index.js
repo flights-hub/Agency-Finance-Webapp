@@ -2,6 +2,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { parseBookingText } from './bookingParser.js';
 import { scopedFinanceData } from './financeAccess.js';
+import { canVerifyPayments, enforcePaymentRules } from './paymentRules.js';
 import { loadEnvFile } from './env.js';
 import { signJwt, verifyJwt } from './jwt.js';
 import {
@@ -40,6 +41,7 @@ const PERMISSIONS = [
   'edit_bookings',
   'view_payments',
   'record_payments',
+  'verify_payments',
   'view_refunds',
   'process_refunds',
   'view_financials',
@@ -273,6 +275,8 @@ const ACTION_MODULES = {
   reactivate_user: 'user_management',
   update_role_template: 'user_management',
   bulk_import_finance: 'finance',
+  verify_payment: 'finance',
+  unverify_payment: 'finance',
 };
 
 async function audit(req, actor, action, targetUserId, extras = {}) {
@@ -629,6 +633,10 @@ const FINANCE_COLLECTIONS = {
   payments: { view: 'view_payments', write: ['record_payments'] },
   refunds: { view: 'view_refunds', write: ['process_refunds'] },
   expenses: { view: 'view_financials', write: ['edit_financials'] },
+  // Settlement records linking payments/refund credits to open items.
+  // Recording or refund staff can allocate; agents and suppliers cannot
+  // (requireFinanceWriter blocks their roles for this collection).
+  allocations: { view: 'view_payments', write: ['record_payments', 'process_refunds', 'edit_financials'] },
 };
 
 function hasAnyPermission(user, keys) {
@@ -682,18 +690,22 @@ async function handleFinanceData(req, res) {
   const user = await currentUser(req);
   const canView = (name) => hasAnyPermission(user, [financeCollection(name).view]);
 
-  const [bookings, payments, refunds, expenses] = await Promise.all(
-    ['bookings', 'payments', 'refunds', 'expenses'].map((name) => (
+  const [bookings, payments, refunds, expenses, allocations] = await Promise.all(
+    ['bookings', 'payments', 'refunds', 'expenses', 'allocations'].map((name) => (
       canView(name) ? listFinanceRows(name) : Promise.resolve([])
     )),
   );
 
-  json(res, 200, scopedFinanceData(user, { bookings, payments, refunds, expenses }));
+  json(res, 200, scopedFinanceData(user, { bookings, payments, refunds, expenses, allocations }));
 }
 
 async function requireFinanceWriter(req, collection) {
   const user = await currentUser(req);
-  if (['AGENT', 'SUPPLIER'].includes(user.role) || !hasAnyPermission(user, financeCollection(collection).write)) {
+  // Agents may submit payment records (they always land unverified); agents
+  // and suppliers cannot write any other finance collection.
+  const agentAllowed = collection === 'payments' && user.role === 'AGENT';
+  const roleBlocked = ['AGENT', 'SUPPLIER'].includes(user.role) && !agentAllowed;
+  if (roleBlocked || !hasAnyPermission(user, financeCollection(collection).write)) {
     const error = new Error(`You do not have permission to write ${collection}.`);
     error.status = 403;
     throw error;
@@ -703,12 +715,36 @@ async function requireFinanceWriter(req, collection) {
 
 async function handleSaveFinanceRecord(req, res, collection, id) {
   const user = await requireFinanceWriter(req, collection);
-  const body = await readBody(req);
+  let body = await readBody(req);
 
   if (!id || body.id !== id) {
     const error = new Error('Record id is required and must match the URL.');
     error.status = 400;
     throw error;
+  }
+
+  if (collection === 'payments') {
+    // Verification is a server decision: only verify_payments holders can set
+    // VERIFIED, financial edits to verified payments reset the status, and
+    // recorded-by stamps always reflect the authenticated user.
+    const rows = await supabaseRequest(`/rest/v1/payments?id=eq.${encodeURIComponent(id)}&select=id,data`);
+    const existing = rows?.length ? rows[0].data : null;
+    const { record: enforced, action } = enforcePaymentRules(user, body, existing);
+    body = { ...enforced, id };
+
+    if (action) {
+      await audit(req, user, action === 'verified' ? 'verify_payment' : 'unverify_payment', null, {
+        recordType: 'payment',
+        recordId: id,
+        oldValue: { verification_status: existing?.verification_status || null },
+        newValue: {
+          verification_status: body.verification_status,
+          ledger_posting_status: body.ledger_posting_status,
+          reason: action,
+        },
+        risk: 'medium',
+      });
+    }
   }
 
   const record = await upsertFinanceRow(collection, body, user.id);
@@ -721,9 +757,14 @@ async function handleBulkImportFinance(req, res, collection) {
   const records = Array.isArray(body.records) ? body.records : [];
   const imported = [];
 
+  // Payment imports by non-verifiers land unverified; verifier imports pass
+  // through untouched so pre-workflow records stay grandfathered as verified.
+  const enforceEachPayment = collection === 'payments' && !canVerifyPayments(user);
+
   for (const record of records) {
     if (!record || !record.id) continue;
-    imported.push(await upsertFinanceRow(collection, record, user.id));
+    const toSave = enforceEachPayment ? { ...enforcePaymentRules(user, record, null).record, id: record.id } : record;
+    imported.push(await upsertFinanceRow(collection, toSave, user.id));
   }
 
   await audit(req, user, 'bulk_import_finance', null, {

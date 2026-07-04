@@ -1500,7 +1500,7 @@ footer.foot ul li:hover { color: var(--paper); }
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 0 30px;
+  padding: 0 20px;
   background: rgba(250, 250, 249, 0.86);
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(18px);
@@ -1560,11 +1560,11 @@ footer.foot ul li:hover { color: var(--paper); }
 
 .page-content {
   width: 100%;
-  padding: 22px 28px 38px;
+  padding: 20px 20px 34px;
 }
 
 .page-container {
-  max-width: 1440px;
+  max-width: 1760px;
   margin: 0 auto;
 }
 
@@ -2584,8 +2584,18 @@ textarea:focus {
 }
 
 .modal-card {
-  max-width: min(100%, 440px);
+  max-width: 100%;
   box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
+}
+
+.modal-card-wide {
+  width: min(960px, 100%);
+}
+
+@media (min-width: 1024px) {
+  .modal-card-wide .modal-form-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .modal-card label {
@@ -3049,3 +3059,265 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 }
+
+/* =========================================================================
+   LEDGER · OPEN ITEMS · ALLOCATIONS · REFUND CASES
+   Continuous counterparty ledgers, the allocation screen, refund-case
+   workspace, and the reconciliation control panel.
+   ========================================================================= */
+
+.stats-row,
+.ledger-stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.stats-row .stat-card,
+.ledger-stats-row .stat-card {
+  align-items: flex-start;
+  padding: 14px 16px;
+}
+
+/* ---- Tabs ---- */
+.tab-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+
+.tab-button {
+  font-family: var(--f-body);
+  font-size: var(--t-12);
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-400);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: color var(--dur) var(--ease-out), border-color var(--dur) var(--ease-out);
+  margin-bottom: -1px;
+}
+
+.tab-button:hover { color: var(--ink-700); }
+
+.tab-button.active {
+  color: var(--ink-900);
+  border-bottom-color: var(--accent);
+}
+
+/* ---- Danger button ---- */
+.btn-danger {
+  background: var(--fail-50);
+  color: var(--fail-700);
+  border: 1px solid var(--fail-500);
+}
+.btn-danger:hover { background: var(--fail-500); color: var(--paper); }
+
+/* ---- Account list + detail ---- */
+.account-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-900);
+  font-weight: 600;
+  text-decoration: none;
+}
+.account-link:hover { color: var(--accent); }
+
+.account-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.account-detail-header h1 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.account-detail-header .btn-sm { margin-bottom: 4px; }
+
+.account-control-pill .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-12);
+  padding: 8px 12px;
+}
+
+.ledger-credit-balance {
+  color: var(--info-500);
+  font-weight: 600;
+}
+
+/* ---- Allocation modal ---- */
+.allocation-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: rgba(10, 10, 15, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(5px);
+}
+
+.allocation-modal {
+  width: min(1000px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.allocation-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.allocation-subtitle {
+  color: var(--ink-500);
+  font-size: var(--t-12);
+  margin-top: 4px;
+}
+
+.allocation-summary-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.allocation-summary-row .stat-card { align-items: flex-start; padding: 12px 14px; }
+
+.allocation-toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.allocation-table-scroll {
+  max-height: 44vh;
+  overflow-y: auto;
+}
+
+.allocation-amount-input {
+  width: 110px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--f-mono);
+  font-size: var(--t-12);
+}
+
+.allocation-row-settled { opacity: 0.5; }
+
+.allocation-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+.allocation-footer > div:first-child {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.allocation-total {
+  font-size: var(--t-14);
+  color: var(--ink-600);
+}
+.allocation-total strong { color: var(--ink-900); }
+
+.allocation-warning {
+  background: var(--fail-50);
+  color: var(--fail-700);
+  border: 1px solid var(--fail-500);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: var(--t-12);
+  white-space: pre-line;
+}
+
+.allocation-existing {
+  margin-top: 22px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.allocation-existing h4 { margin-bottom: 10px; color: var(--ink-700); font-size: var(--t-14); }
+
+/* ---- Reconciliation panel ---- */
+.reconciliation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+.reconciliation-grid h4 { color: var(--ink-800); font-size: var(--t-14); margin-bottom: 8px; }
+
+.reconciliation-note {
+  color: var(--ink-500);
+  font-size: var(--t-12);
+  margin-top: 10px;
+  line-height: 1.5;
+}
+
+.reconciliation-status { margin-top: 14px; }
+.reconciliation-status .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-12);
+  padding: 8px 12px;
+}
+
+.reconciliation-queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.reconciliation-queue li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--t-14);
+  color: var(--ink-600);
+}
+.reconciliation-queue li strong { color: var(--ink-900); }
+
+/* ---- Refund detail modal ---- */
+.refund-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+  margin-bottom: 8px;
+}
+.refund-detail-grid h4 { color: var(--ink-800); font-size: var(--t-14); margin-bottom: 10px; }
+.refund-detail-grid .card { padding: 16px; }
+
+.preview-total {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 8px;
+}
+.preview-total strong { color: var(--accent); }
+
+.refund-actions { align-items: center; }

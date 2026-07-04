@@ -1,5 +1,15 @@
 // Helpers for calculations based on PRD formulas
 
+import {
+  isCustomerLedgerPayment,
+  isPostedPayment,
+  isSupplierPayment,
+  getLedgerPostingStatus,
+  nextPaymentReference,
+  normalizeVerificationStatus,
+  postedPayments,
+} from './paymentVerification';
+
 export const PAYMENT_MODES = [
   'CASH',
   'BANK_TRANSFER',
@@ -124,9 +134,11 @@ export function calculatePnL(bookings, refunds, expenses) {
   const totalExpenses = expenses.reduce((sum, e) => sum + numeric(e.amount_eur ?? e.amount), 0);
   const netProfit = grossProfit - totalExpenses;
   
+  // Settled refunds reduce effective revenue. Legacy records use
+  // REFUNDED_TO_CLIENT; refund cases use SETTLED.
   const totalRefunds = refunds
-    .filter(r => r.refund_status === 'REFUNDED_TO_CLIENT')
-    .reduce((sum, r) => sum + numeric(r.eligible_refund), 0);
+    .filter(r => ['REFUNDED_TO_CLIENT', 'SETTLED'].includes(r.refund_status))
+    .reduce((sum, r) => sum + numeric(r.eligible_refund ?? r.net_refund_credit), 0);
 
   const effectiveRevenue = revenue - totalRefunds;
   const grossMargin = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
@@ -171,14 +183,16 @@ export function getBookingLedger(bookings = [], payments = []) {
   const pnrTotals = new Map();
   const pnrPayments = new Map();
   const today = new Date().toISOString().split('T')[0];
-  const agentPayments = payments.filter((payment) => payment.payment_direction !== 'SUPPLIER_OUT');
+  const agentPayments = payments.filter(isCustomerLedgerPayment);
+  // Only verified + eligible payments reduce outstanding balances.
+  const countablePayments = postedPayments(agentPayments);
 
   bookings.forEach((booking) => {
     const pnr = normalizePnr(booking.pnr);
     pnrTotals.set(pnr, (pnrTotals.get(pnr) || 0) + numeric(booking.fare_sold));
   });
 
-  agentPayments.forEach((payment) => {
+  countablePayments.forEach((payment) => {
     const pnr = normalizePnr(payment.pnr);
     pnrPayments.set(pnr, (pnrPayments.get(pnr) || 0) + numeric(payment.amount_paid));
   });
@@ -208,7 +222,7 @@ export function getBookingLedger(bookings = [], payments = []) {
       total_paid: pnr_n === 1 ? totalPaid : null,
       balance_due: pnr_n === 1 ? balanceDue : null,
       payment_status: pnr_n === 1 ? getPaymentStatus(totalFare, totalPaid) : '',
-      num_instalments: pnr_n === 1 ? agentPayments.filter((payment) => normalizePnr(payment.pnr) === pnr).length : null,
+      num_instalments: pnr_n === 1 ? countablePayments.filter((payment) => normalizePnr(payment.pnr) === pnr).length : null,
       ticket_status: booking.ticket_status || (booking.ticket_no ? 'TICKETED' : 'PENDING'),
       days_to_departure: daysToDeparture,
       alert: pnr_n === 1 ? alert : '',
@@ -222,7 +236,7 @@ export function getPaymentLedger(bookings = [], payments = []) {
   const fareByPnr = new Map();
   const firstPassengerByPnr = new Map();
   const runningByPnr = new Map();
-  const agentPayments = payments.filter((payment) => payment.payment_direction !== 'SUPPLIER_OUT');
+  const agentPayments = payments.filter(isCustomerLedgerPayment);
 
   bookings.forEach((booking) => {
     const pnr = normalizePnr(booking.pnr);
@@ -234,8 +248,11 @@ export function getPaymentLedger(bookings = [], payments = []) {
     .sort((a, b) => String(a.payment_date || '').localeCompare(String(b.payment_date || '')))
     .map((payment, index) => {
       const pnr = normalizePnr(payment.pnr);
+      // Pending/ineligible payments stay visible in the ledger but contribute
+      // nothing to the running totals until they are verified and posted.
+      const posted = isPostedPayment(payment);
       const previous = runningByPnr.get(pnr) || 0;
-      const cumulativePaid = previous + numeric(payment.amount_paid);
+      const cumulativePaid = previous + (posted ? numeric(payment.amount_paid) : 0);
       runningByPnr.set(pnr, cumulativePaid);
       const totalFare = fareByPnr.get(pnr) || numeric(payment.total_fare);
       const remainingBalance = Math.max(0, totalFare - cumulativePaid);
@@ -253,30 +270,42 @@ export function getPaymentLedger(bookings = [], payments = []) {
         cumulative_paid: cumulativePaid,
         total_fare: totalFare,
         remaining_balance: remainingBalance,
+        verification_status: normalizeVerificationStatus(payment),
+        ledger_posting_status: getLedgerPostingStatus(payment),
+        posted,
         pnr_n: 1,
       };
     });
 }
 
-export function createPaymentEntry({ payment_date, pnr, amount_paid, payment_mode, receipt_ref, received_by, remarks }, bookings = [], payments = []) {
+export function createPaymentEntry(input, bookings = [], payments = []) {
+  const { payment_date, pnr, amount_paid, payment_mode, receipt_ref, received_by, remarks, ...rest } = input;
   const normalizedPnr = normalizePnr(pnr);
   const relatedBookings = bookings.filter((booking) => normalizePnr(booking.pnr) === normalizedPnr);
   const totalFare = relatedBookings.reduce((sum, booking) => sum + numeric(booking.fare_sold), 0);
-  const agentPayments = payments.filter((payment) => payment.payment_direction !== 'SUPPLIER_OUT');
-  const existingPaid = agentPayments
+  const agentPayments = payments.filter(isCustomerLedgerPayment);
+  // Only posted payments count toward the running paid position.
+  const existingPaid = postedPayments(agentPayments)
     .filter((payment) => normalizePnr(payment.pnr) === normalizedPnr)
     .reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);
   const amount = numeric(amount_paid);
   const instalmentNo = agentPayments.filter((payment) => normalizePnr(payment.pnr) === normalizedPnr).length + 1;
   const cumulativePaid = existingPaid + amount;
 
-  return {
+  const entry = {
+    ...rest,
     payment_date,
     pnr: normalizedPnr,
-    payment_direction: 'AGENT_IN',
-    passenger_name: relatedBookings[0]?.passenger_name || '',
+    payment_direction: rest.payment_direction || 'RECEIVED',
+    party_type: rest.party_type || 'CUSTOMER',
+    party_name: rest.party_name || relatedBookings[0]?.bill_to_name || relatedBookings[0]?.passenger_name || '',
+    passenger_name: rest.passenger_name || relatedBookings[0]?.passenger_name || '',
     amount_paid: amount,
+    transaction_amount: amount,
+    transaction_currency: rest.transaction_currency || 'EUR',
     payment_mode,
+    payment_method: payment_mode,
+    payment_reference: rest.payment_reference || nextPaymentReference(payments, rest.payment_direction || 'RECEIVED'),
     receipt_ref,
     instalment_no: instalmentNo,
     instalment_type: getInstalmentType(instalmentNo, cumulativePaid, totalFare),
@@ -284,9 +313,12 @@ export function createPaymentEntry({ payment_date, pnr, amount_paid, payment_mod
     cumulative_paid: cumulativePaid,
     total_fare: totalFare,
     remaining_balance: Math.max(0, totalFare - cumulativePaid),
+    verification_status: rest.verification_status || 'TO_BE_VERIFIED',
     pnr_n: 1,
     remarks,
   };
+  entry.ledger_posting_status = getLedgerPostingStatus(entry);
+  return entry;
 }
 
 export function supplierNamesForBooking(booking = {}) {
@@ -338,7 +370,7 @@ function segmentMatchesPayment(booking = {}, payment = {}, supplierOrUser = '') 
 }
 
 function paymentMatchesSupplierScope(payment = {}, booking = {}, supplierOrUser = '') {
-  if (payment.payment_direction !== 'SUPPLIER_OUT') return false;
+  if (!isSupplierPayment(payment)) return false;
   const supplierTarget = payment.supplier_name || payment.supplier_id;
   const matchesSupplier = supplierMatchesValue(supplierTarget, supplierOrUser) || bookingMatchesSupplier(booking, supplierOrUser);
   if (!matchesSupplier) return false;
@@ -351,7 +383,7 @@ function paymentMatchesSupplierScope(payment = {}, booking = {}, supplierOrUser 
 }
 
 function supplierPaymentAmountForBooking(payment = {}, booking = {}, supplierOrUser = '') {
-  if (payment.payment_direction !== 'SUPPLIER_OUT') return 0;
+  if (!isSupplierPayment(payment)) return 0;
   if ((payment.supplier_payment_scope || 'SUPPLIER') === 'SUPPLIER') return 0;
   const allocations = Array.isArray(payment.supplier_allocations) ? payment.supplier_allocations : [];
   if (allocations.length > 0) {
@@ -368,7 +400,7 @@ function supplierPaymentAmountForBooking(payment = {}, booking = {}, supplierOrU
 }
 
 function supplierPaymentMatchesTarget(payment = {}, supplierOrUser = '') {
-  return payment.payment_direction === 'SUPPLIER_OUT'
+  return isSupplierPayment(payment)
     && supplierMatchesValue(payment.supplier_name || payment.supplier_id, supplierOrUser);
 }
 
@@ -417,7 +449,7 @@ export function getSupplierPayableLedger(bookings = [], payments = [], supplierO
     const pnr_n = (pnrCounts.get(pnr) || 0) + 1;
     pnrCounts.set(pnr, pnr_n);
     const supplierPayable = getSupplierPayableForBooking(booking, supplierOrUser);
-    const supplierPaid = payments.reduce((sum, payment) => (
+    const supplierPaid = postedPayments(payments).reduce((sum, payment) => (
       sum + supplierPaymentAmountForBooking(payment, booking, supplierOrUser)
     ), 0);
 
@@ -442,7 +474,7 @@ export function getSupplierPayableLedger(bookings = [], payments = [], supplierO
 export function getSupplierPayableSummary(bookings = [], payments = [], supplierOrUser = '') {
   const rows = getSupplierPayableLedger(bookings, payments, supplierOrUser);
   const payable = rows.reduce((sum, booking) => sum + numeric(booking.supplier_payable), 0);
-  const paid = payments
+  const paid = postedPayments(payments)
     .filter((payment) => supplierPaymentMatchesTarget(payment, supplierOrUser))
     .reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);
   const outstanding = Math.max(0, payable - paid);
@@ -460,7 +492,7 @@ export function getSupplierPayableSummary(bookings = [], payments = [], supplier
 
 export function getSupplierPaymentLedger(bookings = [], payments = []) {
   const supplierPayments = payments
-    .filter((payment) => payment.payment_direction === 'SUPPLIER_OUT')
+    .filter(isSupplierPayment)
     .sort((a, b) => String(a.payment_date || '').localeCompare(String(b.payment_date || '')));
   const runningByScope = new Map();
 
@@ -468,12 +500,16 @@ export function getSupplierPaymentLedger(bookings = [], payments = []) {
     .map((payment, index) => {
       const scopeKey = supplierPaymentScopeKey(payment);
       const totalPayable = supplierPaymentScopePayable(bookings, payment);
-      const cumulativePaid = (runningByScope.get(scopeKey) || 0) + numeric(payment.amount_paid);
+      const posted = isPostedPayment(payment);
+      const cumulativePaid = (runningByScope.get(scopeKey) || 0) + (posted ? numeric(payment.amount_paid) : 0);
       runningByScope.set(scopeKey, cumulativePaid);
       const scope = payment.supplier_payment_scope || 'SUPPLIER';
 
       return {
         ...payment,
+        verification_status: normalizeVerificationStatus(payment),
+        ledger_posting_status: getLedgerPostingStatus(payment),
+        posted,
         sl: index + 1,
         supplier_name: payment.supplier_name || '',
         passenger_name: payment.supplier_name || '',
@@ -510,11 +546,17 @@ export function createSupplierPaymentEntry({
     segment_id: supplier_payment_scope === 'SEGMENT' ? segment_id : '',
     supplier_name,
     passenger_name: supplier_name,
+    party_type: 'SUPPLIER',
+    party_name: supplier_name,
     amount_paid: amount,
+    transaction_amount: amount,
     payment_mode,
+    payment_method: payment_mode,
     receipt_ref,
     received_by,
     payment_direction: 'SUPPLIER_OUT',
+    verification_status: 'TO_BE_VERIFIED',
+    ledger_posting_status: 'PENDING_VERIFICATION',
     supplier_payment_scope,
     supplier_allocations: supplier_allocations.length > 0 ? supplier_allocations : (
       supplier_payment_scope === 'SUPPLIER'
@@ -569,12 +611,15 @@ export function getExpenseLedger(expenses = []) {
 }
 
 export function getPnlAnalytics(bookings = [], payments = [], refunds = [], expenses = []) {
-  const agentPayments = payments.filter((payment) => payment.payment_direction !== 'SUPPLIER_OUT');
+  const agentPayments = payments.filter(isCustomerLedgerPayment);
   const bookingLedger = getBookingLedger(bookings, agentPayments);
   const paymentLedger = getPaymentLedger(bookings, agentPayments);
   const expenseLedger = getExpenseLedger(expenses);
   const pnl = calculatePnL(bookings, refunds, expenseLedger);
-  const collections = paymentLedger.reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);
+  // Confirmed collections: verified + eligible payments only.
+  const collections = paymentLedger
+    .filter((payment) => payment.posted)
+    .reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);
   const outstanding = bookingLedger
     .filter((booking) => booking.pnr_n === 1)
     .reduce((sum, booking) => sum + numeric(booking.balance_due), 0);
@@ -701,7 +746,9 @@ export function getRoleDashboardSummary(user = {}, data = {}) {
 
   if (role === 'AGENT') {
     const payable = bookingLedger.reduce((sum, booking) => sum + numeric(booking.fare_sold), 0);
-    const paid = paymentLedger.reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);
+    const paid = paymentLedger
+      .filter((payment) => payment.posted)
+      .reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);
     const outstanding = bookingLedger
       .filter((booking) => booking.pnr_n === 1)
       .reduce((sum, booking) => sum + numeric(booking.balance_due), 0);
@@ -740,13 +787,13 @@ export function getRoleDashboardSummary(user = {}, data = {}) {
 
   const pnl = getPnlAnalytics(bookings, payments, refunds, expenses);
   const refundLedger = getRefundLedger(bookings, refunds);
-  const pendingRefunds = refundLedger.filter((refund) => (
-    refund.refund_status !== 'REFUNDED_TO_CLIENT' && refund.refund_status !== 'REJECTED'
-  ));
+  const settledStatuses = ['REFUNDED_TO_CLIENT', 'SETTLED'];
+  const closedStatuses = [...settledStatuses, 'REJECTED', 'CANCELLED'];
+  const pendingRefunds = refundLedger.filter((refund) => !closedStatuses.includes(refund.refund_status));
   const totalRefunded = refundLedger
-    .filter((refund) => refund.refund_status === 'REFUNDED_TO_CLIENT')
-    .reduce((sum, refund) => sum + numeric(refund.eligible_refund), 0);
-  const processedRefunds = refundLedger.filter((refund) => refund.refund_status === 'REFUNDED_TO_CLIENT');
+    .filter((refund) => settledStatuses.includes(refund.refund_status))
+    .reduce((sum, refund) => sum + numeric(refund.eligible_refund ?? refund.net_refund_credit), 0);
+  const processedRefunds = refundLedger.filter((refund) => settledStatuses.includes(refund.refund_status));
   const avgDays = processedRefunds.length > 0
     ? Math.round(processedRefunds.reduce((sum, refund) => sum + numeric(refund.processing_days), 0) / processedRefunds.length)
     : 0;

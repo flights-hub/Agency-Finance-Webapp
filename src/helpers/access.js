@@ -1,4 +1,5 @@
 import { hasPermission } from './permissions';
+import { isSupplierPayment as isSupplierPaymentRecord } from './paymentVerification';
 
 function token(value) {
   return String(value || '').trim().toLowerCase();
@@ -49,12 +50,27 @@ export function canRecordPayments(user) {
   return user?.role === 'ADMIN' || hasPermission(user, 'record_payments');
 }
 
+export function canVerifyPayments(user) {
+  if (user?.role === 'AGENT' || user?.role === 'SUPPLIER') return false;
+  return user?.role === 'ADMIN' || hasPermission(user, 'verify_payments');
+}
+
 export function canProcessRefunds(user) {
   return user?.role === 'ADMIN' || hasPermission(user, 'process_refunds');
 }
 
+// Allocating payments/credits to open items is a finance-desk action; agents
+// and suppliers only ever view their own settlements.
+export function canManageAllocations(user) {
+  if (['AGENT', 'SUPPLIER'].includes(user?.role)) return false;
+  return user?.role === 'ADMIN'
+    || hasPermission(user, 'record_payments')
+    || hasPermission(user, 'process_refunds')
+    || hasPermission(user, 'edit_financials');
+}
+
 export function isSupplierPayment(payment) {
-  return payment?.payment_direction === 'SUPPLIER_OUT';
+  return isSupplierPaymentRecord(payment || {});
 }
 
 export function supplierNamesForBooking(booking) {
@@ -126,7 +142,14 @@ export function filterRecordsForUser(user, records = [], recordType, context = {
       ));
     }
 
-    return records.filter((payment) => !isSupplierPayment(payment) && pnrs.has(token(payment.pnr)));
+    const party = getUserPartyKey(user);
+    return records.filter((payment) => !isSupplierPayment(payment) && (
+      pnrs.has(token(payment.pnr))
+      // Agents always see payments they submitted themselves, plus payments
+      // recorded against them as the party (e.g. agent settlement payments).
+      || party.aliases.has(token(payment.recorded_by_user_id))
+      || (payment.party_type === 'AGENT' && party.aliases.has(token(payment.party_name)))
+    ));
   }
 
   if (recordType === 'refunds') {
@@ -139,15 +162,25 @@ export function filterRecordsForUser(user, records = [], recordType, context = {
 
   if (recordType === 'expenses') return [];
 
+  if (recordType === 'allocations') {
+    const party = getUserPartyKey(user);
+    return records.filter((allocation) => (
+      pnrs.has(token(allocation.pnr))
+      || tickets.has(token(allocation.ticket_no))
+      || party.aliases.has(token(allocation.counterparty_name))
+    ));
+  }
+
   return records;
 }
 
-export function scopedFinanceData(user, { bookings = [], payments = [], refunds = [], expenses = [] }) {
+export function scopedFinanceData(user, { bookings = [], payments = [], refunds = [], expenses = [], allocations = [] }) {
   const scopedBookings = filterBookingsForUser(user, bookings);
   return {
     bookings: scopedBookings,
     payments: filterRecordsForUser(user, payments, 'payments', { bookings: scopedBookings }),
     refunds: filterRecordsForUser(user, refunds, 'refunds', { bookings: scopedBookings }),
     expenses: filterRecordsForUser(user, expenses, 'expenses', { bookings: scopedBookings }),
+    allocations: filterRecordsForUser(user, allocations, 'allocations', { bookings: scopedBookings }),
   };
 }
