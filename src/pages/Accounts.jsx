@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../AuthContext';
 import { formatCurrency } from '../helpers/format';
-import { getAllocations, getBookings, getPayments, getRefunds } from '../helpers/storage';
+import { getAllocations, getAmendments, getBookings, getPayments, getRefunds } from '../helpers/storage';
 import { canManageAllocations } from '../helpers/access';
 import {
   balanceDisplay,
@@ -33,6 +33,7 @@ function useFinanceModel(refreshKey) {
       payments: getPayments(),
       refunds: getRefunds(),
       allocations: getAllocations(),
+      amendments: getAmendments(),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [refreshKey],

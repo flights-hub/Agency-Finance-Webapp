@@ -12,6 +12,7 @@ import {
   getBookings,
   getPayments,
   getAllocations,
+  getAmendments,
   saveRefund,
   saveBooking,
   savePayment,
@@ -21,6 +22,7 @@ import { REFUND_CATEGORIES } from '../helpers/calculations';
 import {
   bookingCounterparty,
   buildAllocationRecords,
+  buildAutoAllocation,
   buildFinanceModel,
   buildRefundPayoutPayment,
   isRefundCreditPosted,
@@ -30,7 +32,6 @@ import {
   refundCaseStatus,
   refundCreditSummary,
   refundSettlementPreview,
-  ticketOpenItemId,
   REFUND_CASE_STATUSES,
 } from '../helpers/ledger';
 import { canProcessRefunds, canVerifyPayments } from '../helpers/access';
@@ -90,7 +91,10 @@ const emptyForm = () => ({
   airline_cancellation_fee: 0,
   flyforsure_cancellation_fee: 0,
   agent_cancellation_markup: 0,
+  processing_fee: 0,
   other_deductions: 0,
+  adjustment_amount: 0,
+  adjustment_reason: '',
   supplier_refund: 0,
   remarks: '',
 });
@@ -104,6 +108,7 @@ export default function Refunds() {
   const [bookings, setBookings] = useState(() => getBookings());
   const [payments, setPayments] = useState(() => getPayments());
   const [allocations, setAllocations] = useState(() => getAllocations());
+  const [amendments, setAmendments] = useState(() => getAmendments());
   const [showModal, setShowModal] = useState(false);
   const [detailId, setDetailId] = useState(null);
   const [creditAllocId, setCreditAllocId] = useState(null); // refund id being allocated
@@ -117,8 +122,8 @@ export default function Refunds() {
   const [form, setForm] = useState(emptyForm);
 
   const model = useMemo(
-    () => buildFinanceModel({ bookings, payments, refunds, allocations }),
-    [bookings, payments, refunds, allocations],
+    () => buildFinanceModel({ bookings, payments, refunds, allocations, amendments }),
+    [bookings, payments, refunds, allocations, amendments],
   );
 
   const refresh = () => {
@@ -126,6 +131,7 @@ export default function Refunds() {
     setBookings(getBookings());
     setPayments(getPayments());
     setAllocations(getAllocations());
+    setAmendments(getAmendments());
   };
 
   const rows = useMemo(() => refunds.map((refund) => {
@@ -192,7 +198,9 @@ export default function Refunds() {
     - numeric(form.airline_cancellation_fee)
     - numeric(form.flyforsure_cancellation_fee)
     - numeric(form.agent_cancellation_markup)
-    - numeric(form.other_deductions));
+    - numeric(form.processing_fee)
+    - numeric(form.other_deductions)
+    + numeric(form.adjustment_amount));
 
   const updateForm = (key, value) => setForm((current) => ({ ...current, [key]: value }));
 
@@ -224,6 +232,10 @@ export default function Refunds() {
 
   const handleCreateRefund = () => {
     if (!selectedBooking) { alert('Select a ticket number from bookings.'); return; }
+    if (numeric(form.adjustment_amount) !== 0 && !form.adjustment_reason.trim()) {
+      alert('An adjustment/override requires an override reason.');
+      return;
+    }
     const party = bookingCounterparty(selectedBooking);
     const gross = grossPreview;
     const net = netPreview;
@@ -250,7 +262,10 @@ export default function Refunds() {
       airline_cancellation_fee: numeric(form.airline_cancellation_fee),
       flyforsure_cancellation_fee: numeric(form.flyforsure_cancellation_fee),
       agent_cancellation_markup: numeric(form.agent_cancellation_markup),
+      processing_fee: numeric(form.processing_fee),
       other_deductions: numeric(form.other_deductions),
+      adjustment_amount: numeric(form.adjustment_amount),
+      adjustment_reason: form.adjustment_reason,
       net_refund_credit: net,
       supplier_refund: numeric(form.supplier_refund),
       // Legacy-compatible mirror fields so P&L and the old ledger stay correct.
@@ -293,28 +308,22 @@ export default function Refunds() {
     };
     saveRefund(approved);
 
-    // Auto-offset the still-outstanding original ticket receivable (§19/§20/§42).
+    // Auto-offset the still-outstanding original ticket receivables
+    // (§19/§20/§42). Multi-ticket cases (refund_lines) offset every affected
+    // ticket, oldest first, until the credit runs out.
     if (preview.booking && preview.original_offset > 0) {
       const account = bookingCounterparty(preview.booking);
-      const records = buildAllocationRecords({
-        source: approved,
-        sourceType: 'REFUND_CREDIT',
-        account: { type: account.type, name: account.name },
-        lines: [{
-          open_item: {
-            open_item_id: ticketOpenItemId(preview.booking),
-            item_type: 'TICKET_RECEIVABLE',
-            booking_id: preview.booking.id,
-            pnr: preview.booking.pnr,
-            ticket_no: preview.booking.ticket_no,
-            passenger_name: preview.booking.passenger_name,
-            outstanding_amount: preview.original_outstanding,
-          },
-          amount: preview.original_offset,
-        }],
-        allocations,
-      });
-      records.forEach((record) => saveAllocation(record));
+      const lines = buildAutoAllocation(preview.credit, preview.open_items);
+      if (lines.length) {
+        const records = buildAllocationRecords({
+          source: approved,
+          sourceType: 'REFUND_CREDIT',
+          account: { type: account.type, name: account.name },
+          lines,
+          allocations,
+        });
+        records.forEach((record) => saveAllocation(record));
+      }
     }
     refresh();
   };
@@ -504,8 +513,20 @@ export default function Refunds() {
                 <input type="number" value={form.agent_cancellation_markup} onChange={(event) => updateForm('agent_cancellation_markup', event.target.value)} />
               </label>
               <label>
+                <span>Processing Fee</span>
+                <input type="number" value={form.processing_fee} onChange={(event) => updateForm('processing_fee', event.target.value)} />
+              </label>
+              <label>
                 <span>Other Deductions</span>
                 <input type="number" value={form.other_deductions} onChange={(event) => updateForm('other_deductions', event.target.value)} />
+              </label>
+              <label>
+                <span>Adjustment / Override (±)</span>
+                <input type="number" value={form.adjustment_amount} onChange={(event) => updateForm('adjustment_amount', event.target.value)} />
+              </label>
+              <label>
+                <span>Override Reason</span>
+                <input value={form.adjustment_reason} onChange={(event) => updateForm('adjustment_reason', event.target.value)} />
               </label>
               <label>
                 <span>Supplier Refund (separate)</span>
@@ -601,7 +622,11 @@ function RefundDetailModal({ row, model, canProcess, canVerify, onClose, onAppro
               <div><span>Airline cancellation fee</span><strong>− {money(refund.airline_cancellation_fee ?? refund.airline_penalty)}</strong></div>
               <div><span>FlyForSure cancellation fee</span><strong>− {money(refund.flyforsure_cancellation_fee ?? refund.service_fee)}</strong></div>
               <div><span>Agent cancellation markup</span><strong>− {money(refund.agent_cancellation_markup)}</strong></div>
+              <div><span>Processing fee</span><strong>− {money(refund.processing_fee)}</strong></div>
               <div><span>Other deductions</span><strong>− {money(refund.other_deductions)}</strong></div>
+              {numeric(refund.adjustment_amount) !== 0 && (
+                <div><span>Adjustment ({refund.adjustment_reason || 'override'})</span><strong>{numeric(refund.adjustment_amount) > 0 ? '+' : '−'} {money(Math.abs(numeric(refund.adjustment_amount)))}</strong></div>
+              )}
               <div className="preview-total"><span>Net refund credit</span><strong>{money(preview.credit)}</strong></div>
             </div>
           </div>

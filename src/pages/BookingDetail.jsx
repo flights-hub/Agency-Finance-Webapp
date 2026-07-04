@@ -1,12 +1,24 @@
 import { useParams, useNavigate } from 'react-router-dom';
-import { useState, useMemo } from 'react';
+import { useState } from 'react';
 import { useAuth } from '../AuthContext';
-import { getBookings, getPayments, saveBooking, getRefunds, saveRefund, getAmendments, saveAmendment } from '../helpers/storage';
-import { formatCurrency, formatDate } from '../helpers/format';
-import { getPaymentLedger, numeric, REFUND_CATEGORIES, daysBetween, calculateVoidQuote, calculateCancelQuote, calculateAmendQuote, calculateRefundQuote } from '../helpers/calculations';
+import { getBookings, getPayments, saveBooking, getRefunds, getAmendments, getCancellations, getAllocations } from '../helpers/storage';
+import { formatCurrency } from '../helpers/format';
+import { numeric } from '../helpers/calculations';
+import {
+  CANCELLATION_SCOPES,
+  amendmentTotalImpact,
+  buildFinanceModel,
+  cancellationEstimate,
+  isAmendmentPosted,
+  netRefundCredit,
+  refundCaseStatus,
+} from '../helpers/ledger';
 import { isPostedPayment } from '../helpers/paymentVerification';
 import PaymentRecordModal from '../components/PaymentRecordModal';
-import { ArrowLeft, Download, Plus, MoreVertical, Printer, FileText, Mail, AlertCircle, ChevronDown, X } from 'lucide-react';
+import AmendmentCaseModal from '../components/AmendmentCaseModal';
+import CancellationCaseModal from '../components/CancellationCaseModal';
+import RefundCaseModal from '../components/RefundCaseModal';
+import { ArrowLeft, Download, Plus, Printer, FileText, AlertCircle, ChevronDown } from 'lucide-react';
 
 const STATUS_COLORS = {
   DRAFT: { bg: '#F3F4F6', text: '#374151' },
@@ -24,12 +36,6 @@ const PRINT_MENU_ITEMS = [
   { id: 'booking_record', label: 'Full Booking Record' },
 ];
 
-const CANCEL_SCOPES = [
-  { id: 'booking', label: 'Entire Booking' },
-  { id: 'flight', label: 'Single Flight Segment' },
-  { id: 'passenger', label: 'Single Passenger' },
-];
-
 // Locally hosted, verified-current logos take priority over the third-party
 // CDN fallback below - add more IATA codes here as logos are sourced.
 const LOCAL_AIRLINE_LOGOS = {
@@ -42,6 +48,7 @@ const TIMELINE_ICONS = {
   PAYMENT: '💵',
   REFUND: '💰',
   AMENDMENT: '✏️',
+  CANCELLATION: '🚫',
   NOTE: '📝',
   COMMS: '💬',
 };
@@ -52,9 +59,31 @@ const TIMELINE_DOT_COLORS = {
   PAYMENT: '#DCFCE7',
   REFUND: '#FEE2E2',
   AMENDMENT: '#EDE9FE',
+  CANCELLATION: '#FEE2E2',
   NOTE: '#FEF3C7',
   COMMS: '#DBEAFE',
 };
+
+const CASE_STATUS_TONE = {
+  DRAFT: 'badge-neutral',
+  QUOTE_PENDING: 'badge-warn',
+  QUOTED: 'badge-info',
+  CUSTOMER_APPROVED: 'badge-info',
+  REQUESTED: 'badge-warn',
+  IN_PROCESS: 'badge-info',
+  CONFIRMED: 'badge-info',
+  APPROVED: 'badge-info',
+  PARTIALLY_SETTLED: 'badge-info',
+  COMPLETED: 'badge-pass',
+  SETTLED: 'badge-pass',
+  REJECTED: 'badge-fail',
+  CANCELLED: 'badge-fail',
+  REVERSED: 'badge-fail',
+};
+
+const caseBadge = (status) => (
+  <span className={`badge ${CASE_STATUS_TONE[status] || 'badge-neutral'}`}>{String(status || '').replace(/_/g, ' ')}</span>
+);
 
 // Passport/document numbers are sensitive PII - only the last 2 characters are shown.
 const maskDocument = (value) => {
@@ -66,11 +95,12 @@ export default function BookingDetail() {
   const { invoiceNo } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const actorName = user?.name || user?.email || 'Admin';
   const bookings = getBookings();
   const payments = getPayments();
   const refunds = getRefunds();
   const amendments = getAmendments();
+  const cancellations = getCancellations();
+  const allocations = getAllocations();
   // invoiceNo from the route is the booking reference. A booking groups every
   // passenger that shares this reference (one PNR, or several across suppliers).
   const normPnr = (value = '') => value.replace(/[^a-z0-9]/gi, '').toUpperCase();
@@ -84,22 +114,19 @@ export default function BookingDetail() {
   // Modal states
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showPrintMenu, setShowPrintMenu] = useState(false);
-  const [showQuoteModal, setShowQuoteModal] = useState(null); // 'void', 'cancel', 'amend', 'refund'
-  const [showAmendForm, setShowAmendForm] = useState(false);
-  const [cancelScope, setCancelScope] = useState('booking');
+  const [showVoidModal, setShowVoidModal] = useState(false);
   const [showCancelMenu, setShowCancelMenu] = useState(false);
+  // Case modals: null = closed, { existing } = manage an existing case,
+  // { scope } / {} = create a new one.
+  const [amendModal, setAmendModal] = useState(null);
+  const [cancelModal, setCancelModal] = useState(null);
+  const [showRefundModal, setShowRefundModal] = useState(false);
 
-  // Form states
-  const [amendForm, setAmendForm] = useState({
-    outbound_date: booking?.outbound_date || '',
-    inbound_date: booking?.inbound_date || '',
-    passenger_name: booking?.passenger_name || '',
-  });
-
-  const [refundForm, setRefundForm] = useState({
-    refund_category: 'VOLUNTARY',
-    remarks: '',
-  });
+  // Derived finance model: ledger entries + open items + settlement state for
+  // every counterparty. The refund case modal fetches the original financial
+  // position from here instead of trusting manual entry. Recomputed per render
+  // — the page reloads after every save, so the inputs are stable within one.
+  const model = buildFinanceModel({ bookings, payments, refunds, allocations, amendments });
 
   if (!booking) {
     return (
@@ -120,10 +147,13 @@ export default function BookingDetail() {
   const paid = bookingPayments.filter(isPostedPayment).reduce((sum, p) => sum + numeric(p.amount_paid), 0);
   const balance = total - paid;
 
-  // Every refund case and amendment tied to this booking's PNR(s) - a booking
-  // can go through more than one of each, so these are lists, not single records.
-  const bookingRefunds = refunds.filter(r => groupPnrs.includes(normPnr(r.pnr)));
-  const bookingAmendments = amendments.filter(a => groupPnrs.includes(normPnr(a.pnr)));
+  // Every refund case, amendment case, and cancellation case tied to this
+  // booking's PNR(s) or rows - a booking can go through more than one of each,
+  // so these are lists, not single records.
+  const groupIds = group.map(b => String(b.id));
+  const bookingRefunds = refunds.filter(r => groupPnrs.includes(normPnr(r.pnr)) || groupIds.includes(String(r.booking_id)));
+  const bookingAmendments = amendments.filter(a => groupPnrs.includes(normPnr(a.pnr)) || groupIds.includes(String(a.booking_id)));
+  const bookingCancellations = cancellations.filter(c => groupPnrs.includes(normPnr(c.pnr)) || groupIds.includes(String(c.booking_id)));
   // Older bookings stored a single amendment directly on the record before the
   // dedicated amendments collection existed - still surface it in the timeline.
   const legacyAmendment = booking.amendment_request && !bookingAmendments.some(a => a.id === booking.amendment_request.id)
@@ -172,27 +202,91 @@ export default function BookingDetail() {
       });
     });
 
+    // Refund cases: creation, financial calculation, approval/posting, payout
+    // status — with the actual input-driven amounts (spec §36).
     bookingRefunds.forEach((r) => {
+      const status = refundCaseStatus(r);
+      const created = r.request_date || r.created_at?.split('T')[0] || r.status_date;
+      const net = netRefundCredit(r);
       items.push({
-        date: r.request_date,
+        date: created,
         type: 'REFUND',
-        label: `Refund ${(r.refund_status || 'applied').replace(/_/g, ' ').toLowerCase()}`,
-        detail: [r.refund_category?.replace(/_/g, ' '), `Refundable ${formatCurrency(r.refundable_amount || 0)}`, r.remarks].filter(Boolean).join(' · '),
-        actor: r.requested_by,
+        label: `Refund case ${r.refund_number || ''} created`.replace('  ', ' '),
+        detail: [
+          r.refund_category?.replace(/_/g, ' '),
+          `Gross ${formatCurrency(r.gross_refund_amount ?? r.refundable_amount ?? 0)}`,
+          `Net credit ${formatCurrency(net)}`,
+          r.cancellation_number ? `from ${r.cancellation_number}` : '',
+          r.remarks,
+        ].filter(Boolean).join(' · '),
+        actor: r.created_by || r.requested_by,
+        tone: 'negative',
+      });
+      if (r.approved_at) {
+        items.push({
+          date: String(r.approved_at).slice(0, 10),
+          type: 'REFUND',
+          label: `Refund ${r.refund_number || ''} approved — credit ${formatCurrency(net)} posted`,
+          detail: numeric(r.refund_payout_due) > 0
+            ? `Refund payout due ${formatCurrency(r.refund_payout_due)}`
+            : 'Credit offsets the original receivable · no payout due',
+          actor: r.approved_by,
+        });
+      }
+      if (['REJECTED', 'CANCELLED', 'PARTIALLY_SETTLED', 'SETTLED'].includes(status) && r.status_date && r.status_date !== created) {
+        items.push({
+          date: r.status_date,
+          type: 'REFUND',
+          label: `Refund ${r.refund_number || ''} ${status.replace(/_/g, ' ').toLowerCase()}`,
+          tone: status === 'REJECTED' ? 'negative' : undefined,
+        });
+      }
+    });
+
+    // Cancellation cases: what was cancelled, why, and the expected refund
+    // credit estimate. Cancellations never post to the ledger.
+    bookingCancellations.forEach((c) => {
+      const estimate = cancellationEstimate(c);
+      const scopeLabel = String(c.cancellation_scope || '').replace(/_/g, ' ').toLowerCase();
+      items.push({
+        date: c.cancellation_date || c.created_at?.split('T')[0],
+        type: 'CANCELLATION',
+        label: `Cancellation case ${c.cancellation_number || ''} ${String(c.status || 'draft').toLowerCase()}`,
+        detail: [
+          scopeLabel,
+          c.cancellation_category?.replace(/_/g, ' '),
+          (c.affected_passengers || []).map((p) => p.label).join(', '),
+          numeric(c.estimated_gross_refund) > 0 ? `Expected refund credit ${formatCurrency(estimate.expectedRefundCredit)}` : '',
+          c.cancellation_reason,
+        ].filter(Boolean).join(' · '),
+        actor: c.confirmed_by || c.created_by,
         tone: 'negative',
       });
     });
 
+    // Amendment cases: scope + the input-driven quote; posted cases show the
+    // charge/credit that hit the ledger.
     [...bookingAmendments, ...(legacyAmendment ? [legacyAmendment] : [])].forEach((a) => {
+      const isCase = Boolean(a.amendment_number);
+      const total = amendmentTotalImpact(a);
       items.push({
-        date: a.executed_date || a.request_date,
+        date: a.confirmed_at?.split('T')[0] || a.executed_date || a.request_date || a.created_at?.split('T')[0],
         type: 'AMENDMENT',
-        label: `Amendment ${(a.status || 'requested').toLowerCase()}`,
-        detail: Object.entries(a.requested_changes || {})
-          .filter(([, value]) => value)
-          .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${value}`)
-          .join(' · '),
-        actor: a.requested_by,
+        label: isCase
+          ? `Amendment ${a.amendment_number} ${String(a.status || 'draft').toLowerCase()}`
+          : `Amendment ${(a.status || 'requested').toLowerCase()}`,
+        detail: isCase
+          ? [
+            a.amendment_type?.replace(/_/g, ' '),
+            (a.affected_tickets || []).map((t) => t.id).join(', '),
+            total !== 0 ? `${total > 0 ? 'Charge' : 'Credit'} ${formatCurrency(Math.abs(total))}${isAmendmentPosted(a) ? ' posted' : ' (quote)'}` : '',
+            a.remarks,
+          ].filter(Boolean).join(' · ')
+          : Object.entries(a.requested_changes || {})
+            .filter(([, value]) => value)
+            .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${value}`)
+            .join(' · '),
+        actor: a.created_by || a.requested_by,
       });
     });
 
@@ -203,16 +297,6 @@ export default function BookingDetail() {
 
   const timeline = buildTimeline();
 
-  // Helper function to format segments for display
-  const getSegmentDisplay = () => {
-    if (!booking.flight_segments || booking.flight_segments.length === 0) {
-      return `${booking.sector || 'N/A'}`;
-    }
-    return booking.flight_segments
-      .flatMap(seg => seg.connections || [])
-      .map(conn => `${conn.departure_city || conn.origin || ''} → ${conn.arrival_city || conn.destination || ''}`)
-      .join(' > ');
-  };
 
   // Flight duration from parsed departure/arrival date+time, when both are known.
   const getFlightDuration = (conn) => {
@@ -244,6 +328,8 @@ export default function BookingDetail() {
     window.location.reload();
   };
 
+  // Void keeps the seat-release action but shows no fabricated financials —
+  // any refundable amount is handled through a refund case afterwards.
   const handleVoid = () => {
     const updatedBooking = {
       ...booking,
@@ -252,80 +338,7 @@ export default function BookingDetail() {
       updated_at: new Date().toISOString(),
     };
     saveBooking(updatedBooking);
-    setShowQuoteModal(null);
-    window.location.reload();
-  };
-
-  const handleCancel = () => {
-    const updatedBooking = {
-      ...booking,
-      ticket_status: 'CANCELLED',
-      cancel_date: new Date().toISOString().split('T')[0],
-      cancel_scope: cancelScope,
-      updated_at: new Date().toISOString(),
-    };
-    saveBooking(updatedBooking);
-    setShowQuoteModal(null);
-    window.location.reload();
-  };
-
-  const handleAmend = () => {
-    if (!amendForm.outbound_date && !amendForm.inbound_date && !amendForm.passenger_name) {
-      alert('Please specify at least one change');
-      return;
-    }
-
-    const amendmentRequest = {
-      id: `amend-${Date.now()}`,
-      booking_id: booking.id,
-      pnr: booking.pnr,
-      status: 'EXECUTED',
-      requested_changes: {
-        outbound_date: amendForm.outbound_date,
-        inbound_date: amendForm.inbound_date,
-        passenger_name: amendForm.passenger_name,
-      },
-      quote: calculateAmendQuote(),
-      request_date: new Date().toISOString().split('T')[0],
-      executed_date: new Date().toISOString().split('T')[0],
-      requested_by: actorName,
-    };
-
-    const updatedBooking = {
-      ...booking,
-      outbound_date: amendForm.outbound_date || booking.outbound_date,
-      inbound_date: amendForm.inbound_date || booking.inbound_date,
-      passenger_name: amendForm.passenger_name || booking.passenger_name,
-      updated_at: new Date().toISOString(),
-    };
-
-    saveAmendment(amendmentRequest);
-    saveBooking(updatedBooking);
-    setShowAmendForm(false);
-    setShowQuoteModal(null);
-    window.location.reload();
-  };
-
-  const handleRefund = () => {
-    const quote = calculateRefundQuote();
-    const refundCase = {
-      id: `refund-${Date.now()}`,
-      booking_id: booking.id,
-      pnr: booking.pnr,
-      ticket_no: booking.ticket_no,
-      refund_status: 'APPLIED',
-      refund_category: refundForm.refund_category,
-      refundable_amount: quote.refundable,
-      penalty: quote.penalty,
-      non_refundable_emd: quote.nonRefundableEmd,
-      remarks: refundForm.remarks,
-      request_date: new Date().toISOString().split('T')[0],
-      requested_by: actorName,
-    };
-
-    saveRefund(refundCase);
-    setShowQuoteModal(null);
-    setRefundForm({ refund_category: 'VOLUNTARY', remarks: '' });
+    setShowVoidModal(false);
     window.location.reload();
   };
 
@@ -473,7 +486,7 @@ export default function BookingDetail() {
           {canVoid && (
             <button
               className="btn btn-primary"
-              onClick={() => setShowQuoteModal('void')}
+              onClick={() => setShowVoidModal(true)}
               style={{ fontSize: '12px' }}>
               <FileText size={14} style={{ marginRight: '3px' }} />
               Void
@@ -496,18 +509,17 @@ export default function BookingDetail() {
                   background: 'var(--color-background-primary)',
                   border: '1px solid var(--color-border-secondary)',
                   borderRadius: 'var(--border-radius-md)',
-                  minWidth: '160px',
+                  minWidth: '180px',
                   zIndex: 10,
                   marginTop: '4px',
                   boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
                 }}>
-                  {CANCEL_SCOPES.map(scope => (
+                  {CANCELLATION_SCOPES.map(([value, label]) => (
                     <button
-                      key={scope.id}
+                      key={value}
                       onClick={() => {
-                        setCancelScope(scope.id);
                         setShowCancelMenu(false);
-                        setShowQuoteModal('cancel');
+                        setCancelModal({ scope: value });
                       }}
                       style={{
                         display: 'block',
@@ -521,7 +533,7 @@ export default function BookingDetail() {
                         borderBottom: '0.5px solid var(--color-border-tertiary)',
                       }}
                     >
-                      {scope.label}
+                      {label}
                     </button>
                   ))}
                 </div>
@@ -531,19 +543,19 @@ export default function BookingDetail() {
           {canAmend && (
             <button
               className="btn"
-              onClick={() => setShowAmendForm(true)}
+              onClick={() => setAmendModal({})}
               style={{ fontSize: '12px' }}>
-              <Download size={14} style={{ marginRight: '3px' }} />
+              <FileText size={14} style={{ marginRight: '3px' }} />
               Amend
             </button>
           )}
           {canRefund && (
             <button
               className="btn"
-              onClick={() => setShowQuoteModal('refund')}
+              onClick={() => setShowRefundModal(true)}
               style={{ fontSize: '12px' }}>
               <FileText size={14} style={{ marginRight: '3px' }} />
-              Apply refund
+              Create Refund Case
             </button>
           )}
         </div>
@@ -813,6 +825,59 @@ export default function BookingDetail() {
             </div>
           </div>
 
+          {/* Servicing cases: amendment + cancellation + refund cases on this
+              booking, with their lifecycle status. Manage reopens the case. */}
+          {(bookingAmendments.some(a => a.amendment_number) || bookingCancellations.length > 0 || bookingRefunds.length > 0) && (
+            <div className="card">
+              <h3 style={{ margin: '0 0 8px', fontSize: '13px', fontWeight: '500' }}>🗂 Servicing cases</h3>
+              <div className="servicing-case-list">
+                {bookingAmendments.filter(a => a.amendment_number).map((a) => {
+                  const total = amendmentTotalImpact(a);
+                  return (
+                    <div key={a.id} className="servicing-case-row">
+                      <span>
+                        ✏️ {a.amendment_number} · {String(a.amendment_type || '').replace(/_/g, ' ')}
+                        {total !== 0 && <span style={{ color: 'var(--color-text-secondary)' }}> · {total > 0 ? '+' : '−'}{formatCurrency(Math.abs(total))}</span>}
+                      </span>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                        {caseBadge(a.status)}
+                        <button className="btn btn-secondary btn-sm" type="button" onClick={() => setAmendModal({ existing: a })}>Manage</button>
+                      </span>
+                    </div>
+                  );
+                })}
+                {bookingCancellations.map((c) => (
+                  <div key={c.id} className="servicing-case-row">
+                    <span>
+                      🚫 {c.cancellation_number} · {String(c.cancellation_scope || '').replace(/_/g, ' ').toLowerCase()}
+                      {numeric(c.estimated_gross_refund) > 0 && (
+                        <span style={{ color: 'var(--color-text-secondary)' }}> · expected credit {formatCurrency(cancellationEstimate(c).expectedRefundCredit)}</span>
+                      )}
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                      {caseBadge(c.status)}
+                      <button className="btn btn-secondary btn-sm" type="button" onClick={() => setCancelModal({ existing: c })}>Manage</button>
+                    </span>
+                  </div>
+                ))}
+                {bookingRefunds.map((r) => (
+                  <div key={r.id} className="servicing-case-row">
+                    <span>
+                      💰 {r.refund_number || 'Refund'} · net credit {formatCurrency(netRefundCredit(r))}
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                      {caseBadge(refundCaseStatus(r))}
+                      <button className="btn btn-secondary btn-sm" type="button" onClick={() => navigate('/refunds')}>Open</button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p style={{ margin: '8px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
+                Refund approval and payouts are managed on the Refunds page. Only approval posts a refund credit to the ledger.
+              </p>
+            </div>
+          )}
+
           {/* Activity Timeline - merges audit log, comms, remarks, refunds and amendments
               into one chronological history so support/admin can see everything here */}
           <div className="card">
@@ -883,263 +948,77 @@ export default function BookingDetail() {
         />
       )}
 
-      {/* Quote Modal - Void */}
-      {showQuoteModal === 'void' && (
+      {/* Void confirmation: releases the seat. Financials, if any, go
+          through a refund case afterwards - no fabricated amounts here. */}
+      {showVoidModal && (
         <div className="modal-backdrop" style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
           background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
           zIndex: 100
         }}>
           <div className="card modal-card" style={{ width: '520px' }}>
-            <h3>Void Ticket - Review Changes</h3>
-            {(() => {
-              const quote = calculateVoidQuote(balance);
-              return (
-                <>
-                  <div style={{ background: '#FEF3C7', padding: '12px', borderRadius: 'var(--border-radius-md)', marginBottom: '16px', fontSize: '13px' }}>
-                    {quote.message}
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' }}>
-                    <div style={{ background: 'var(--color-background-primary)', padding: '12px', borderRadius: 'var(--border-radius-md)' }}>
-                      <p style={{ margin: '0 0 4px', fontSize: '11px', color: 'var(--color-text-secondary)' }}>Refundable Amount</p>
-                      <p style={{ margin: '0', fontSize: '15px', fontWeight: '500', color: '#0F6E56' }}>
-                        {formatCurrency(quote.refundableAmount)}
-                      </p>
-                    </div>
-                    <div style={{ background: 'var(--color-background-primary)', padding: '12px', borderRadius: 'var(--border-radius-md)' }}>
-                      <p style={{ margin: '0 0 4px', fontSize: '11px', color: 'var(--color-text-secondary)' }}>Charges</p>
-                      <p style={{ margin: '0', fontSize: '15px', fontWeight: '500', color: '#991B1B' }}>
-                        {formatCurrency(quote.charges)}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="form-actions">
-                    <button className="btn btn-secondary" onClick={() => setShowQuoteModal(null)}>Cancel</button>
-                    <button className="btn btn-primary" onClick={handleVoid}>Confirm Void</button>
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
-
-      {/* Quote Modal - Cancel */}
-      {showQuoteModal === 'cancel' && (
-        <div className="modal-backdrop" style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 100
-        }}>
-          <div className="card modal-card" style={{ width: '520px' }}>
-            <h3>Cancel Booking - Review Changes</h3>
-            {(() => {
-              const quote = calculateCancelQuote(balance);
-              return (
-                <>
-                  <div style={{ background: '#FEF3C7', padding: '12px', borderRadius: 'var(--border-radius-md)', marginBottom: '16px', fontSize: '13px' }}>
-                    {quote.message} ({quote.cancellationPercentage}%)
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '16px', fontSize: '12px' }}>
-                    <div style={{ background: 'var(--color-background-primary)', padding: '10px', borderRadius: 'var(--border-radius-md)' }}>
-                      <p style={{ margin: '0 0 3px', fontSize: '10px', color: 'var(--color-text-secondary)' }}>Cancellation Charge</p>
-                      <p style={{ margin: '0', fontWeight: '500', color: '#991B1B' }}>{formatCurrency(quote.cancellationCharge)}</p>
-                    </div>
-                    <div style={{ background: 'var(--color-background-primary)', padding: '10px', borderRadius: 'var(--border-radius-md)' }}>
-                      <p style={{ margin: '0 0 3px', fontSize: '10px', color: 'var(--color-text-secondary)' }}>Processing Fee</p>
-                      <p style={{ margin: '0', fontWeight: '500', color: '#991B1B' }}>{formatCurrency(quote.processingFee)}</p>
-                    </div>
-                    <div style={{ background: '#DBEAFE', padding: '10px', borderRadius: 'var(--border-radius-md)', gridColumn: '1 / -1' }}>
-                      <p style={{ margin: '0 0 3px', fontSize: '10px', color: 'var(--color-text-secondary)' }}>Refund Amount</p>
-                      <p style={{ margin: '0', fontWeight: '500', color: '#1E40AF', fontSize: '13px' }}>{formatCurrency(quote.refundAmount)}</p>
-                    </div>
-                  </div>
-                  <div className="form-actions">
-                    <button className="btn btn-secondary" onClick={() => setShowQuoteModal(null)}>Cancel</button>
-                    <button className="btn btn-primary" onClick={handleCancel}>Confirm Cancel</button>
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
-
-      {/* Amend Modal */}
-      {showAmendForm && (
-        <div className="modal-backdrop" style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 100
-        }}>
-          <div className="card modal-card" style={{ width: '520px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <h3>Request Amendment</h3>
-              <button
-                onClick={() => setShowAmendForm(false)}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0' }}
-              >
-                <X size={18} />
-              </button>
+            <h3>Void Ticket</h3>
+            <div style={{ background: '#FEF3C7', padding: '12px', borderRadius: 'var(--border-radius-md)', marginBottom: '16px', fontSize: '13px' }}>
+              The ticket will be voided and the seat released. Any supplier void charges or refundable
+              amounts are recorded afterwards through a refund case with input-driven amounts.
             </div>
-            <div className="modal-form-grid">
-              <label>
-                <span>Outbound Date</span>
-                <input
-                  type="date"
-                  value={amendForm.outbound_date}
-                  onChange={(e) => setAmendForm({ ...amendForm, outbound_date: e.target.value })}
-                />
-              </label>
-              <label>
-                <span>Inbound Date (if RT)</span>
-                <input
-                  type="date"
-                  value={amendForm.inbound_date}
-                  onChange={(e) => setAmendForm({ ...amendForm, inbound_date: e.target.value })}
-                />
-              </label>
-              <label style={{ gridColumn: '1 / -1' }}>
-                <span>Passenger Name (if changing)</span>
-                <input
-                  value={amendForm.passenger_name}
-                  onChange={(e) => setAmendForm({ ...amendForm, passenger_name: e.target.value })}
-                />
-              </label>
-            </div>
-
-            {(() => {
-              const quote = calculateAmendQuote();
-              return (
-                <>
-                  <div style={{ background: '#DBEAFE', padding: '10px', borderRadius: 'var(--border-radius-md)', marginBottom: '12px', fontSize: '12px' }}>
-                    <p style={{ margin: '0 0 3px', color: 'var(--color-text-secondary)' }}>Change Fee</p>
-                    <p style={{ margin: '0', fontWeight: '500', color: '#1E40AF' }}>{formatCurrency(quote.changeFee)}</p>
-                  </div>
-                </>
-              );
-            })()}
-
             <div className="form-actions">
-              <button className="btn btn-secondary" onClick={() => setShowAmendForm(false)}>Cancel</button>
-              <button className="btn btn-primary" onClick={() => {
-                setShowQuoteModal('amend');
-                setShowAmendForm(false);
-              }}>Review Quote</button>
+              <button className="btn btn-secondary" onClick={() => setShowVoidModal(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleVoid}>Confirm Void</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Quote Modal - Amend */}
-      {showQuoteModal === 'amend' && (
-        <div className="modal-backdrop" style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 100
-        }}>
-          <div className="card modal-card" style={{ width: '520px' }}>
-            <h3>Amendment Quote</h3>
-            {(() => {
-              const quote = calculateAmendQuote(balance);
-              return (
-                <>
-                  <div style={{ background: '#DBEAFE', padding: '12px', borderRadius: 'var(--border-radius-md)', marginBottom: '16px', fontSize: '13px' }}>
-                    {quote.message}
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' }}>
-                    <div style={{ background: 'var(--color-background-primary)', padding: '12px', borderRadius: 'var(--border-radius-md)' }}>
-                      <p style={{ margin: '0 0 4px', fontSize: '11px', color: 'var(--color-text-secondary)' }}>Change Fee</p>
-                      <p style={{ margin: '0', fontSize: '15px', fontWeight: '500', color: '#1E40AF' }}>
-                        {formatCurrency(quote.changeFee)}
-                      </p>
-                    </div>
-                    <div style={{ background: 'var(--color-background-primary)', padding: '12px', borderRadius: 'var(--border-radius-md)' }}>
-                      <p style={{ margin: '0 0 4px', fontSize: '11px', color: 'var(--color-text-secondary)' }}>New Balance</p>
-                      <p style={{ margin: '0', fontSize: '15px', fontWeight: '500', color: '#633806' }}>
-                        {formatCurrency(quote.newBalance)}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="form-actions">
-                    <button className="btn btn-secondary" onClick={() => setShowQuoteModal(null)}>Cancel</button>
-                    <button className="btn btn-primary" onClick={handleAmend}>Confirm Amendment</button>
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
+      {/* Amendment case modal (create or manage) */}
+      {amendModal && (
+        <AmendmentCaseModal
+          user={user}
+          booking={booking}
+          group={group}
+          amendments={amendments}
+          existing={amendModal.existing || null}
+          onClose={() => setAmendModal(null)}
+          onSaved={() => {
+            setAmendModal(null);
+            window.location.reload();
+          }}
+        />
       )}
 
-      {/* Quote Modal - Refund */}
-      {showQuoteModal === 'refund' && (
-        <div className="modal-backdrop" style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 100
-        }}>
-          <div className="card modal-card" style={{ width: '520px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <h3>Apply Refund</h3>
-              <button
-                onClick={() => setShowQuoteModal(null)}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0' }}
-              >
-                <X size={18} />
-              </button>
-            </div>
+      {/* Cancellation case modal (create with preset scope, or manage) */}
+      {cancelModal && (
+        <CancellationCaseModal
+          user={user}
+          booking={booking}
+          group={group}
+          cancellations={cancellations}
+          refunds={refunds}
+          initialScope={cancelModal.scope || 'ENTIRE_BOOKING'}
+          existing={cancelModal.existing || null}
+          onClose={() => setCancelModal(null)}
+          onSaved={() => {
+            setCancelModal(null);
+            window.location.reload();
+          }}
+        />
+      )}
 
-            <div className="modal-form-grid" style={{ marginBottom: '12px' }}>
-              <label>
-                <span>Refund Category</span>
-                <select
-                  value={refundForm.refund_category}
-                  onChange={(e) => setRefundForm({ ...refundForm, refund_category: e.target.value })}
-                >
-                  {REFUND_CATEGORIES.map((cat) => (
-                    <option key={cat} value={cat}>{cat.replace(/_/g, ' ')}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={{ gridColumn: '1 / -1' }}>
-                <span>Remarks</span>
-                <input
-                  value={refundForm.remarks}
-                  onChange={(e) => setRefundForm({ ...refundForm, remarks: e.target.value })}
-                />
-              </label>
-            </div>
-
-            {(() => {
-              const quote = calculateRefundQuote(balance);
-              return (
-                <>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '16px', fontSize: '12px' }}>
-                    <div style={{ background: '#DBEAFE', padding: '10px', borderRadius: 'var(--border-radius-md)' }}>
-                      <p style={{ margin: '0 0 3px', fontSize: '10px', color: 'var(--color-text-secondary)' }}>Refundable</p>
-                      <p style={{ margin: '0', fontWeight: '500', color: '#1E40AF' }}>{formatCurrency(quote.refundable)}</p>
-                    </div>
-                    <div style={{ background: '#FEE2E2', padding: '10px', borderRadius: 'var(--border-radius-md)' }}>
-                      <p style={{ margin: '0 0 3px', fontSize: '10px', color: 'var(--color-text-secondary)' }}>Penalty</p>
-                      <p style={{ margin: '0', fontWeight: '500', color: '#991B1B' }}>{formatCurrency(quote.penalty)}</p>
-                    </div>
-                    {quote.nonRefundableEmd > 0 && (
-                      <div style={{ background: '#FEE2E2', padding: '10px', borderRadius: 'var(--border-radius-md)', gridColumn: '1 / -1' }}>
-                        <p style={{ margin: '0 0 3px', fontSize: '10px', color: 'var(--color-text-secondary)' }}>Non-Refundable EMDs</p>
-                        <p style={{ margin: '0', fontWeight: '500', color: '#991B1B' }}>{formatCurrency(quote.nonRefundableEmd)}</p>
-                      </div>
-                    )}
-                  </div>
-                  <div className="form-actions">
-                    <button className="btn btn-secondary" onClick={() => setShowQuoteModal(null)}>Cancel</button>
-                    <button className="btn btn-primary" onClick={handleRefund}>Apply Refund</button>
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
+      {/* Refund case creation modal - review, approval and payout happen on
+          the Refunds page */}
+      {showRefundModal && (
+        <RefundCaseModal
+          user={user}
+          booking={booking}
+          group={group}
+          model={model}
+          refunds={refunds}
+          onClose={() => setShowRefundModal(false)}
+          onSaved={() => {
+            setShowRefundModal(false);
+            window.location.reload();
+          }}
+        />
       )}
     </div>
   );

@@ -65,8 +65,8 @@ function isSupplierPayment(payment) {
   return payment?.payment_direction === 'SUPPLIER_OUT' || payment?.party_type === 'SUPPLIER';
 }
 
-export function scopedFinanceData(user, { bookings = [], payments = [], refunds = [], expenses = [], allocations = [] }) {
-  if (canSeeAll(user)) return { bookings, payments, refunds, expenses, allocations };
+export function scopedFinanceData(user, { bookings = [], payments = [], refunds = [], amendments = [], cancellations = [], expenses = [], allocations = [] }) {
+  if (canSeeAll(user)) return { bookings, payments, refunds, amendments, cancellations, expenses, allocations };
 
   const scopedBookings = filterBookingsForUser(user, bookings);
   const pnrs = new Set(scopedBookings.map((booking) => token(booking.pnr)).filter(Boolean));
@@ -102,10 +102,20 @@ export function scopedFinanceData(user, { bookings = [], payments = [], refunds 
     || aliases.has(token(allocation.counterparty_name))
   ));
 
+  // Servicing cases follow their booking: visible when the user can see the
+  // booking they amend/cancel (by id, PNR, or ticket).
+  const followsBooking = (record) => (
+    bookingIds.has(token(record.booking_id))
+    || pnrs.has(token(record.pnr))
+    || tickets.has(token(record.ticket_no))
+  );
+
   return {
     bookings: scopedBookings,
     payments: scopedPayments,
     refunds: refunds.filter((refund) => pnrs.has(token(refund.pnr)) || tickets.has(token(refund.ticket_no))),
+    amendments: amendments.filter(followsBooking),
+    cancellations: cancellations.filter(followsBooking),
     expenses: [],
     allocations: scopedAllocations,
   };

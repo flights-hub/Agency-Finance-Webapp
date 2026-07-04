@@ -13,18 +13,21 @@ const STORAGE_KEYS = {
   PAYMENTS: 'ffs_payments',
   REFUNDS: 'ffs_refunds',
   AMENDMENTS: 'ffs_amendments',
+  CANCELLATIONS: 'ffs_cancellations',
   EXPENSES: 'ffs_expenses',
   ALLOCATIONS: 'ffs_allocations',
   ALERTS: 'ffs_alerts',
   USERS: 'ffs_users',
 };
 
-// Collections persisted to the database. Alerts are computed, amendments and
-// legacy users stay local-only.
+// Collections persisted to the database. Alerts are computed and legacy
+// users stay local-only.
 const SERVER_COLLECTIONS = {
   [STORAGE_KEYS.BOOKINGS]: 'bookings',
   [STORAGE_KEYS.PAYMENTS]: 'payments',
   [STORAGE_KEYS.REFUNDS]: 'refunds',
+  [STORAGE_KEYS.AMENDMENTS]: 'amendments',
+  [STORAGE_KEYS.CANCELLATIONS]: 'cancellations',
   [STORAGE_KEYS.EXPENSES]: 'expenses',
   [STORAGE_KEYS.ALLOCATIONS]: 'allocations',
 };
@@ -147,6 +150,10 @@ export function saveRefund(refund) { return save(STORAGE_KEYS.REFUNDS, refund); 
 // Amendments
 export function getAmendments() { return readData(STORAGE_KEYS.AMENDMENTS); }
 export function saveAmendment(amendment) { return save(STORAGE_KEYS.AMENDMENTS, amendment); }
+
+// Cancellation cases
+export function getCancellations() { return readData(STORAGE_KEYS.CANCELLATIONS); }
+export function saveCancellation(cancellation) { return save(STORAGE_KEYS.CANCELLATIONS, cancellation); }
 
 // Expenses
 export function getExpenses() { return readData(STORAGE_KEYS.EXPENSES); }

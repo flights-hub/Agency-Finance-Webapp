@@ -632,6 +632,10 @@ const FINANCE_COLLECTIONS = {
   bookings: { view: 'view_bookings', write: ['create_bookings', 'edit_bookings'] },
   payments: { view: 'view_payments', write: ['record_payments'] },
   refunds: { view: 'view_refunds', write: ['process_refunds'] },
+  // Booking servicing cases. Amendment cases post to the ledger only when
+  // confirmed; cancellation cases never post — they may spawn a refund case.
+  amendments: { view: 'view_bookings', write: ['edit_bookings', 'process_refunds'] },
+  cancellations: { view: 'view_bookings', write: ['edit_bookings', 'process_refunds'] },
   expenses: { view: 'view_financials', write: ['edit_financials'] },
   // Settlement records linking payments/refund credits to open items.
   // Recording or refund staff can allocate; agents and suppliers cannot
@@ -690,13 +694,13 @@ async function handleFinanceData(req, res) {
   const user = await currentUser(req);
   const canView = (name) => hasAnyPermission(user, [financeCollection(name).view]);
 
-  const [bookings, payments, refunds, expenses, allocations] = await Promise.all(
-    ['bookings', 'payments', 'refunds', 'expenses', 'allocations'].map((name) => (
+  const [bookings, payments, refunds, amendments, cancellations, expenses, allocations] = await Promise.all(
+    ['bookings', 'payments', 'refunds', 'amendments', 'cancellations', 'expenses', 'allocations'].map((name) => (
       canView(name) ? listFinanceRows(name) : Promise.resolve([])
     )),
   );
 
-  json(res, 200, scopedFinanceData(user, { bookings, payments, refunds, expenses, allocations }));
+  json(res, 200, scopedFinanceData(user, { bookings, payments, refunds, amendments, cancellations, expenses, allocations }));
 }
 
 async function requireFinanceWriter(req, collection) {

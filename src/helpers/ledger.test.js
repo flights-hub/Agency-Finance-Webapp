@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   accountId,
   allocationProblems,
+  amendmentTotalImpact,
   balanceDisplay,
+  cancellationEstimate,
   buildAutoAllocation,
   buildAllocationRecords,
   buildFinanceModel,
@@ -355,4 +357,134 @@ test('reversed payment shows reversal entry and reopens its open items', () => {
   assert.equal(agent.openItems[0].outstanding_amount, 800);
   assert.equal(agent.openItems[0].reconciliation_status, 'OPEN');
   assert.equal(agent.control.matched, true);
+});
+
+// Servicing spec §5 — amendment total is input-driven and may be negative.
+test('amendment total impact sums all input components', () => {
+  assert.equal(amendmentTotalImpact({
+    fare_difference: 80,
+    supplier_change_fee: 25,
+    flyforsure_service_fee: 10,
+  }), 115);
+  assert.equal(amendmentTotalImpact({
+    fare_difference: -100,
+    supplier_change_fee: 20,
+    flyforsure_service_fee: 10,
+  }), -70);
+});
+
+// Servicing spec §6/§7 — draft and quoted amendments never touch the ledger;
+// CONFIRMED posts an AMENDMENT_CHARGE and an open receivable item.
+test('amendment posts charge and open item only when confirmed', () => {
+  const booking = agentBooking({ fare: 800, pnr: 'AMD1' });
+  const amendment = {
+    id: uid('amd'),
+    amendment_number: 'AMD-000001',
+    booking_id: booking.id,
+    pnr: 'AMD1',
+    amendment_type: 'DATE_CHANGE',
+    fare_difference: 80,
+    supplier_change_fee: 25,
+    flyforsure_service_fee: 10,
+    status: 'QUOTED',
+    confirmed_at: '2026-07-04T10:00:00Z',
+  };
+
+  let model = buildFinanceModel({ bookings: [booking], amendments: [amendment] });
+  let agent = account(model, 'AGENT', 'ABC Travels');
+  assert.equal(agent.balance, 800);
+  assert.equal(agent.openItems.length, 1);
+
+  model = buildFinanceModel({ bookings: [booking], amendments: [{ ...amendment, status: 'CONFIRMED' }] });
+  agent = account(model, 'AGENT', 'ABC Travels');
+  assert.equal(agent.balance, 915);
+  const charge = agent.ledger.find((entry) => entry.entry_type === 'AMENDMENT_CHARGE');
+  assert.equal(charge.debit, 115);
+  const item = agent.openItems.find((entry) => entry.item_type === 'AMENDMENT_RECEIVABLE');
+  assert.equal(item.outstanding_amount, 115);
+  assert.equal(agent.control.matched, true);
+});
+
+// Servicing spec §6 — negative amendment total posts a credit open item and
+// never converts to a payout automatically.
+test('negative amendment total posts amendment credit', () => {
+  const booking = agentBooking({ fare: 800, pnr: 'AMD2' });
+  const amendment = {
+    id: uid('amd'),
+    booking_id: booking.id,
+    pnr: 'AMD2',
+    amendment_type: 'DATE_CHANGE',
+    fare_difference: -100,
+    supplier_change_fee: 20,
+    flyforsure_service_fee: 10,
+    status: 'CONFIRMED',
+    confirmed_at: '2026-07-04T10:00:00Z',
+  };
+  const model = buildFinanceModel({ bookings: [booking], amendments: [amendment] });
+  const agent = account(model, 'AGENT', 'ABC Travels');
+
+  assert.equal(agent.balance, 730);
+  const credit = agent.ledger.find((entry) => entry.entry_type === 'AMENDMENT_CREDIT');
+  assert.equal(credit.credit, 70);
+  const item = agent.openItems.find((entry) => entry.item_type === 'AMENDMENT_CREDIT');
+  assert.equal(item.side, 'CREDIT');
+  assert.equal(item.outstanding_amount, 70);
+  assert.equal(agent.control.matched, true);
+});
+
+// Servicing spec §17/§33 — processing fee and adjustment enter the net credit;
+// the result is floored at zero.
+test('net refund credit includes processing fee and adjustment, floored at zero', () => {
+  assert.equal(netRefundCredit({
+    gross_refund_amount: 1150,
+    airline_cancellation_fee: 100,
+    flyforsure_cancellation_fee: 15,
+    processing_fee: 5,
+  }), 1030);
+  assert.equal(netRefundCredit({
+    gross_refund_amount: 100,
+    airline_cancellation_fee: 90,
+    adjustment_amount: -20,
+  }), 0);
+});
+
+// Servicing spec §10 — cancellation estimate is derived from inputs only.
+test('cancellation estimate computes deductions and expected refund credit', () => {
+  const estimate = cancellationEstimate({
+    estimated_gross_refund: 1150,
+    estimated_airline_fee: 100,
+    estimated_flyforsure_fee: 15,
+    estimated_processing_fee: 5,
+  });
+  assert.equal(estimate.deductions, 120);
+  assert.equal(estimate.expectedRefundCredit, 1030);
+});
+
+// Servicing spec §29 — refund lines make the settlement preview span every
+// affected ticket, not just the case-level ticket number.
+test('multi-line refund preview offsets outstanding across all line tickets', () => {
+  const bookingA = agentBooking({ fare: 900, pnr: 'ML1' });
+  const bookingB = agentBooking({ fare: 900, pnr: 'ML1' });
+  const refund = {
+    id: uid('ref'),
+    refund_number: 'REF-000099',
+    pnr: 'ML1',
+    ticket_no: bookingA.ticket_no,
+    refund_party_type: 'AGENT',
+    refund_status: 'REQUESTED',
+    gross_refund_amount: 1600,
+    airline_cancellation_fee: 200,
+    refund_lines: [
+      { ticket_no: bookingA.ticket_no, gross_refund_amount: 800, airline_cancellation_fee: 100 },
+      { ticket_no: bookingB.ticket_no, gross_refund_amount: 800, airline_cancellation_fee: 100 },
+    ],
+  };
+  const model = buildFinanceModel({ bookings: [bookingA, bookingB], refunds: [refund] });
+  const preview = refundSettlementPreview(refund, model);
+
+  assert.equal(preview.credit, 1400);
+  assert.equal(preview.original_outstanding, 1800);
+  assert.equal(preview.original_offset, 1400);
+  assert.equal(preview.remaining_credit, 0);
+  assert.equal(preview.bookings.length, 2);
 });

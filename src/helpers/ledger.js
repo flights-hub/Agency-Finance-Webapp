@@ -65,6 +65,7 @@ export const ALLOCATION_TYPES = [
   'PAYMENT_TO_TICKET',
   'PAYMENT_TO_PNR',
   'REFUND_CREDIT_TO_TICKET',
+  'AMENDMENT_CREDIT_TO_TICKET',
   'CREDIT_NOTE_TO_TICKET',
   'SUPPLIER_PAYMENT_TO_TICKET',
   'ACM_TO_PAYABLE',
@@ -85,6 +86,63 @@ export const REFUND_CASE_STATUSES = [
   'SETTLED',
   'REJECTED',
   'CANCELLED',
+];
+
+// Amendment cases (booking servicing spec §3–§7). Financial posting happens
+// at CONFIRMED; COMPLETED is the separate operational milestone.
+export const AMENDMENT_TYPES = [
+  'DATE_CHANGE',
+  'OUTBOUND_DATE_CHANGE',
+  'INBOUND_DATE_CHANGE',
+  'BOTH_DATE_CHANGE',
+  'NAME_CORRECTION',
+  'NAME_CHANGE',
+  'ROUTE_CHANGE',
+  'CABIN_CHANGE',
+  'BAGGAGE_CHANGE',
+  'OTHER',
+];
+
+export const AMENDMENT_CASE_STATUSES = [
+  'DRAFT',
+  'QUOTE_PENDING',
+  'QUOTED',
+  'CUSTOMER_APPROVED',
+  'REJECTED',
+  'CONFIRMED',
+  'COMPLETED',
+  'CANCELLED',
+];
+
+// Cancellation cases (spec §8–§13). A cancellation case NEVER posts to the
+// ledger — it records what/why and may spawn a refund case for review.
+export const CANCELLATION_SCOPES = [
+  ['ENTIRE_BOOKING', 'Entire booking'],
+  ['SELECTED_PASSENGERS', 'Select passengers'],
+  ['SELECTED_TICKETS', 'Select tickets'],
+  ['SELECTED_SEGMENTS', 'Select flight segments'],
+];
+
+export const CANCELLATION_CATEGORIES = [
+  'VOLUNTARY',
+  'INVOLUNTARY_AIRLINE_CANCEL',
+  'NO_SHOW',
+  'MEDICAL',
+  'DEATH',
+  'TAX_ONLY',
+  'DUPLICATE_BOOKING',
+  'VISA_REJECTION',
+  'SCHEDULE_CHANGE',
+  'OTHER',
+];
+
+export const CANCELLATION_CASE_STATUSES = [
+  'DRAFT',
+  'REQUESTED',
+  'CONFIRMED',
+  'COMPLETED',
+  'REJECTED',
+  'REVERSED',
 ];
 
 // Legacy refund lifecycle -> refund case lifecycle.
@@ -174,7 +232,10 @@ export function isRefundCreditPosted(refund = {}) {
   return ['APPROVED', 'PARTIALLY_SETTLED', 'SETTLED'].includes(refundCaseStatus(refund));
 }
 
-// NET REFUND CREDIT = gross - airline fee - FlyForSure fee - agent markup - other.
+// NET REFUND CREDIT = gross - airline fee - FlyForSure fee - agent markup
+// - processing fee - other deductions +/- approved adjustment. Never below
+// zero — anything owed on top must be a separate charge, not a negative
+// refund (spec §33).
 export function netRefundCredit(refund = {}) {
   if (refund.net_refund_credit !== undefined && refund.net_refund_credit !== null && refund.net_refund_credit !== '') {
     return numeric(refund.net_refund_credit);
@@ -185,8 +246,45 @@ export function netRefundCredit(refund = {}) {
     - numeric(refund.airline_cancellation_fee ?? refund.airline_penalty)
     - numeric(refund.flyforsure_cancellation_fee ?? refund.service_fee)
     - numeric(refund.agent_cancellation_markup)
-    - numeric(refund.other_deductions),
+    - numeric(refund.processing_fee)
+    - numeric(refund.other_deductions)
+    + numeric(refund.adjustment_amount),
   ));
+}
+
+// TOTAL AMENDMENT FINANCIAL IMPACT = fare difference (may be negative)
+// + supplier change fee + FlyForSure service fee + agent markup
+// + tax difference + other charges. Positive = counterparty owes more,
+// negative = amendment credit.
+export function amendmentTotalImpact(amendment = {}) {
+  return round2(
+    numeric(amendment.fare_difference)
+    + numeric(amendment.supplier_change_fee)
+    + numeric(amendment.flyforsure_service_fee)
+    + numeric(amendment.agent_markup)
+    + numeric(amendment.tax_difference)
+    + numeric(amendment.other_charges),
+  );
+}
+
+// Financial posting happens at CONFIRMED (spec §6); COMPLETED keeps it posted.
+export function isAmendmentPosted(amendment = {}) {
+  return ['CONFIRMED', 'COMPLETED'].includes(amendment.status);
+}
+
+// Cancellation financial estimate (spec §10). Estimates only — no posting.
+export function cancellationEstimate(cancellation = {}) {
+  const deductions = round2(
+    numeric(cancellation.estimated_airline_fee)
+    + numeric(cancellation.estimated_flyforsure_fee)
+    + numeric(cancellation.estimated_agent_markup)
+    + numeric(cancellation.estimated_processing_fee)
+    + numeric(cancellation.estimated_other_deduction),
+  );
+  return {
+    deductions,
+    expectedRefundCredit: Math.max(0, round2(numeric(cancellation.estimated_gross_refund) - deductions)),
+  };
 }
 
 export function nextRefundNumber(refunds = []) {
@@ -203,6 +301,22 @@ export function nextAllocationNumber(allocations = []) {
     return match ? Math.max(max, Number(match[1])) : max;
   }, 0);
   return `ALC-${String(highest + 1).padStart(6, '0')}`;
+}
+
+export function nextAmendmentNumber(amendments = []) {
+  const highest = amendments.reduce((max, amendment) => {
+    const match = String(amendment.amendment_number || '').match(/^AMD-(\d+)$/);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 0);
+  return `AMD-${String(highest + 1).padStart(6, '0')}`;
+}
+
+export function nextCancellationNumber(cancellations = []) {
+  const highest = cancellations.reduce((max, cancellation) => {
+    const match = String(cancellation.cancellation_number || '').match(/^CAN-(\d+)$/);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 0);
+  return `CAN-${String(highest + 1).padStart(6, '0')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +385,10 @@ export function supplierOpenItemId(booking = {}, supplierName = '') {
   return `sticket:${booking.id}:${token(supplierName)}`;
 }
 
+export function amendmentOpenItemId(amendment = {}) {
+  return `amendment:${amendment.id}`;
+}
+
 function newAccount(party) {
   return {
     key: party.key,
@@ -279,6 +397,7 @@ function newAccount(party) {
     bookings: [],
     payments: [],
     refunds: [],
+    amendments: [], // [{ amendment, booking }]
     supplierCosts: [], // supplier accounts: [{ booking, name, amount }]
   };
 }
@@ -310,9 +429,10 @@ function postedPayoutsForRefund(refund, payments) {
   ));
 }
 
-export function buildFinanceModel({ bookings = [], payments = [], refunds = [], allocations = [] } = {}) {
+export function buildFinanceModel({ bookings = [], payments = [], refunds = [], allocations = [], amendments = [] } = {}) {
   const bookingsByPnr = groupBookingsByPnr(bookings);
   const bookingsByTicket = new Map(bookings.filter((b) => b.ticket_no).map((b) => [token(b.ticket_no), b]));
+  const bookingsById = new Map(bookings.map((b) => [String(b.id), b]));
   const accounts = new Map();
 
   bookings.forEach((booking) => {
@@ -345,14 +465,24 @@ export function buildFinanceModel({ bookings = [], payments = [], refunds = [], 
     }
   });
 
+  // Amendment cases land on the same receivable account as their booking.
+  amendments.forEach((amendment) => {
+    const booking = bookingsById.get(String(amendment.booking_id))
+      || (bookingsByPnr.get(normalizePnr(amendment.pnr)) || [])[0];
+    if (!booking) return;
+    ensureAccount(accounts, bookingCounterparty(booking)).amendments.push({ amendment, booking });
+  });
+
   const model = {
     accounts,
     bookingsByPnr,
     bookingsByTicket,
     payments,
     refunds,
+    amendments,
     paymentsById: new Map(payments.map((payment) => [String(payment.id), payment])),
     refundsById: new Map(refunds.map((refund) => [String(refund.id), refund])),
+    amendmentsById: new Map(amendments.map((amendment) => [String(amendment.id), amendment])),
     allocations: [],
     accountList: [],
   };
@@ -373,6 +503,10 @@ export function isAllocationEffective(allocation, model) {
   if (allocation.source_type === 'REFUND_CREDIT') {
     const refund = model.refundsById.get(String(allocation.source_id));
     return Boolean(refund) && isRefundCreditPosted(refund);
+  }
+  if (allocation.source_type === 'AMENDMENT_CREDIT') {
+    const amendment = model.amendmentsById.get(String(allocation.source_id));
+    return Boolean(amendment) && isAmendmentPosted(amendment);
   }
   return true;
 }
@@ -474,7 +608,65 @@ export function getAccountOpenItems(account, model) {
       };
     });
 
-  return [...ticketItems, ...refundItems];
+  // Posted amendment cases: positive impact = receivable open item, negative
+  // impact = credit open item. A confirmed amendment with zero impact posts
+  // nothing (spec §6).
+  const amendmentItems = account.amendments
+    .filter(({ amendment }) => isAmendmentPosted(amendment) && amendmentTotalImpact(amendment) !== 0)
+    .map(({ amendment, booking }) => {
+      const total = amendmentTotalImpact(amendment);
+      const id = amendmentOpenItemId(amendment);
+      const issueDate = amendmentPostingDate(amendment);
+      const base = {
+        open_item_id: id,
+        amendment_id: amendment.id,
+        amendment_number: amendment.amendment_number || '',
+        booking_id: booking?.id || null,
+        pnr: normalizePnr(amendment.pnr || booking?.pnr),
+        ticket_no: amendment.ticket_no || booking?.ticket_no || '',
+        passenger_name: amendment.passenger_name || booking?.passenger_name || '',
+        issue_date: issueDate,
+        days_overdue: 0,
+      };
+      if (total > 0) {
+        const allocated = sumAmounts(allocationsForTarget(allocations, id));
+        const outstanding = Math.max(0, round2(total - allocated));
+        return {
+          ...base,
+          item_type: 'AMENDMENT_RECEIVABLE',
+          side: 'DEBIT',
+          due_date: issueDate,
+          original_amount: total,
+          payment_allocated: allocated,
+          credit_allocated: 0,
+          allocated_amount: allocated,
+          outstanding_amount: outstanding,
+          reconciliation_status: outstanding <= 0 ? 'FULLY_ALLOCATED' : allocated > 0 ? 'PARTIALLY_ALLOCATED' : 'OPEN',
+        };
+      }
+      const credit = round2(-total);
+      const used = sumAmounts(allocationsForSource(allocations, 'AMENDMENT_CREDIT', amendment.id));
+      const available = Math.max(0, round2(credit - used));
+      return {
+        ...base,
+        item_type: 'AMENDMENT_CREDIT',
+        side: 'CREDIT',
+        due_date: '',
+        original_amount: credit,
+        payment_allocated: 0,
+        credit_allocated: used,
+        allocated_amount: used,
+        outstanding_amount: available,
+        reconciliation_status: available <= 0 ? 'CLOSED' : available < credit ? 'PARTIALLY_ALLOCATED' : 'OPEN',
+      };
+    });
+
+  return [...ticketItems, ...refundItems, ...amendmentItems];
+}
+
+function amendmentPostingDate(amendment = {}) {
+  const stamp = amendment.confirmed_at || amendment.approved_at || amendment.updated_at || amendment.created_at;
+  return stamp ? String(stamp).slice(0, 10) : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +742,26 @@ export function getAccountLedger(account) {
         // outgoing payment. Both are debits on the receivable ledger.
         pushPaymentEntries(push, payment, isPayout ? 'REFUND_PAYOUT' : 'PAYMENT_SENT', 'DEBIT');
       }
+    });
+
+    // Confirmed amendment cases: positive impact debits the counterparty
+    // (AMENDMENT_CHARGE), negative impact credits it (AMENDMENT_CREDIT).
+    account.amendments.forEach(({ amendment, booking }) => {
+      if (!isAmendmentPosted(amendment)) return;
+      const total = amendmentTotalImpact(amendment);
+      if (total === 0) return;
+      push({
+        entry_type: total > 0 ? 'AMENDMENT_CHARGE' : 'AMENDMENT_CREDIT',
+        entry_date: amendmentPostingDate(amendment),
+        reference_type: 'AMENDMENT',
+        reference_id: amendment.id,
+        pnr: normalizePnr(amendment.pnr || booking?.pnr),
+        ticket_no: amendment.ticket_no || booking?.ticket_no || '',
+        description: `Amendment ${total > 0 ? 'charge' : 'credit'} ${amendment.amendment_number || ''} — ${String(amendment.amendment_type || '').replace(/_/g, ' ').toLowerCase()}`.trim(),
+        debit: total > 0 ? total : 0,
+        credit: total > 0 ? 0 : round2(-total),
+        posting_status: 'POSTED',
+      });
     });
 
     account.refunds.forEach(({ refund, booking }) => {
@@ -667,15 +879,32 @@ export function paymentAllocationSummary(payment, model) {
   };
 }
 
+// Bookings whose ticket receivables count as this refund's "original tickets":
+// every per-ticket refund line (spec §29), plus the case-level ticket_no.
+export function refundTargetBookings(refund = {}, model) {
+  const ticketNos = new Set();
+  (Array.isArray(refund.refund_lines) ? refund.refund_lines : []).forEach((line) => {
+    if (line.ticket_no) ticketNos.add(token(line.ticket_no));
+  });
+  if (refund.ticket_no) ticketNos.add(token(refund.ticket_no));
+  const bookings = [...ticketNos].map((t) => model.bookingsByTicket.get(t)).filter(Boolean);
+  if (!bookings.length) {
+    const fallback = (model.bookingsByPnr.get(normalizePnr(refund.pnr)) || [])[0];
+    if (fallback) bookings.push(fallback);
+  }
+  return bookings;
+}
+
 // AGENT AVAILABLE CREDIT = original credit - used vs original ticket
 // - used vs future tickets - payouts.
 export function refundCreditSummary(refund, model, bookingHint = null) {
   const credit = netRefundCredit(refund);
-  const booking = bookingHint || model.bookingsByTicket.get(token(refund.ticket_no)) || null;
-  const originalTargetId = booking ? ticketOpenItemId(booking) : null;
+  const targets = refundTargetBookings(refund, model);
+  if (bookingHint && !targets.some((b) => String(b.id) === String(bookingHint.id))) targets.push(bookingHint);
+  const originalTargetIds = new Set(targets.map((b) => ticketOpenItemId(b)));
   const sourceAllocations = allocationsForSource(model.allocations, 'REFUND_CREDIT', refund.id);
-  const usedOriginal = sumAmounts(sourceAllocations.filter((a) => a.target_id === originalTargetId));
-  const usedFuture = sumAmounts(sourceAllocations.filter((a) => a.target_id !== originalTargetId));
+  const usedOriginal = sumAmounts(sourceAllocations.filter((a) => originalTargetIds.has(a.target_id)));
+  const usedFuture = sumAmounts(sourceAllocations.filter((a) => !originalTargetIds.has(a.target_id)));
   let paidOut = round2(postedPayoutsForRefund(refund, model.payments).reduce((sum, p) => sum + numeric(p.amount_paid), 0));
   if (isLegacyRefund(refund) && refundCaseStatus(refund) === 'SETTLED') paidOut = credit;
   const available = Math.max(0, round2(credit - usedOriginal - usedFuture - paidOut));
@@ -697,13 +926,16 @@ export function refundCreditSummary(refund, model, bookingHint = null) {
 // (agents) or payout due (customers).
 export function refundSettlementPreview(refund, model) {
   const credit = netRefundCredit(refund);
-  const booking = model.bookingsByTicket.get(token(refund.ticket_no)) || null;
+  const bookings = refundTargetBookings(refund, model);
+  const booking = bookings[0] || null;
   let originalOutstanding = 0;
+  let openItems = [];
   if (booking) {
     const account = model.accounts.get(bookingCounterparty(booking).key);
     if (account) {
-      const item = getAccountOpenItems(account, model).find((i) => i.open_item_id === ticketOpenItemId(booking));
-      originalOutstanding = item ? item.outstanding_amount : 0;
+      const targetIds = new Set(bookings.map((b) => ticketOpenItemId(b)));
+      openItems = getAccountOpenItems(account, model).filter((item) => targetIds.has(item.open_item_id));
+      originalOutstanding = round2(openItems.reduce((sum, item) => sum + item.outstanding_amount, 0));
     }
   }
   const offset = Math.min(credit, originalOutstanding);
@@ -718,6 +950,8 @@ export function refundSettlementPreview(refund, model) {
     payout_due: partyType === 'AGENT' ? 0 : remaining,
     party_type: partyType,
     booking,
+    bookings,
+    open_items: openItems,
   };
 }
 
