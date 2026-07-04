@@ -54,6 +54,12 @@ const TIMELINE_DOT_COLORS = {
   COMMS: '#DBEAFE',
 };
 
+// Passport/document numbers are sensitive PII - only the last 2 characters are shown.
+const maskDocument = (value) => {
+  const str = String(value || '');
+  return str.length <= 2 ? str : '*'.repeat(str.length - 2) + str.slice(-2);
+};
+
 export default function BookingDetail() {
   const { invoiceNo } = useParams();
   const navigate = useNavigate();
@@ -219,7 +225,6 @@ export default function BookingDetail() {
     if (!Number.isFinite(minutes) || minutes <= 0) return '';
     return `${Math.floor(minutes / 60)}Hr ${minutes % 60}Min`;
   };
-
 
   const handleAddPayment = () => {
     const amount = Number(paymentForm.amount_paid);
@@ -731,19 +736,37 @@ export default function BookingDetail() {
                 <span style={{ fontSize: '11px', fontWeight: 400, color: 'var(--color-text-secondary)' }}> · {group.length} passengers</span>
               )}
             </h3>
-            {group.map((pax, idx) => (
-              <div key={pax.id || idx} style={{ padding: '7px 0', borderTop: '0.5px solid var(--color-border-tertiary)' }}>
-                <p style={{ margin: '0', fontSize: '13px' }}>
-                  {pax.passenger_name || 'N/A'} <span style={{ fontSize: '11px', color: 'var(--color-text-secondary)' }}>· {pax.pax_type || 'ADT'}</span>
-                </p>
-                <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
-                  <span style={{ fontFamily: 'monospace' }}>{pax.ticket_no || '-'}</span>
-                  {groupPnrs.length > 1 && pax.pnr && <span> · PNR {pax.pnr}</span>}
-                  <span> · {pax.check_in_baggage || '23'}kg</span>
-                  {pax.mobile && <span> · {pax.mobile}</span>}
-                </p>
-              </div>
-            ))}
+            {group.map((pax, idx) => {
+              const passportNo = pax.passport_no || pax.doc_number;
+              const passportExpiry = pax.passport_expiry_date || pax.doc_expiry;
+              const meal = pax.meal || pax.meal_code;
+              const travelDetails = [
+                `DOB ${pax.dob || '-'}`,
+                `Nationality ${pax.nationality || '-'}`,
+                `Passport ${passportNo ? maskDocument(passportNo) : '-'}`,
+                `Issued ${pax.doc_country || '-'}`,
+                `Exp ${passportExpiry || '-'}`,
+                `Meal ${meal || '-'}`,
+              ];
+              if (pax.wchr && String(pax.wchr).toLowerCase() === 'yes') travelDetails.push('WCHR');
+
+              return (
+                <div key={pax.id || idx} style={{ padding: '7px 0', borderTop: '0.5px solid var(--color-border-tertiary)' }}>
+                  <p style={{ margin: '0', fontSize: '13px' }}>
+                    {pax.passenger_name || 'N/A'} <span style={{ fontSize: '11px', color: 'var(--color-text-secondary)' }}>· {pax.pax_type || 'ADT'}</span>
+                  </p>
+                  <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
+                    <span style={{ fontFamily: 'monospace' }}>{pax.ticket_no || '-'}</span>
+                    {groupPnrs.length > 1 && pax.pnr && <span> · PNR {pax.pnr}</span>}
+                    <span> · {pax.check_in_baggage || '23'}kg</span>
+                    {pax.mobile && <span> · {pax.mobile}</span>}
+                  </p>
+                  <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
+                    {travelDetails.join('  ·  ')}
+                  </p>
+                </div>
+              );
+            })}
           </div>
 
           {/* Fare & Ledger */}
