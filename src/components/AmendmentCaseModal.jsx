@@ -28,13 +28,50 @@ const FINANCIAL_FIELDS = [
   ['other_charges', 'Other Charges'],
 ];
 
+const TYPE_DISABLED = {
+  DATE_CHANGE: { passengers: true, tickets: true, segments: false },
+  OUTBOUND_DATE_CHANGE: { passengers: true, tickets: true, segments: false },
+  INBOUND_DATE_CHANGE: { passengers: true, tickets: true, segments: false },
+  BOTH_DATE_CHANGE: { passengers: true, tickets: true, segments: false },
+  ROUTE_CHANGE: { passengers: true, tickets: true, segments: false },
+  NAME_CORRECTION: { passengers: false, tickets: true, segments: true },
+  NAME_CHANGE: { passengers: false, tickets: true, segments: true },
+  CABIN_CHANGE: { passengers: true, tickets: false, segments: true },
+  BAGGAGE_CHANGE: { passengers: true, tickets: false, segments: true },
+  OTHER: { passengers: true, tickets: false, segments: true },
+};
+
+const emptyAffected = () => ({ passengers: [], tickets: [], segments: [] });
+
+const existingAffected = (existing) => ({
+  passengers: existing?.affected_passengers?.map((p) => String(p.id)) || [],
+  tickets: existing?.affected_tickets?.map((t) => String(t.id)) || [],
+  segments: existing?.affected_segments?.map((s) => String(s.id)) || [],
+});
+
+const activeAffectedKey = (type) => {
+  const disabled = TYPE_DISABLED[type] || TYPE_DISABLED.OTHER;
+  if (!disabled.passengers) return 'passengers';
+  if (!disabled.tickets) return 'tickets';
+  return 'segments';
+};
+
+const affectedForType = (type, existing = null) => {
+  const stored = existingAffected(existing);
+  const next = emptyAffected();
+  const key = activeAffectedKey(type);
+  next[key] = stored[key];
+  return next;
+};
+
 export default function AmendmentCaseModal({ user, booking, group, amendments, existing = null, onClose, onSaved }) {
   const options = useMemo(() => bookingGroupOptions(group), [group]);
   const posted = existing ? isAmendmentPosted(existing) : false;
   const closed = existing ? ['REJECTED', 'CANCELLED', 'COMPLETED'].includes(existing.status) : false;
+  const initialAmendmentType = existing?.amendment_type || 'DATE_CHANGE';
 
   const [form, setForm] = useState(() => existing ? {
-    amendment_type: existing.amendment_type || 'DATE_CHANGE',
+    amendment_type: initialAmendmentType,
     new_outbound_date: existing.requested_changes?.new_outbound_date || '',
     new_inbound_date: existing.requested_changes?.new_inbound_date || '',
     new_passenger_name: existing.requested_changes?.new_passenger_name || '',
@@ -66,11 +103,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
     internal_notes: '',
     evidence_document: null,
   });
-  const [affected, setAffected] = useState(() => ({
-    passengers: existing?.affected_passengers?.map((p) => p.id) || [],
-    tickets: existing?.affected_tickets?.map((t) => t.id) || [],
-    segments: existing?.affected_segments?.map((s) => s.id) || [],
-  }));
+  const [affected, setAffected] = useState(() => affectedForType(initialAmendmentType, existing));
   const [error, setError] = useState('');
 
   const update = (key, value) => { setForm((c) => ({ ...c, [key]: value })); setError(''); };
@@ -78,11 +111,25 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
   const total = amendmentTotalImpact(form);
   const party = bookingCounterparty(booking);
   const actor = user?.name || user?.email || '';
+  const financialsLocked = posted || closed;
+  const pickerDisabled = financialsLocked ? true : (TYPE_DISABLED[form.amendment_type] || TYPE_DISABLED.OTHER);
+  const activeKey = activeAffectedKey(form.amendment_type);
+  const pickerRequired = {
+    passengers: activeKey === 'passengers',
+    tickets: activeKey === 'tickets',
+    segments: activeKey === 'segments',
+  };
+
+  const setAmendmentType = (type) => {
+    update('amendment_type', type);
+    setAffected(affectedForType(type, existing));
+  };
 
   const validate = (needsFinancials) => {
     if (!form.amendment_type) return 'Amendment type is required.';
-    if (!affected.passengers.length) return 'Select at least one affected passenger.';
-    if (options.tickets.length && !affected.tickets.length) return 'Select at least one affected ticket.';
+    if (activeKey === 'passengers' && !affected.passengers.length) return 'Select at least one affected passenger.';
+    if (activeKey === 'tickets' && !affected.tickets.length) return 'Select at least one affected ticket.';
+    if (activeKey === 'segments' && !affected.segments.length) return 'Select at least one affected segment.';
     if (!form.remarks.trim()) return 'Amendment remarks are required.';
     if (needsFinancials) {
       const fees = ['supplier_change_fee', 'flyforsure_service_fee', 'agent_markup', 'tax_difference', 'other_charges'];
@@ -157,7 +204,6 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
   };
 
   const status = existing?.status || 'DRAFT';
-  const financialsLocked = posted || closed;
 
   return (
     <div className="modal-backdrop allocation-backdrop">
@@ -179,7 +225,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
         <div className="modal-form-grid">
           <label>
             <span>Amendment Type *</span>
-            <select value={form.amendment_type} disabled={financialsLocked} onChange={(e) => update('amendment_type', e.target.value)}>
+            <select value={form.amendment_type} disabled={financialsLocked} onChange={(e) => setAmendmentType(e.target.value)}>
               {AMENDMENT_TYPES.map((type) => <option key={type} value={type}>{type.replace(/_/g, ' ')}</option>)}
             </select>
           </label>
@@ -188,8 +234,8 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
           options={options}
           value={affected}
           onChange={(next) => { setAffected(next); setError(''); }}
-          disabled={financialsLocked}
-          required={{ passengers: true, tickets: options.tickets.length > 0, segments: false }}
+          disabled={pickerDisabled}
+          required={pickerRequired}
         />
 
         <h4 className="servicing-section-title">Requested change</h4>

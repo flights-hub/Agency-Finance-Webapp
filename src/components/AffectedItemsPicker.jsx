@@ -85,7 +85,7 @@ function ChipGroup({ label, options, value, onChange, disabled, required }) {
         {options.map((option) => {
           const selected = set.has(option.id);
           return (
-            <label key={option.id} className={`check-chip${selected ? ' selected' : ''}`}>
+            <label key={option.id} className={`check-chip${selected ? ' selected' : ''}${disabled ? ' disabled' : ''}`}>
               <input
                 type="checkbox"
                 checked={selected}
@@ -104,6 +104,7 @@ function ChipGroup({ label, options, value, onChange, disabled, required }) {
 
 export default function AffectedItemsPicker({ options, value, onChange, disabled = false, show = {}, required = {} }) {
   const update = (key) => (ids) => onChange({ ...value, [key]: ids });
+  const disabledFor = (key) => (disabled && typeof disabled === 'object' ? Boolean(disabled[key]) : disabled);
   return (
     <div className="affected-picker">
       {show.passengers !== false && (
@@ -112,7 +113,7 @@ export default function AffectedItemsPicker({ options, value, onChange, disabled
           options={options.passengers}
           value={value.passengers || []}
           onChange={update('passengers')}
-          disabled={disabled}
+          disabled={disabledFor('passengers')}
           required={required.passengers}
         />
       )}
@@ -122,7 +123,7 @@ export default function AffectedItemsPicker({ options, value, onChange, disabled
           options={options.tickets}
           value={value.tickets || []}
           onChange={update('tickets')}
-          disabled={disabled}
+          disabled={disabledFor('tickets')}
           required={required.tickets}
         />
       )}
@@ -132,7 +133,7 @@ export default function AffectedItemsPicker({ options, value, onChange, disabled
           options={options.segments}
           value={value.segments || []}
           onChange={update('segments')}
-          disabled={disabled}
+          disabled={disabledFor('segments')}
           required={required.segments}
         />
       )}

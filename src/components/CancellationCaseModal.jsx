@@ -28,14 +28,47 @@ const ESTIMATE_FIELDS = [
   ['estimated_other_deduction', 'Other Deduction'],
 ];
 
+const SCOPE_DISABLED = {
+  ENTIRE_BOOKING: { passengers: true, tickets: true, segments: true },
+  SELECTED_PASSENGERS: { passengers: false, tickets: true, segments: true },
+  SELECTED_TICKETS: { passengers: true, tickets: false, segments: true },
+  SELECTED_SEGMENTS: { passengers: true, tickets: true, segments: false },
+};
+
+const emptyAffected = () => ({ passengers: [], tickets: [], segments: [] });
+
+const allAffected = (options) => ({
+  passengers: options.passengers.map((p) => p.id),
+  tickets: options.tickets.map((t) => t.id),
+  segments: options.segments.map((s) => s.id),
+});
+
+const existingAffected = (existing) => ({
+  passengers: existing?.affected_passengers?.map((p) => String(p.id)) || [],
+  tickets: existing?.affected_tickets?.map((t) => String(t.id)) || [],
+  segments: existing?.affected_segments?.map((s) => String(s.id)) || [],
+});
+
+const affectedForScope = (scope, options, existing = null) => {
+  if (scope === 'ENTIRE_BOOKING') return allAffected(options);
+
+  const stored = existingAffected(existing);
+  const next = emptyAffected();
+  if (scope === 'SELECTED_PASSENGERS') next.passengers = stored.passengers;
+  if (scope === 'SELECTED_TICKETS') next.tickets = stored.tickets;
+  if (scope === 'SELECTED_SEGMENTS') next.segments = stored.segments;
+  return next;
+};
+
 export default function CancellationCaseModal({
   user, booking, group, cancellations, refunds, initialScope = 'ENTIRE_BOOKING', existing = null, onClose, onSaved,
 }) {
   const options = useMemo(() => bookingGroupOptions(group), [group]);
   const locked = existing ? ['CONFIRMED', 'COMPLETED', 'REVERSED', 'REJECTED'].includes(existing.status) : false;
+  const initialCancellationScope = existing?.cancellation_scope || initialScope;
 
   const [form, setForm] = useState(() => ({
-    cancellation_scope: existing?.cancellation_scope || initialScope,
+    cancellation_scope: initialCancellationScope,
     cancellation_category: existing?.cancellation_category || 'VOLUNTARY',
     cancellation_reason: existing?.cancellation_reason || '',
     supplier_reference: existing?.supplier_reference || '',
@@ -50,11 +83,7 @@ export default function CancellationCaseModal({
     estimated_other_deduction: existing?.estimated_other_deduction ?? '',
     other_deduction_reason: existing?.other_deduction_reason || '',
   }));
-  const [affected, setAffected] = useState(() => ({
-    passengers: existing?.affected_passengers?.map((p) => p.id) || (initialScope === 'ENTIRE_BOOKING' ? options.passengers.map((p) => p.id) : []),
-    tickets: existing?.affected_tickets?.map((t) => t.id) || (initialScope === 'ENTIRE_BOOKING' ? options.tickets.map((t) => t.id) : []),
-    segments: existing?.affected_segments?.map((s) => s.id) || (initialScope === 'ENTIRE_BOOKING' ? options.segments.map((s) => s.id) : []),
-  }));
+  const [affected, setAffected] = useState(() => affectedForScope(initialCancellationScope, options, existing));
   const [createRefundCase, setCreateRefundCase] = useState(true);
   const [error, setError] = useState('');
 
@@ -63,24 +92,31 @@ export default function CancellationCaseModal({
   const estimate = cancellationEstimate(form);
   const party = bookingCounterparty(booking);
   const actor = user?.name || user?.email || '';
+  const pickerDisabled = locked ? true : (SCOPE_DISABLED[form.cancellation_scope] || SCOPE_DISABLED.ENTIRE_BOOKING);
+  const pickerRequired = {
+    passengers: form.cancellation_scope === 'SELECTED_PASSENGERS',
+    tickets: form.cancellation_scope === 'SELECTED_TICKETS',
+    segments: form.cancellation_scope === 'SELECTED_SEGMENTS',
+  };
 
   const setScope = (scope) => {
     update('cancellation_scope', scope);
-    if (scope === 'ENTIRE_BOOKING') {
-      setAffected({
-        passengers: options.passengers.map((p) => p.id),
-        tickets: options.tickets.map((t) => t.id),
-        segments: options.segments.map((s) => s.id),
-      });
-    }
+    setAffected(affectedForScope(scope, options, existing));
   };
 
   const validate = () => {
     if (!form.cancellation_scope) return 'Cancellation scope is required.';
     if (!form.cancellation_category) return 'Cancellation category is required.';
     if (!form.cancellation_reason.trim()) return 'Cancellation reason is required.';
-    if (!affected.passengers.length) return 'Select at least one affected passenger.';
-    if (options.tickets.length && !affected.tickets.length) return 'Select at least one affected ticket.';
+    if (form.cancellation_scope === 'SELECTED_PASSENGERS' && !affected.passengers.length) {
+      return 'Select at least one affected passenger.';
+    }
+    if (form.cancellation_scope === 'SELECTED_TICKETS' && !affected.tickets.length) {
+      return 'Select at least one affected ticket.';
+    }
+    if (form.cancellation_scope === 'SELECTED_SEGMENTS' && !affected.segments.length) {
+      return 'Select at least one affected segment.';
+    }
     if (ESTIMATE_FIELDS.some(([key]) => numeric(form[key]) < 0)) return 'Estimate values cannot be negative.';
     return '';
   };
@@ -229,8 +265,8 @@ export default function CancellationCaseModal({
           options={options}
           value={affected}
           onChange={(next) => { setAffected(next); setError(''); }}
-          disabled={locked || form.cancellation_scope === 'ENTIRE_BOOKING'}
-          required={{ passengers: true, tickets: options.tickets.length > 0, segments: form.cancellation_scope === 'SELECTED_SEGMENTS' }}
+          disabled={pickerDisabled}
+          required={pickerRequired}
         />
 
         <h4 className="servicing-section-title">Cancellation details</h4>

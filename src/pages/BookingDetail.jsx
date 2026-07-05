@@ -91,6 +91,8 @@ const maskDocument = (value) => {
   return str.length <= 2 ? str : '*'.repeat(str.length - 2) + str.slice(-2);
 };
 
+const createTicketNumber = () => `TKT-${Date.now()}`;
+
 export default function BookingDetail() {
   const { invoiceNo } = useParams();
   const navigate = useNavigate();
@@ -322,7 +324,7 @@ export default function BookingDetail() {
     saveBooking({
       ...booking,
       ticket_status: 'TICKETED',
-      ticket_no: booking.ticket_no || `TKT-${Date.now()}`,
+      ticket_no: booking.ticket_no || createTicketNumber(),
       updated_at: new Date().toISOString(),
     });
     window.location.reload();
@@ -376,161 +378,84 @@ export default function BookingDetail() {
         <span style={{ fontSize: '13px', fontWeight: '500' }}>{invoiceNo}</span>
       </div>
 
-      {/* Pinned Header */}
-      <div style={{
-        background: 'var(--color-background-primary)',
-        border: '1px solid var(--color-border-secondary)',
-        borderRadius: 'var(--border-radius-lg)',
-        padding: '12px 15px',
-        marginBottom: '12px'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '15px', fontWeight: '500' }}>
+      {/* Booking Command Bar */}
+      <div className="booking-command-bar">
+        <div className="booking-identity-cluster">
+          <span className="booking-pnr-chip">
             PNR {booking.pnr || '-'}
             {groupPnrs.length > 1 && (
-              <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--color-text-secondary)' }}> +{groupPnrs.length - 1} more</span>
+              <span>+{groupPnrs.length - 1} more</span>
             )}
           </span>
-          <span style={{
-            fontSize: '12px',
-            padding: '3px 10px',
-            borderRadius: '12px',
-            background: statusColor.bg,
-            color: statusColor.text
-          }}>
+          <span className="booking-status-pill" style={{ background: statusColor.bg, color: statusColor.text }}>
             {booking.ticket_status || 'DRAFT'}
           </span>
-          <span style={{
-            fontSize: '12px',
-            padding: '3px 10px',
-            borderRadius: '12px',
-            background: '#EEEDFE',
-            color: '#3C3489'
-          }}>
+          <span className="booking-status-pill booking-source-pill">
             {booking.source || 'GDS'} · {booking.manual_entry ? 'manual' : 'api'}
           </span>
-          <span style={{
-            fontSize: '12px',
-            padding: '3px 10px',
-            borderRadius: '12px',
-            background: balance > 0 ? '#FAEEDA' : '#DBEAFE',
-            color: balance > 0 ? '#633806' : '#1E40AF'
-          }}>
-            Balance {formatCurrency(balance)}
-          </span>
-          <span style={{ flex: 1 }}></span>
-          <div style={{ position: 'relative' }}>
-            <button
-              className="btn"
-              onClick={() => setShowPrintMenu(!showPrintMenu)}
-              style={{ fontSize: '12px' }}>
-              <Printer size={15} style={{ marginRight: '4px' }} />
-              Print <ChevronDown size={12} />
-            </button>
-            {showPrintMenu && (
-              <div style={{
-                position: 'absolute',
-                top: '100%',
-                right: 0,
-                background: 'var(--color-background-primary)',
-                border: '1px solid var(--color-border-secondary)',
-                borderRadius: 'var(--border-radius-md)',
-                minWidth: '180px',
-                zIndex: 10,
-                marginTop: '4px',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-              }}>
-                {PRINT_MENU_ITEMS.map(item => (
-                  <button
-                    key={item.id}
-                    onClick={() => handlePrint(item.id)}
-                    style={{
-                      display: 'block',
-                      width: '100%',
-                      textAlign: 'left',
-                      padding: '8px 12px',
-                      border: 'none',
-                      background: 'none',
-                      cursor: 'pointer',
-                      fontSize: '12px',
-                      borderBottom: '0.5px solid var(--color-border-tertiary)',
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            )}
+        </div>
+
+        <div className="booking-finance-strip" aria-label="Booking finance summary">
+          <div className="booking-finance-cell">
+            <span>Total</span>
+            <strong>{formatCurrency(total)}</strong>
+          </div>
+          <div className="booking-finance-cell">
+            <span>Paid</span>
+            <strong className="booking-paid-value">{formatCurrency(paid)}</strong>
+          </div>
+          <div className={`booking-finance-cell ${balance > 0 ? 'is-due' : 'is-clear'}`}>
+            <span>{balance > 0 ? 'Balance due' : 'Balance'}</span>
+            <strong>{formatCurrency(balance)}</strong>
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: '7px', marginTop: '10px', flexWrap: 'wrap' }}>
+        <div className="booking-command-actions">
           {booking.ticket_status === 'DRAFT' && (
             <button
-              className="btn btn-primary"
+              className="btn btn-primary booking-command-btn"
               onClick={handleHoldBooking}
-              style={{ fontSize: '12px' }}>
-              <FileText size={14} style={{ marginRight: '3px' }} />
+            >
+              <FileText size={14} />
               Hold booking
             </button>
           )}
           {canIssueTicket && (
             <button
-              className="btn btn-primary"
+              className="btn btn-primary booking-command-btn"
               onClick={handleIssueTicket}
-              style={{ fontSize: '12px' }}>
-              <FileText size={14} style={{ marginRight: '3px' }} />
+            >
+              <FileText size={14} />
               Issue ticket
             </button>
           )}
           {canVoid && (
             <button
-              className="btn btn-primary"
+              className="btn btn-primary booking-command-btn"
               onClick={() => setShowVoidModal(true)}
-              style={{ fontSize: '12px' }}>
-              <FileText size={14} style={{ marginRight: '3px' }} />
+            >
+              <FileText size={14} />
               Void
             </button>
           )}
           {canCancel && (
-            <div style={{ position: 'relative' }}>
+            <div className="booking-menu-anchor">
               <button
-                className="btn"
+                className="btn booking-command-btn"
                 onClick={() => setShowCancelMenu(!showCancelMenu)}
-                style={{ fontSize: '12px' }}>
-                <FileText size={14} style={{ marginRight: '3px' }} />
+              >
+                <FileText size={14} />
                 Cancel <ChevronDown size={12} />
               </button>
               {showCancelMenu && (
-                <div style={{
-                  position: 'absolute',
-                  top: '100%',
-                  left: 0,
-                  background: 'var(--color-background-primary)',
-                  border: '1px solid var(--color-border-secondary)',
-                  borderRadius: 'var(--border-radius-md)',
-                  minWidth: '180px',
-                  zIndex: 10,
-                  marginTop: '4px',
-                  boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-                }}>
+                <div className="booking-dropdown-menu">
                   {CANCELLATION_SCOPES.map(([value, label]) => (
                     <button
                       key={value}
+                      className="booking-dropdown-item"
                       onClick={() => {
                         setShowCancelMenu(false);
                         setCancelModal({ scope: value });
-                      }}
-                      style={{
-                        display: 'block',
-                        width: '100%',
-                        textAlign: 'left',
-                        padding: '8px 12px',
-                        border: 'none',
-                        background: 'none',
-                        cursor: 'pointer',
-                        fontSize: '12px',
-                        borderBottom: '0.5px solid var(--color-border-tertiary)',
                       }}
                     >
                       {label}
@@ -542,76 +467,52 @@ export default function BookingDetail() {
           )}
           {canAmend && (
             <button
-              className="btn"
+              className="btn booking-command-btn"
               onClick={() => setAmendModal({})}
-              style={{ fontSize: '12px' }}>
-              <FileText size={14} style={{ marginRight: '3px' }} />
+            >
+              <FileText size={14} />
               Amend
             </button>
           )}
           {canRefund && (
             <button
-              className="btn"
+              className="btn booking-command-btn"
               onClick={() => setShowRefundModal(true)}
-              style={{ fontSize: '12px' }}>
-              <FileText size={14} style={{ marginRight: '3px' }} />
+            >
+              <FileText size={14} />
               Create Refund Case
             </button>
           )}
+          <button
+            className="btn btn-primary booking-command-btn"
+            onClick={() => setShowPaymentModal(true)}
+          >
+            <Plus size={14} />
+            Add payment
+          </button>
+          <div className="booking-menu-anchor">
+            <button
+              className="btn booking-command-btn"
+              onClick={() => setShowPrintMenu(!showPrintMenu)}
+            >
+              <Printer size={15} />
+              Print <ChevronDown size={12} />
+            </button>
+            {showPrintMenu && (
+              <div className="booking-dropdown-menu align-right">
+                {PRINT_MENU_ITEMS.map(item => (
+                  <button
+                    key={item.id}
+                    className="booking-dropdown-item"
+                    onClick={() => handlePrint(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-
-      {/* Payment Band */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '8px',
-        marginBottom: '12px',
-        flexWrap: 'wrap'
-      }}>
-        <div style={{
-          flex: 1,
-          minWidth: '96px',
-          background: 'var(--color-background-primary)',
-          border: '0.5px solid var(--color-border-tertiary)',
-          borderRadius: 'var(--border-radius-md)',
-          padding: '9px 12px'
-        }}>
-          <p style={{ margin: '0 0 2px', fontSize: '11px', color: 'var(--color-text-secondary)' }}>Total</p>
-          <p style={{ margin: '0', fontSize: '17px', fontWeight: '500' }}>{formatCurrency(total)}</p>
-        </div>
-
-        <div style={{
-          flex: 1,
-          minWidth: '96px',
-          background: 'var(--color-background-primary)',
-          border: '0.5px solid var(--color-border-tertiary)',
-          borderRadius: 'var(--border-radius-md)',
-          padding: '9px 12px'
-        }}>
-          <p style={{ margin: '0 0 2px', fontSize: '11px', color: 'var(--color-text-secondary)' }}>Paid</p>
-          <p style={{ margin: '0', fontSize: '17px', fontWeight: '500', color: '#0F6E56' }}>{formatCurrency(paid)}</p>
-        </div>
-
-        <div style={{
-          flex: 1,
-          minWidth: '96px',
-          background: '#FAEEDA',
-          borderRadius: 'var(--border-radius-md)',
-          padding: '9px 12px'
-        }}>
-          <p style={{ margin: '0 0 2px', fontSize: '11px', color: '#854F0B' }}>Balance due</p>
-          <p style={{ margin: '0', fontSize: '17px', fontWeight: '500', color: '#633806' }}>{formatCurrency(balance)}</p>
-        </div>
-
-        <button
-          className="btn btn-primary"
-          onClick={() => setShowPaymentModal(true)}
-          style={{ fontSize: '12px', alignSelf: 'center' }}
-        >
-          <Plus size={14} style={{ marginRight: '3px' }} />
-          Add payment
-        </button>
       </div>
 
       {/* Main Content Grid */}
