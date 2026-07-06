@@ -163,13 +163,22 @@ export function accountId(type, name) {
   return `${type}:${token(name)}`;
 }
 
-// Receivable-side counterparty of a booking row. Bookings created by an agent
-// belong to that agent's account; direct bookings belong to the bill-to /
-// passenger customer account.
+// Receivable-side counterparty of a booking row. The bill-to fields are the
+// commercial counterparty; booked_by/agent_issued_by are internal operators.
 export function bookingCounterparty(booking = {}) {
-  const agentName = booking.agent_id || booking.booked_by || '';
+  const billToType = String(booking.bill_to_type || '').toUpperCase();
+  const billToName = String(booking.bill_to_name || '').trim();
+
+  if (billToType === 'AGENT' && billToName) {
+    return { type: 'AGENT', name: billToName, key: accountId('AGENT', billToName) };
+  }
+  if (billToType === 'CUSTOMER' && billToName) {
+    return { type: 'CUSTOMER', name: billToName, key: accountId('CUSTOMER', billToName) };
+  }
+
+  const agentName = booking.agent_id || '';
   if (agentName) return { type: 'AGENT', name: String(agentName), key: accountId('AGENT', agentName) };
-  const name = booking.bill_to_name || booking.passenger_name || 'Walk-in customer';
+  const name = billToName || booking.passenger_name || 'Walk-in customer';
   return { type: 'CUSTOMER', name: String(name), key: accountId('CUSTOMER', name) };
 }
 

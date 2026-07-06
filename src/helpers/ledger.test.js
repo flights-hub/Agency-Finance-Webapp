@@ -5,6 +5,7 @@ import {
   allocationProblems,
   amendmentTotalImpact,
   balanceDisplay,
+  bookingCounterparty,
   cancellationEstimate,
   buildAutoAllocation,
   buildAllocationRecords,
@@ -25,6 +26,8 @@ function agentBooking({ fare = 800, pnr = 'ABC123', date = '2026-07-01', agent =
     id,
     pnr,
     booking_date: date,
+    bill_to_type: 'AGENT',
+    bill_to_name: agent,
     booked_by: agent,
     passenger_name: 'DALJEET KAUR',
     ticket_no: ticket || `055${String(ids).padStart(7, '0')}`,
@@ -54,6 +57,32 @@ function verifiedPayment({ amount, pnr = '', date = '2026-07-03', party = 'ABC T
 function account(model, type, name) {
   return model.accountList.find((entry) => entry.key === accountId(type, name));
 }
+
+test('booking counterparty uses bill-to customer instead of internal operator', () => {
+  const party = bookingCounterparty({
+    passenger_name: 'RATTU/LOVEKIRAT',
+    bill_to_type: 'CUSTOMER',
+    bill_to_name: 'RATTU BALBIR',
+    booked_by: 'Admin',
+    agent_issued_by: 'Mohan',
+  });
+
+  assert.equal(party.type, 'CUSTOMER');
+  assert.equal(party.name, 'RATTU BALBIR');
+});
+
+test('booking counterparty uses bill-to agent instead of staff booked_by', () => {
+  const party = bookingCounterparty({
+    passenger_name: 'KAUR/RAJWINDER',
+    bill_to_type: 'AGENT',
+    bill_to_name: 'Mamatha',
+    booked_by: 'Baljeet',
+    agent_issued_by: 'Baljeet',
+  });
+
+  assert.equal(party.type, 'AGENT');
+  assert.equal(party.name, 'Mamatha');
+});
 
 // §10 — ticket issued: ledger entry + open item, control matched.
 test('ticket issue creates receivable ledger entry and open item', () => {
@@ -150,7 +179,12 @@ test('net refund credit subtracts every deduction', () => {
 
 // §18 — fully paid customer refund: credit posts, payout settles to zero.
 test('fully paid customer refund: credit then payout returns balance to zero', () => {
-  const booking = { ...agentBooking({ fare: 300, pnr: 'RF1' }), booked_by: '', bill_to_name: 'Daljeet Kaur' };
+  const booking = {
+    ...agentBooking({ fare: 300, pnr: 'RF1' }),
+    booked_by: '',
+    bill_to_type: 'CUSTOMER',
+    bill_to_name: 'Daljeet Kaur',
+  };
   const payment = verifiedPayment({ amount: 300, pnr: 'RF1', party: 'Daljeet Kaur', partyType: 'CUSTOMER' });
   const payAlloc = buildAllocationRecords({
     source: payment,
@@ -200,7 +234,12 @@ test('fully paid customer refund: credit then payout returns balance to zero', (
 
 // §19/§20 — refund credit offsets the unpaid part of the original ticket.
 test('partially paid cancellation: offset 200, payout due 80', () => {
-  const booking = { ...agentBooking({ fare: 300, pnr: 'RF2' }), booked_by: '', bill_to_name: 'Mario Rossi' };
+  const booking = {
+    ...agentBooking({ fare: 300, pnr: 'RF2' }),
+    booked_by: '',
+    bill_to_type: 'CUSTOMER',
+    bill_to_name: 'Mario Rossi',
+  };
   const payment = verifiedPayment({ amount: 100, pnr: 'RF2', party: 'Mario Rossi', partyType: 'CUSTOMER' });
   const payAlloc = buildAllocationRecords({
     source: payment,
