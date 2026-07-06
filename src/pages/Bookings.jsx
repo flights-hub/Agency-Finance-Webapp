@@ -351,16 +351,21 @@ const CRYPTIC_DRAFT_FIELDS = [
 ];
 
 const moneyKeys = new Set(['fare_sold', 'fare_issued', 'profit', 'total_paid', 'balance_due']);
-const durationInputKeys = new Set(['departure_city', 'arrival_city', 'departure_date', 'departure_time', 'arrival_time']);
+const durationInputKeys = new Set(['departure_city', 'arrival_city', 'departure_date', 'arrival_date', 'departure_time', 'arrival_time']);
 const AIRPORT_TIMEZONES = {
   ATQ: 'Asia/Kolkata',
+  BCN: 'Europe/Madrid',
+  BJL: 'Africa/Banjul',
   BOM: 'Asia/Kolkata',
   DEL: 'Asia/Kolkata',
+  DSS: 'Africa/Dakar',
   DXB: 'Asia/Dubai',
   FCO: 'Europe/Rome',
   JFK: 'America/New_York',
   LHR: 'Europe/London',
+  MCT: 'Asia/Muscat',
   MXP: 'Europe/Rome',
+  OTP: 'Europe/Bucharest',
   ROM: 'Europe/Rome',
   SIN: 'Asia/Singapore',
   VCE: 'Europe/Rome',
@@ -502,6 +507,7 @@ function addDays(date, days) {
 
 function calculateConnectionDuration(connection) {
   const departureDate = parseDateParts(connection.departure_date);
+  const arrivalDate = parseDateParts(connection.arrival_date) || departureDate;
   const departureTime = parseTimeParts(connection.departure_time);
   const arrivalTime = parseTimeParts(connection.arrival_time);
   const departureCode = parseAirportCode(connection.departure_city);
@@ -511,6 +517,7 @@ function calculateConnectionDuration(connection) {
 
   if (
     !departureDate
+    || !arrivalDate
     || !departureTime
     || !arrivalTime
     || !departureZone
@@ -521,10 +528,10 @@ function calculateConnectionDuration(connection) {
   }
 
   const departureUtc = zonedDateTimeToUtc(departureDate, departureTime, departureZone);
-  let arrivalUtc = zonedDateTimeToUtc(departureDate, arrivalTime, arrivalZone);
+  let arrivalUtc = zonedDateTimeToUtc(arrivalDate, arrivalTime, arrivalZone);
 
   while (arrivalUtc <= departureUtc) {
-    arrivalUtc = zonedDateTimeToUtc(addDays(departureDate, 1), arrivalTime, arrivalZone);
+    arrivalUtc = zonedDateTimeToUtc(addDays(arrivalDate, 1), arrivalTime, arrivalZone);
   }
 
   const totalMinutes = Math.round((arrivalUtc - departureUtc) / 60000);

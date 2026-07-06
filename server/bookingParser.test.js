@@ -199,6 +199,304 @@ assert.deepEqual(
 
 console.log('bookingParser Emirates codeshare PDF checks passed');
 
+const omanAccelyaText = `
+Itinerary for Record Locator 26SJ6W Oman Indirect Record Locator KWAIHB
+Reservation Airline Flight # Departing Arriving Class Cabin Meals Airport Date & Time Airport Date & Time
+Oman Air 148 Rome Fiumicino Apt, IT Terminal:3 WED 14OCT 09:10 PM Muscat, OM THU 15OCT 05:45 AM T
+MRS BEETA DEVI (ADT) FF# Not Set No Seat Assigned Checked Bag Allowance 20KG Carry On Bag Allowance 1PC
+MR SANJAY KUMAR (ADT) FF# Not Set No Seat Assigned
+MISS ANGELINA PARE SANJAY (ADT) FF# Not Set No Seat Assigned
+MISS STELLA SANJAY (CHD) FF# Not Set No Seat Assigned
+MISS ALICE SANJAY (CHD) FF# Not Set No Seat Assigned
+MSTR GAVIST KUMAR (CHD) FF# Not Set No Seat Assigned
+Oman Air 245 Muscat, OM THU 15OCT 10:25 AM Delhi, IN Terminal:3 THU 15OCT 03:10 PM T
+MRS BEETA DEVI (ADT) FF# Not Set No Seat Assigned Checked Bag Allowance 20KG Carry On Bag Allowance 1PC
+Oman Air 242 Delhi, IN Terminal:3 SUN 20DEC 09:50 AM Muscat, OM SUN 20DEC 12:00 PM E
+MRS BEETA DEVI (ADT) FF# Not Set No Seat Assigned Checked Bag Allowance 20KG Carry On Bag Allowance 1PC
+Oman Air 147 Muscat, OM SUN 20DEC 03:10 PM Rome Fiumicino Apt, IT Terminal:3 SUN 20DEC 07:30 PM E
+MRS BEETA DEVI (ADT) FF# Not Set No Seat Assigned Checked Bag Allowance 20KG Carry On Bag Allowance 1PC
+Invoice Information
+MRS BEETA DEVI (ADT) Document Number Issuance Date Electronic Ticket 9102201587590 06JUL26 Endorsements: VALIDONWY
+MR SANJAY KUMAR (ADT) Document Number Issuance Date Electronic Ticket 9102201587591 06JUL26 Endorsements: VALIDONWY
+MISS ANGELINA PARE SANJAY (ADT) Document Number Issuance Date Electronic Ticket 9102201587592 06JUL26 Endorsements: VALIDONWY
+MISS STELLA SANJAY (CHD) Document Number Issuance Date Electronic Ticket 9102201587593 06JUL26 Endorsements: VALIDONWY
+MISS ALICE SANJAY (CHD) Document Number Issuance Date Electronic Ticket 9102201587594 06JUL26 Endorsements: VALIDONWY
+MSTR GAVIST KUMAR (CHD) Document Number Issuance Date Electronic Ticket 9102201587595 06JUL26 Endorsements: VALIDONWY
+Data Protection Notice
+`;
+
+const omanAccelyaResult = parseBookingText({ text: omanAccelyaText, source: 'PDF' });
+const omanAccelyaSegments = omanAccelyaResult.raw.segments;
+
+assert.equal(omanAccelyaResult.raw.pnr, '26SJ6W');
+assert.deepEqual(
+  omanAccelyaResult.raw.passengers.map((passenger) => `${passenger.passenger_name}:${passenger.pax_type}:${passenger.ticket_no}`),
+  [
+    'DEVI/BEETA:ADT:9102201587590',
+    'KUMAR/SANJAY:ADT:9102201587591',
+    'SANJAY/ANGELINA PARE:ADT:9102201587592',
+    'SANJAY/STELLA:CHD:9102201587593',
+    'SANJAY/ALICE:CHD:9102201587594',
+    'KUMAR/GAVIST:CHD:9102201587595',
+  ],
+);
+assert.deepEqual(
+  omanAccelyaSegments.map((segment) => `${segment.airline}${segment.flight_number}:${segment.departure_city}-${segment.arrival_city}:${segment.departure_date}:${segment.departure_time}-${segment.arrival_time}`),
+  [
+    'WY148:FCO-MCT:2026-10-14:21:10-05:45',
+    'WY245:MCT-DEL:2026-10-15:10:25-15:10',
+    'WY242:DEL-MCT:2026-12-20:09:50-12:00',
+    'WY147:MCT-FCO:2026-12-20:15:10-19:30',
+  ],
+);
+assert.deepEqual(
+  omanAccelyaSegments.map((segment) => `${segment.departure_terminal || ''}-${segment.arrival_terminal || ''}:${segment.check_in_baggage}/${segment.cabin_baggage}`),
+  ['3-:20KG/1PC', '-3:20KG/1PC', '3-:20KG/1PC', '-3:20KG/1PC'],
+);
+assert.equal(omanAccelyaResult.raw.passengers[0].ticket_endorsement, 'VALIDONWY');
+assert.deepEqual(omanAccelyaResult.raw.passengers[0].baggage, [{ route: '', check_in_baggage: '20KG', cabin_baggage: '1PC' }]);
+assert.equal(omanAccelyaResult.drafts[0].sector, 'FCO-DEL');
+assert.equal(omanAccelyaResult.drafts[0].inbound_date, '2026-12-20');
+assert.equal(omanAccelyaResult.drafts[0].trip_type, 'ROUNDTRIP');
+
+console.log('bookingParser Oman Accelya PDF checks passed');
+
+const wizzAirOcrText = `
+7, FLIGHTS HOTEL CARRENTALS MANAGE ~~ TRANSFER PARKING
+MY BOOKING
+Flight confirmation code: BKFCWC
+[2] Passenger info
+Title First name Last name Route Cabin baggage Checked-in bag Seat
+FCO-0TP 1/40x30x20 0 -
+MR MARIAN BADIU
+OTP-FCO 1/40x30x20 J -
+FCO-0TP 1/40x30x20 0 -
+MS CONSTANTA  BADIU
+OTP-FCO 1/40x30x20 J -
+© Flight details
+GOING OUT Flight Number: W4 3142
+Departs from: Arrives to:
+Rome Fiumicino - Terminal 1 (FCO) => Bucharest H. Coanda (OTP)
+02/08/2026 09:40 02/08/2026 12:55
+COMING BACK Flight Number: W4 3145
+Departs from: Arrives to:
+Bucharest H. Coanda (OTP) => Rome Fiumicino - Terminal 1 (FCO)
+27/09/2026 20:20 27/09/2026 21:40
+`;
+
+const wizzAirResult = parseBookingText({ text: wizzAirOcrText, source: 'PDF' });
+const wizzAirSegments = wizzAirResult.raw.segments;
+
+assert.equal(wizzAirResult.raw.pnr, 'BKFCWC');
+assert.deepEqual(
+  wizzAirResult.raw.passengers.map((passenger) => `${passenger.passenger_name}:${passenger.ticket_no}`),
+  ['BADIU/MARIAN:BKFCWC', 'BADIU/CONSTANTA:BKFCWC'],
+);
+assert.deepEqual(
+  wizzAirSegments.map((segment) => `${segment.airline}${segment.flight_number}:${segment.departure_city}-${segment.arrival_city}:${segment.departure_date}:${segment.departure_time}-${segment.arrival_time}`),
+  [
+    'W43142:FCO-OTP:2026-08-02:09:40-12:55',
+    'W43145:OTP-FCO:2026-09-27:20:20-21:40',
+  ],
+);
+assert.deepEqual(
+  wizzAirSegments.map((segment) => `${segment.departure_terminal || ''}-${segment.arrival_terminal || ''}:${segment.check_in_baggage}/${segment.cabin_baggage}`),
+  ['1-:0/1/40X30X20', '-1:0/1/40X30X20'],
+);
+assert.deepEqual(
+  wizzAirResult.raw.passengers[0].baggage.map((item) => `${item.route}:${item.check_in_baggage}:${item.cabin_baggage}`),
+  ['FCO-OTP:0:1/40X30X20', 'OTP-FCO:0:1/40X30X20'],
+);
+assert.equal(wizzAirResult.drafts[0].sector, 'FCO-OTP');
+assert.equal(wizzAirResult.drafts[0].inbound_date, '2026-09-27');
+assert.equal(wizzAirResult.drafts[0].trip_type, 'ROUNDTRIP');
+
+console.log('bookingParser Wizz Air OCR PDF checks passed');
+
+const wizzAirLooseOcrText = `
+Flight confirmation code: BKFCWC
+MR MARIAN BADIU
+MS CONSTANTA BADIU
+2710912026
+GOING OUT Flight Number: WA 3142
+Departs from: Arrives to:
+Rome Fiumicino - Terminal 1 (FCO) Bucharest H. Coanda (OTP)
+02/08/2026 09:40 02/08/2026 12:55
+COMING BACK Flight Number: W4 3145
+Departs from: Arrives to:
+Bucharest H. Coanda (OTP) Rome Fiumicino - Terminal 1 (FCO)
+27/09/2026 20:20 27/09/2026 21:40
+`;
+
+const wizzAirLooseResult = parseBookingText({ text: wizzAirLooseOcrText, source: 'PDF' });
+
+assert.deepEqual(
+  wizzAirLooseResult.raw.segments.map((segment) => `${segment.airline}${segment.flight_number}:${segment.departure_city}-${segment.arrival_city}:${segment.departure_time}-${segment.arrival_time}`),
+  ['W43142:FCO-OTP:09:40-12:55', 'W43145:OTP-FCO:20:20-21:40'],
+);
+assert.deepEqual(
+  wizzAirLooseResult.raw.passengers.map((passenger) => passenger.ticket_no),
+  ['BKFCWC', 'BKFCWC'],
+);
+assert.equal(wizzAirLooseResult.drafts[0].sector, 'FCO-OTP');
+assert.equal(wizzAirLooseResult.drafts[0].trip_type, 'ROUNDTRIP');
+
+console.log('bookingParser Wizz Air loose OCR PDF checks passed');
+
+const vuelingItalianText = `
+Gestisci la tua prenotazione Fai il check - in Codice di prenotazione: QMWTWT
+Ciao Muhammad, prenotazione confermata.
+Martedi, 14 luglio 2026
+Barcellona (Spagna) Banjul (Gambia)
+BCN BJL
+15:30h 18:50h
+VY7574
+Passeggeri e servizi Passeggeri Andata Muhammad Minteh Posto -
+1 bagaglio a mano da riporre sotto il sedile Max 40x30x20 cm 1
+Bagaglio da 25 kg (in stiva) 1
+`;
+
+const vuelingItalianResult = parseBookingText({ text: vuelingItalianText, source: 'PDF' });
+const vuelingItalianSegments = vuelingItalianResult.raw.segments;
+
+assert.equal(vuelingItalianResult.raw.pnr, 'QMWTWT');
+assert.deepEqual(
+  vuelingItalianResult.raw.passengers.map((passenger) => `${passenger.passenger_name}:${passenger.ticket_no}`),
+  ['MINTEH/MUHAMMAD:QMWTWT'],
+);
+assert.deepEqual(
+  vuelingItalianSegments.map((segment) => `${segment.airline}${segment.flight_number}:${segment.departure_city}-${segment.arrival_city}:${segment.departure_date}:${segment.departure_time}-${segment.arrival_time}`),
+  ['VY7574:BCN-BJL:2026-07-14:15:30-18:50'],
+);
+assert.equal(vuelingItalianSegments[0].check_in_baggage, '1PC 25KG');
+assert.equal(vuelingItalianSegments[0].cabin_baggage, '1/40X30X20');
+assert.equal(vuelingItalianResult.drafts[0].sector, 'BCN-BJL');
+assert.equal(vuelingItalianResult.drafts[0].trip_type, 'ONE_WAY');
+
+console.log('bookingParser Vueling Italian PDF checks passed');
+
+const flyForSureBookingPdfText = `
+ASIF ALI Email: measif77@yahoo.co.in Phone: 3889057687 Address: 121 VIA CIAROLI Rome, Rome Italy, 000185
+Booking Time : 4 Jul 2026 | 01:16 PM
+Booking ID : FFS040726009
+Booking Status : Confirmed
+Flight Details: Rome (FCO) to Dakar (DSS)
+Booking ID: FFS040726009 Booking Status: Confirmed Booking Time: 4 Jul 2026 | 01:16 PM
+Ita airways 854 19, Jul 2026 | 13:05 Rome, Italy Fiumicino Airport Terminal 1 Non Stop 5h 55m 19, Jul 2026 | 19:00 Dakar, Senegal Blaise Diagne International Airport Terminal 1 Economy
+Adult - Check-in: 2 pc 23 kg | Cabin: 1 pc 7 kg
+Passenger Details Name Bar code Status
+Mr MODOU DIA (Adult) DOB : 02/04/1986 Confirmed
+Traveller Contact Information Mail Id : flyforsureroma@gmail.com Contact : +39 3488459855
+`;
+
+const flyForSureBookingResult = parseBookingText({ text: flyForSureBookingPdfText, source: 'PDF' });
+const flyForSureBookingSegments = flyForSureBookingResult.raw.segments;
+
+assert.equal(flyForSureBookingResult.raw.pnr, 'FFS040726009');
+assert.deepEqual(
+  flyForSureBookingResult.raw.passengers.map((passenger) => `${passenger.passenger_name}:${passenger.pax_type}:${passenger.dob}:${passenger.ticket_no}`),
+  ['DIA/MODOU:ADT:1986-04-02:'],
+);
+assert.deepEqual(
+  flyForSureBookingSegments.map((segment) => `${segment.airline}${segment.flight_number}:${segment.departure_city}-${segment.arrival_city}:${segment.departure_date}:${segment.departure_time}-${segment.arrival_time}`),
+  ['AZ854:FCO-DSS:2026-07-19:13:05-19:00'],
+);
+assert.deepEqual(
+  flyForSureBookingSegments.map((segment) => `${segment.departure_terminal}-${segment.arrival_terminal}:${segment.check_in_baggage}/${segment.cabin_baggage}`),
+  ['1-1:2 PC/1 PC'],
+);
+assert.equal(flyForSureBookingResult.drafts[0].booking_date, '2026-07-04');
+assert.equal(flyForSureBookingResult.drafts[0].sector, 'FCO-DSS');
+assert.equal(flyForSureBookingResult.drafts[0].outbound_date, '2026-07-19');
+assert.equal(flyForSureBookingResult.drafts[0].trip_type, 'ONE_WAY');
+
+console.log('bookingParser FlyForSure booking PDF checks passed');
+
+const travelExpertsAtqMxpText = `
+GHAI TRAVEL-ASIF VIA CAIROLI 121 ROMA 0039-3488459855
+Passenger Details Booking ID: BK76869 | Confirmed
+BKP99472 | Confirmed Rajveer Singh Rajveer Singh (Adult)
+BKP99473 | Confirmed Kawaljeet Kaur Kawaljeet Kaur (Adult)
+ATQ MXP NEOS AIR NO525 Economy 2pc/23kg
+23:15, 17 Oct 2025 ATQ AMRITSAR
+06:35, 18 Oct 2025 MXP MALPENSA
+www.VoloExpert.com
+`;
+
+const travelExpertsAtqMxpResult = parseBookingText({ text: travelExpertsAtqMxpText, source: 'PDF' });
+const travelExpertsAtqMxpSegments = travelExpertsAtqMxpResult.raw.segments;
+
+assert.equal(travelExpertsAtqMxpResult.raw.pnr, 'BK76869');
+assert.equal(travelExpertsAtqMxpResult.raw.supplierName, 'travelexperts');
+assert.deepEqual(
+  travelExpertsAtqMxpResult.raw.passengers.map((passenger) => `${passenger.passenger_name}:${passenger.ticket_no}`),
+  ['SINGH/RAJVEER:BKP99472', 'KAUR/KAWALJEET:BKP99473'],
+);
+assert.deepEqual(
+  travelExpertsAtqMxpSegments.map((segment) => `${segment.airline}${segment.flight_number}:${segment.departure_city}-${segment.arrival_city}:${segment.departure_date}:${segment.departure_time}-${segment.arrival_time}`),
+  ['NO525:ATQ-MXP:2025-10-17:23:15-06:35'],
+);
+assert.equal(travelExpertsAtqMxpSegments[0].check_in_baggage, '2PC 23KG');
+assert.equal(travelExpertsAtqMxpResult.drafts[0].supplier_name, 'travelexperts');
+assert.equal(travelExpertsAtqMxpResult.drafts[0].sector, 'ATQ-MXP');
+assert.equal(travelExpertsAtqMxpResult.drafts[0].trip_type, 'ONE_WAY');
+assert.ok(!travelExpertsAtqMxpResult.warnings.includes('NO_TICKET_FOUND'));
+
+const travelExpertsFcoBjlText = `
+GHAI TRAVEL-ASIF VIA CAIROLI 121 ROMA 0039-3488459855
+Passenger Details Booking ID: BK86671 | Confirmed
+BKP111061 | Confirmed Lamin Drammeh (Adult)
+FCO BJL NEOS AIR NO3271 Economy 1pc/30kg
+11:00, 20 May 2026 FCO ROME (FIUMICINO AIRPORT)
+17:05, 20 May 2026 BJL Banjul - Gambia
+Fare Rules Bagaglio a mano Adulto e Child 8kg
+`;
+
+const travelExpertsFcoBjlResult = parseBookingText({ text: travelExpertsFcoBjlText, source: 'PDF' });
+const travelExpertsFcoBjlSegments = travelExpertsFcoBjlResult.raw.segments;
+
+assert.equal(travelExpertsFcoBjlResult.raw.pnr, 'BK86671');
+assert.deepEqual(
+  travelExpertsFcoBjlResult.raw.passengers.map((passenger) => `${passenger.passenger_name}:${passenger.ticket_no}`),
+  ['DRAMMEH/LAMIN:BKP111061'],
+);
+assert.deepEqual(
+  travelExpertsFcoBjlSegments.map((segment) => `${segment.airline}${segment.flight_number}:${segment.departure_city}-${segment.arrival_city}:${segment.departure_date}:${segment.departure_time}-${segment.arrival_time}`),
+  ['NO3271:FCO-BJL:2026-05-20:11:00-17:05'],
+);
+assert.equal(travelExpertsFcoBjlSegments[0].check_in_baggage, '1PC 30KG');
+assert.equal(travelExpertsFcoBjlSegments[0].cabin_baggage, '8KG');
+assert.equal(travelExpertsFcoBjlResult.drafts[0].sector, 'FCO-BJL');
+assert.equal(travelExpertsFcoBjlResult.drafts[0].supplier_name, 'travelexperts');
+
+const travelExpertsFcoBjlTwoPcText = `
+GHAI TRAVEL-ASIF VIA CAIROLI 121 ROMA 0039-3488459855
+Passenger Details Booking ID: BK87957 | Confirmed
+BKP112599 | Confirmed Nuha Jadama (Adult)
+FCO BJL NEOS AIR NO3271 Economy 2pc/30kg
+11:00, 24 Jun 2026 FCO ROME (FIUMICINO AIRPORT)
+17:05, 24 Jun 2026 BJL Banjul - Gambia
+Fare Rules Bagaglio a mano Adulto e Child 8kg
+`;
+
+const travelExpertsFcoBjlTwoPcResult = parseBookingText({ text: travelExpertsFcoBjlTwoPcText, source: 'PDF' });
+const travelExpertsFcoBjlTwoPcSegments = travelExpertsFcoBjlTwoPcResult.raw.segments;
+
+assert.equal(travelExpertsFcoBjlTwoPcResult.raw.pnr, 'BK87957');
+assert.deepEqual(
+  travelExpertsFcoBjlTwoPcResult.raw.passengers.map((passenger) => `${passenger.passenger_name}:${passenger.ticket_no}`),
+  ['JADAMA/NUHA:BKP112599'],
+);
+assert.deepEqual(
+  travelExpertsFcoBjlTwoPcSegments.map((segment) => `${segment.airline}${segment.flight_number}:${segment.departure_city}-${segment.arrival_city}:${segment.departure_date}:${segment.departure_time}-${segment.arrival_time}`),
+  ['NO3271:FCO-BJL:2026-06-24:11:00-17:05'],
+);
+assert.equal(travelExpertsFcoBjlTwoPcSegments[0].check_in_baggage, '2PC 30KG');
+assert.equal(travelExpertsFcoBjlTwoPcSegments[0].cabin_baggage, '8KG');
+assert.equal(travelExpertsFcoBjlTwoPcResult.drafts[0].supplier_name, 'travelexperts');
+
+console.log('bookingParser TravelExperts PDF checks passed');
+
 const amadeusFamilyPnr = `
 TST RLR ---
 RP/MILIG2427/MILIG2427            AK/SU  25MAY26/1051Z   ZQFV6U
