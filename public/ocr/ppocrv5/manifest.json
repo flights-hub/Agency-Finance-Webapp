@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "engine": "PP-OCRv5 ONNX",
+  "ortScript": "/ocr/onnxruntime-web/ort.min.js",
+  "runner": "/ocr/ppocrv5/runner.js",
+  "models": {
+    "det": "/ocr/ppocrv5/det.onnx",
+    "rec": "/ocr/ppocrv5/rec.onnx",
+    "cls": "/ocr/ppocrv5/cls.onnx",
+    "dict": "/ocr/ppocrv5/ppocr_keys_v1.txt"
+  }
+}

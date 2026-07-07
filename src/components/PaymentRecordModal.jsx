@@ -1,6 +1,9 @@
 import { useMemo, useState } from 'react';
-import { savePayment } from '../helpers/storage';
+import { rememberPayment, savePayment } from '../helpers/storage';
+import { api } from '../helpers/api';
 import { createPaymentEntry, createSupplierPaymentEntry, getBookingLedger, numeric, PAYMENT_MODES } from '../helpers/calculations';
+import { extractPaymentProof, validatePaymentProofFile } from '../helpers/paymentProofs';
+import { mergePaymentProofDraft } from '../helpers/paymentProofParser';
 import {
   displayDirection,
   fieldLabel,
@@ -20,10 +23,10 @@ import {
 } from '../helpers/paymentVerification';
 import { canVerifyPayments } from '../helpers/access';
 import { formatCurrency } from '../helpers/format';
-import { Paperclip } from 'lucide-react';
+import { Loader2, Paperclip, ScanText } from 'lucide-react';
 
 const ATTACHMENT_TYPES = ['image/jpeg', 'image/png', 'application/pdf'];
-const ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024;
+const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 
 const EMPTY_FORM = {
   payment_date: new Date().toISOString().split('T')[0],
@@ -108,6 +111,10 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     }
     return { ...EMPTY_FORM, pnr: lockedPnr || '', party_type: 'CUSTOMER' };
   });
+  const [proofFile, setProofFile] = useState(null);
+  const [proofOcr, setProofOcr] = useState(editingPayment?.payment_proof_ocr || null);
+  const [proofStatus, setProofStatus] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const bookingLedger = useMemo(() => getBookingLedger(bookings, payments), [bookings, payments]);
   const pnrOptions = bookingLedger.filter((booking) => booking.pnr_n === 1);
@@ -156,25 +163,35 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     setForm((current) => ({ ...current, [key]: value }));
   };
 
-  const handleAttachment = (event) => {
+  const handleAttachment = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!ATTACHMENT_TYPES.includes(file.type)) {
-      alert('Payment proof must be a JPG, PNG, or PDF file.');
+    const problem = validatePaymentProofFile(file);
+    if (problem || !ATTACHMENT_TYPES.includes(file.type) || file.size > ATTACHMENT_MAX_BYTES) {
+      alert(problem || 'Payment proof must be a JPG, PNG, or PDF file smaller than 10 MB.');
       return;
     }
-    if (file.size > ATTACHMENT_MAX_BYTES) {
-      alert('Payment proof must be smaller than 2 MB.');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => updateForm('attachment', {
+    setProofFile(file);
+    setProofOcr(null);
+    updateForm('attachment', {
       name: file.name,
       type: file.type,
       size: file.size,
-      data_url: reader.result,
+      storage: 'pending-r2-upload',
     });
-    reader.readAsDataURL(file);
+    setProofStatus('Reading proof locally...');
+
+    try {
+      const ocr = await extractPaymentProof(file);
+      setProofOcr(ocr);
+      setForm((current) => mergePaymentProofDraft(current, ocr.extracted));
+      setProofStatus(ocr.warnings?.length
+        ? `OCR finished with ${ocr.warnings.length} field warning${ocr.warnings.length === 1 ? '' : 's'}`
+        : 'OCR fields detected');
+    } catch (error) {
+      console.error('Payment proof OCR failed:', error);
+      setProofStatus('Proof selected; OCR could not read enough text');
+    }
   };
 
   // Assembles the stored payment record from the form. Method-specific fields
@@ -209,7 +226,9 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
       receipt_ref: form.receipt_ref,
       remarks: form.remarks,
       verification_notes: form.verification_notes,
-      attachment: form.attachment,
+      attachment: proofFile ? null : form.attachment,
+      payment_proof: form.payment_proof || editingPayment?.payment_proof || null,
+      payment_proof_ocr: proofOcr || form.payment_proof_ocr || null,
       received_by: user?.name || user?.email || 'Finance Desk',
     };
 
@@ -248,7 +267,43 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     };
   };
 
-  const handleSave = () => {
+  const uploadProofAndSave = async (record) => {
+    const paymentId = record.id || editingPayment?.id || crypto.randomUUID();
+    const upload = await api.createPaymentProofUpload(paymentId, {
+      fileName: proofFile.name,
+      contentType: proofFile.type,
+      size: proofFile.size,
+      record: {
+        ...record,
+        id: paymentId,
+        attachment: null,
+        verification_status: 'PENDING_UPLOAD',
+      },
+    });
+
+    const response = await fetch(upload.uploadUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': proofFile.type },
+      body: proofFile,
+    });
+    if (!response.ok) throw new Error(`R2 upload failed (${response.status})`);
+
+    const completed = await api.completePaymentProofUpload(paymentId, {
+      proofId: upload.proof.id,
+      record: {
+        ...record,
+        id: paymentId,
+        attachment: null,
+        payment_proof: upload.proof,
+      },
+      ocr: proofOcr,
+    });
+
+    return rememberPayment(completed.record);
+  };
+
+  const handleSave = async () => {
+    if (saving) return;
     const amount = numeric(form.amount_paid);
     const problems = [];
     if (!form.payment_date) problems.push('Payment date is required.');
@@ -287,8 +342,17 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
       record = withVerification(record, user, canVerify && form.verification_status === 'VERIFIED');
     }
 
-    const saved = savePayment(record);
-    onSaved?.(saved);
+    try {
+      setSaving(true);
+      setProofStatus(proofFile ? 'Uploading proof evidence...' : proofStatus);
+      const saved = proofFile ? await uploadProofAndSave(record) : savePayment(record);
+      onSaved?.(saved);
+    } catch (error) {
+      console.error('Unable to save payment:', error);
+      alert(error.message || 'Unable to save payment.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -418,11 +482,51 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Paperclip size={14} />
                 <span style={{ fontSize: '13px' }}>{form.attachment.name}</span>
-                <button className="btn btn-secondary btn-sm" type="button" onClick={() => updateForm('attachment', null)}>Remove</button>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  type="button"
+                  onClick={() => {
+                    setProofFile(null);
+                    setProofOcr(null);
+                    setProofStatus('');
+                    updateForm('attachment', null);
+                    updateForm('payment_proof', null);
+                  }}
+                >
+                  Remove
+                </button>
               </div>
             </label>
           )}
         </div>
+
+        {(proofStatus || proofOcr) && (
+          <div className="auto-preview-list compact-preview" style={{ marginTop: '10px' }}>
+            <div>
+              <span>OCR</span>
+              <strong style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <ScanText size={14} />
+                {proofStatus || proofOcr?.status || 'Ready'}
+              </strong>
+            </div>
+            {proofOcr?.extracted?.amount_paid && (
+              <div><span>Detected Amount</span><strong>{formatCurrency(proofOcr.extracted.amount_paid)} {proofOcr.extracted.transaction_currency || form.transaction_currency}</strong></div>
+            )}
+            {proofOcr?.extracted && (
+              <div>
+                <span>Detected Reference</span>
+                <strong>
+                  {proofOcr.extracted.bank_transaction_reference
+                    || proofOcr.extracted.upi_transaction_id
+                    || proofOcr.extracted.pos_transaction_reference
+                    || proofOcr.extracted.gateway_transaction_id
+                    || proofOcr.extracted.cheque_number
+                    || '-'}
+                </strong>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="auto-preview-list compact-preview">
           <div><span>Payment Ref</span><strong>{editingPayment ? (form.payment_reference || '-') : nextPaymentReference(payments, form.party_type === 'SUPPLIER' ? 'PAID' : form.payment_direction)}</strong></div>
@@ -437,9 +541,10 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
         </div>
 
         <div className="form-actions">
-          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" onClick={handleSave}>
-            {editingPayment ? 'Save Changes' : canVerify && form.verification_status === 'VERIFIED' ? 'Save & Verify' : 'Submit Payment'}
+          <button className="btn btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+            {saving && <Loader2 size={15} />}
+            {saving ? 'Saving...' : editingPayment ? 'Save Changes' : canVerify && form.verification_status === 'VERIFIED' ? 'Save & Verify' : 'Submit Payment'}
           </button>
         </div>
       </div>

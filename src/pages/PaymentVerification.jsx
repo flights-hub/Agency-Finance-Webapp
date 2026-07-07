@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { getPayments, getBookings, savePayment } from '../helpers/storage';
+import { api } from '../helpers/api';
 import { numeric } from '../helpers/calculations';
 import {
   displayDirection,
@@ -15,7 +16,7 @@ import {
 } from '../helpers/paymentVerification';
 import { useAuth } from '../AuthContext';
 import { formatCurrency } from '../helpers/format';
-import { BadgeCheck, Eye, Paperclip, Search, ShieldAlert } from 'lucide-react';
+import { BadgeCheck, Eye, Loader2, Paperclip, Search, ShieldAlert } from 'lucide-react';
 
 const QUEUE_COLUMNS = [
   ['payment_reference', 'Payment Ref'],
@@ -44,6 +45,7 @@ export default function PaymentVerification() {
   const [statusFilter, setStatusFilter] = useState('TO_BE_VERIFIED');
   const [search, setSearch] = useState('');
   const [viewTarget, setViewTarget] = useState(null);
+  const [proofPreview, setProofPreview] = useState({ loading: false, url: '', error: '' });
   const [verifyTarget, setVerifyTarget] = useState(null);
   const [verifyNotes, setVerifyNotes] = useState('');
 
@@ -65,7 +67,7 @@ export default function PaymentVerification() {
   const verifiedToday = rows.filter((row) => row.verification_status === 'VERIFIED' && isToday(row.verified_at));
   const pendingAmount = pending.reduce((sum, row) => sum + row.amount_paid, 0);
   const agentSubmitted = pending.filter((row) => row.recorded_by_role === 'AGENT');
-  const withProof = pending.filter((row) => row.attachment);
+  const withProof = pending.filter((row) => row.attachment || row.payment_proof);
 
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -81,6 +83,20 @@ export default function PaymentVerification() {
     if (!original) return;
     setVerifyTarget(original);
     setVerifyNotes(original.verification_notes || '');
+  };
+
+  const openView = async (row) => {
+    setViewTarget(row);
+    setProofPreview({ loading: false, url: '', error: '' });
+    if (!row.payment_proof?.id) return;
+
+    setProofPreview({ loading: true, url: '', error: '' });
+    try {
+      const result = await api.paymentProofViewUrl(row.id, row.payment_proof.id);
+      setProofPreview({ loading: false, url: result.url, error: '' });
+    } catch (error) {
+      setProofPreview({ loading: false, url: '', error: error.message || 'Unable to generate proof view URL.' });
+    }
   };
 
   const handleVerify = () => {
@@ -158,6 +174,7 @@ export default function PaymentVerification() {
           <label>
             <span>Verification Status</span>
             <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="PENDING_UPLOAD">Pending Upload</option>
               <option value="TO_BE_VERIFIED">To Be Verified</option>
               <option value="VERIFIED">Verified</option>
               <option value="">All</option>
@@ -181,7 +198,7 @@ export default function PaymentVerification() {
                   {QUEUE_COLUMNS.map(([key]) => (
                     <td key={key}>
                       {key === 'amount_paid' ? formatCurrency(row.amount_paid)
-                        : key === 'proof' ? (row.attachment ? <Paperclip size={14} /> : '')
+                        : key === 'proof' ? (row.attachment || row.payment_proof ? <Paperclip size={14} /> : '')
                           : key === 'verification_status' ? (
                             <span className={`badge ${row.verification_status === 'VERIFIED' ? 'badge-pass' : 'badge-warn'}`}>
                               {VERIFICATION_LABELS[row.verification_status]}
@@ -192,7 +209,7 @@ export default function PaymentVerification() {
                   ))}
                   <td>
                     <div style={{ display: 'flex', gap: '6px' }}>
-                      <button className="icon-button" type="button" title="View payment" onClick={() => setViewTarget(row)}>
+                      <button className="icon-button" type="button" title="View payment" onClick={() => openView(row)}>
                         <Eye size={15} />
                       </button>
                       {row.verification_status === 'TO_BE_VERIFIED' && (
@@ -241,19 +258,52 @@ export default function PaymentVerification() {
               {viewTarget.remarks && <div><span>Notes</span><strong>{viewTarget.remarks}</strong></div>}
             </div>
 
-            {viewTarget.attachment && (
+            {(viewTarget.attachment || viewTarget.payment_proof) && (
               <div style={{ marginTop: '12px' }}>
-                <h4 style={{ marginBottom: '6px' }}>Payment Proof · {viewTarget.attachment.name}</h4>
-                {viewTarget.attachment.type === 'application/pdf' ? (
-                  <embed src={viewTarget.attachment.data_url} type="application/pdf" style={{ width: '100%', height: '420px', borderRadius: '8px' }} />
-                ) : (
-                  <img src={viewTarget.attachment.data_url} alt="Payment proof" style={{ maxWidth: '100%', borderRadius: '8px' }} />
+                <h4 style={{ marginBottom: '6px' }}>Payment Proof · {viewTarget.payment_proof?.file_name || viewTarget.attachment?.name}</h4>
+                {proofPreview.loading && (
+                  <p style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px' }}>
+                    <Loader2 size={14} /> Preparing secure proof link...
+                  </p>
+                )}
+                {proofPreview.error && <p style={{ color: '#DC2626', fontSize: '13px' }}>{proofPreview.error}</p>}
+                {(proofPreview.url || viewTarget.attachment?.data_url) && (
+                  (viewTarget.payment_proof?.content_type || viewTarget.attachment?.type) === 'application/pdf' ? (
+                    <embed
+                      src={proofPreview.url || viewTarget.attachment.data_url}
+                      type="application/pdf"
+                      style={{ width: '100%', height: '420px', borderRadius: '8px' }}
+                    />
+                  ) : (
+                    <img
+                      src={proofPreview.url || viewTarget.attachment.data_url}
+                      alt="Payment proof"
+                      style={{ maxWidth: '100%', borderRadius: '8px' }}
+                    />
+                  )
+                )}
+                {viewTarget.payment_proof_ocr?.extracted && (
+                  <div className="auto-preview-list compact-preview" style={{ marginTop: '10px' }}>
+                    <div><span>OCR Engine</span><strong>{viewTarget.payment_proof_ocr.engine || '-'}</strong></div>
+                    <div><span>OCR Confidence</span><strong>{viewTarget.payment_proof_ocr.confidence ?? '-'}</strong></div>
+                    <div>
+                      <span>OCR Reference</span>
+                      <strong>
+                        {viewTarget.payment_proof_ocr.extracted.bank_transaction_reference
+                          || viewTarget.payment_proof_ocr.extracted.upi_transaction_id
+                          || viewTarget.payment_proof_ocr.extracted.pos_transaction_reference
+                          || viewTarget.payment_proof_ocr.extracted.gateway_transaction_id
+                          || viewTarget.payment_proof_ocr.extracted.cheque_number
+                          || '-'}
+                      </strong>
+                    </div>
+                  </div>
                 )}
               </div>
             )}
 
             <div className="form-actions">
-              <button className="btn btn-secondary" onClick={() => setViewTarget(null)}>Close</button>
+              <button className="btn btn-secondary" onClick={() => { setViewTarget(null); setProofPreview({ loading: false, url: '', error: '' }); }}>Close</button>
               {viewTarget.verification_status === 'TO_BE_VERIFIED' && (
                 <button className="btn btn-primary" onClick={() => { openVerify(viewTarget); setViewTarget(null); }}>
                   <BadgeCheck size={15} /> Verify Payment

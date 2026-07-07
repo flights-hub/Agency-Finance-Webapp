@@ -388,8 +388,8 @@ export default function Payments() {
                   ))}
                   <td>
                     <div style={{ display: 'flex', gap: '6px' }}>
-                      {payment.attachment && (
-                        <span title={`Proof: ${payment.attachment.name}`}><Paperclip size={14} /></span>
+                      {(payment.attachment || payment.payment_proof) && (
+                        <span title={`Proof: ${payment.payment_proof?.file_name || payment.attachment?.name || 'attached'}`}><Paperclip size={14} /></span>
                       )}
                       {canEditRow(payment) && (
                         <button className="icon-button" type="button" title="Edit payment" onClick={() => openEditModal(payment)}>

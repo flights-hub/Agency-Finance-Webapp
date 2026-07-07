@@ -1,5 +1,6 @@
 import Tesseract from 'tesseract.js';
 import * as pdfjsLib from 'pdfjs-dist';
+import { extractTextWithPpOcr } from './ppOcr';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
 
@@ -9,15 +10,18 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
  * @param {File} file - The uploaded PDF or image file
  * @returns {Promise<string>} - The extracted raw text
  */
-export async function extractTextFromFile(file) {
+export async function extractTextFromFile(file, options = {}) {
   if (file.type.startsWith('image/')) {
-    return extractTextFromImage(file);
+    return extractTextFromImage(file, options);
   }
-  return extractTextFromPDF(file);
+  return extractTextFromPDF(file, options);
 }
 
-async function extractTextFromImage(file) {
+async function extractTextFromImage(file, options = {}) {
   try {
+    const ppOcr = await extractTextWithPpOcr(file, options).catch(() => null);
+    if (ppOcr?.text?.trim()) return ppOcr.text;
+
     const result = await Tesseract.recognize(file, 'eng', {
       logger: (message) => console.log(message),
     });
@@ -33,7 +37,7 @@ async function extractTextFromImage(file) {
  * @param {File} file - The uploaded PDF file
  * @returns {Promise<string>} - The extracted raw text
  */
-export async function extractTextFromPDF(file) {
+export async function extractTextFromPDF(file, options = {}) {
   try {
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -65,6 +69,12 @@ export async function extractTextFromPDF(file) {
       canvas.width = viewport.width;
 
       await page.render({ canvasContext: context, viewport: viewport }).promise;
+      const ppOcr = await extractTextWithPpOcr(canvas, options).catch(() => null);
+      if (ppOcr?.text?.trim()) {
+        ocrText += ppOcr.text + '\n';
+        continue;
+      }
+
       const dataUrl = canvas.toDataURL('image/png');
 
       const result = await Tesseract.recognize(dataUrl, 'eng', {

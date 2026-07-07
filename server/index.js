@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { parseBookingText } from './bookingParser.js';
 import { scopedFinanceData } from './financeAccess.js';
 import { canVerifyPayments, enforcePaymentRules } from './paymentRules.js';
+import { completeProofUpload, createProofUpload, signedProofViewUrl } from './paymentProofs.js';
 import { loadEnvFile } from './env.js';
 import { signJwt, verifyJwt } from './jwt.js';
 import {
@@ -275,6 +276,8 @@ const ACTION_MODULES = {
   reactivate_user: 'user_management',
   update_role_template: 'user_management',
   bulk_import_finance: 'finance',
+  create_payment_proof: 'finance',
+  upload_payment_proof: 'finance',
   verify_payment: 'finance',
   unverify_payment: 'finance',
 };
@@ -690,6 +693,48 @@ async function upsertFinanceRow(collection, record, userId) {
   return flattenFinanceRow(rows[0]);
 }
 
+async function getFinanceRow(collection, id) {
+  const rows = await supabaseRequest(
+    `/rest/v1/${collection}?id=eq.${encodeURIComponent(id)}&select=id,data,created_by`,
+  );
+  return rows?.[0] || null;
+}
+
+function embeddedProof(record = {}, proofId = null) {
+  const proof = record.payment_proof || null;
+  if (!proofId || proof?.id === proofId) return proof;
+  return null;
+}
+
+async function verifyPaymentAtomically({ paymentId, record, user }) {
+  const result = await supabaseRequest('/rest/v1/rpc/verify_and_post_payment', {
+    method: 'POST',
+    body: {
+      p_payment_id: paymentId,
+      p_payment_data: record,
+      p_verified_by: user.id,
+      p_notes: record.verification_notes || null,
+    },
+  });
+  return result?.record || { ...record, id: paymentId };
+}
+
+async function voidPaymentLedgerEntries(paymentId, reason) {
+  await supabaseRequest(`/rest/v1/ledger_entries?payment_id=eq.${encodeURIComponent(paymentId)}&voided_at=is.null`, {
+    method: 'PATCH',
+    prefer: 'return=minimal',
+    body: {
+      voided_at: new Date().toISOString(),
+      void_reason: reason,
+    },
+  }).catch((error) => {
+    // Older databases may not have the ledger_entries table until the new SQL
+    // is applied. Verification itself will still fail loudly if the RPC is
+    // missing; voiding old entries is best effort during rollout.
+    console.warn(`[api] Unable to void ledger entries for payment ${paymentId}: ${error.message}`);
+  });
+}
+
 async function handleFinanceData(req, res) {
   const user = await currentUser(req);
   const canView = (name) => hasAnyPermission(user, [financeCollection(name).view]);
@@ -720,6 +765,7 @@ async function requireFinanceWriter(req, collection) {
 async function handleSaveFinanceRecord(req, res, collection, id) {
   const user = await requireFinanceWriter(req, collection);
   let body = await readBody(req);
+  let paymentAction = null;
 
   if (!id || body.id !== id) {
     const error = new Error('Record id is required and must match the URL.');
@@ -734,6 +780,7 @@ async function handleSaveFinanceRecord(req, res, collection, id) {
     const rows = await supabaseRequest(`/rest/v1/payments?id=eq.${encodeURIComponent(id)}&select=id,data`);
     const existing = rows?.length ? rows[0].data : null;
     const { record: enforced, action } = enforcePaymentRules(user, body, existing);
+    paymentAction = action;
     body = { ...enforced, id };
 
     if (action) {
@@ -751,7 +798,15 @@ async function handleSaveFinanceRecord(req, res, collection, id) {
     }
   }
 
-  const record = await upsertFinanceRow(collection, body, user.id);
+  let record;
+  if (collection === 'payments' && body.verification_status === 'VERIFIED') {
+    record = await verifyPaymentAtomically({ paymentId: id, record: body, user });
+  } else {
+    record = await upsertFinanceRow(collection, body, user.id);
+    if (collection === 'payments' && paymentAction && paymentAction !== 'verified') {
+      await voidPaymentLedgerEntries(id, paymentAction);
+    }
+  }
   json(res, 200, { record });
 }
 
@@ -777,6 +832,142 @@ async function handleBulkImportFinance(req, res, collection) {
     risk: imported.length > 50 ? 'medium' : 'low',
   });
   json(res, 200, { records: imported });
+}
+
+async function handleCreatePaymentProofUpload(req, res, paymentId) {
+  const user = await requireFinanceWriter(req, 'payments');
+  const body = await readBody(req);
+  const record = body.record || {};
+  const existingRow = await getFinanceRow('payments', paymentId);
+  const existing = existingRow?.data || {};
+  const basePendingRecord = {
+    ...existing,
+    ...record,
+    id: paymentId,
+    attachment: null,
+    verification_status: 'PENDING_UPLOAD',
+    ledger_posting_status: 'PENDING_VERIFICATION',
+    recorded_by_user_id: existing.recorded_by_user_id || user.id,
+    recorded_by: existing.recorded_by || user.name || user.email || '',
+    recorded_by_role: existing.recorded_by_role || user.role,
+  };
+
+  await upsertFinanceRow('payments', basePendingRecord, user.id);
+
+  const upload = await createProofUpload({
+    paymentId,
+    fileName: body.fileName,
+    contentType: body.contentType,
+    size: body.size,
+    user,
+  });
+
+  const pendingRecord = {
+    ...basePendingRecord,
+    payment_proof: upload.proof,
+  };
+  await upsertFinanceRow('payments', pendingRecord, user.id);
+  await audit(req, user, 'create_payment_proof', null, {
+    recordType: 'payment',
+    recordId: paymentId,
+    newValue: { proof_id: upload.proof.id, r2_key: upload.proof.object_key },
+    risk: 'low',
+  });
+
+  json(res, 200, upload);
+}
+
+async function handleCompletePaymentProofUpload(req, res, paymentId) {
+  const user = await requireFinanceWriter(req, 'payments');
+  const body = await readBody(req);
+  const proofId = body.proofId || body.proof?.id;
+  if (!proofId) {
+    const error = new Error('Proof id is required.');
+    error.status = 400;
+    throw error;
+  }
+
+  const completed = await completeProofUpload({
+    paymentId,
+    proofId,
+    ocr: body.ocr || null,
+    user,
+  });
+
+  const existingRow = await getFinanceRow('payments', paymentId);
+  const existing = existingRow?.data || null;
+  const incoming = {
+    ...(body.record || {}),
+    id: paymentId,
+    attachment: null,
+    payment_proof: completed.proof,
+    payment_proof_ocr: completed.ocr,
+  };
+  const { record: enforced, action } = enforcePaymentRules(user, incoming, existing);
+  const finalRecord = { ...enforced, id: paymentId };
+
+  let saved;
+  if (finalRecord.verification_status === 'VERIFIED') {
+    saved = await verifyPaymentAtomically({ paymentId, record: finalRecord, user });
+  } else {
+    saved = await upsertFinanceRow('payments', finalRecord, user.id);
+    if (action && action !== 'verified') await voidPaymentLedgerEntries(paymentId, action);
+  }
+
+  await audit(req, user, 'upload_payment_proof', null, {
+    recordType: 'payment',
+    recordId: paymentId,
+    newValue: {
+      proof_id: completed.proof.id,
+      ocr_status: completed.ocr?.status || null,
+      verification_status: saved.verification_status,
+    },
+    risk: action === 'verified' ? 'medium' : 'low',
+  });
+
+  json(res, 200, { record: saved });
+}
+
+async function handlePaymentProofViewUrl(req, res, paymentId, proofId) {
+  const user = await currentUser(req);
+  const row = await getFinanceRow('payments', paymentId);
+  if (!row) {
+    const error = new Error('Payment not found.');
+    error.status = 404;
+    throw error;
+  }
+
+  const record = flattenFinanceRow(row);
+  const ownsRecord = record.recorded_by_user_id && record.recorded_by_user_id === user.id;
+  if (!hasAnyPermission(user, ['view_payments', 'verify_payments']) && !ownsRecord) {
+    const error = new Error('You do not have permission to view this payment proof.');
+    error.status = 403;
+    throw error;
+  }
+
+  let proof = embeddedProof(record, proofId);
+  if (!proof) {
+    const rows = await supabaseRequest(
+      `/rest/v1/payment_proofs?id=eq.${encodeURIComponent(proofId)}&payment_id=eq.${encodeURIComponent(paymentId)}&select=*`,
+    );
+    const proofRow = rows?.[0];
+    if (proofRow) {
+      proof = {
+        id: proofRow.id,
+        object_key: proofRow.r2_key,
+        content_type: proofRow.content_type,
+        file_name: proofRow.original_filename,
+      };
+    }
+  }
+
+  if (!proof) {
+    const error = new Error('Payment proof not found.');
+    error.status = 404;
+    throw error;
+  }
+
+  json(res, 200, signedProofViewUrl(proof));
 }
 
 async function handleChangePassword(req, res) {
@@ -827,6 +1018,17 @@ async function route(req, res) {
   if (req.method === 'POST' && path === '/api/bookings/parse-pnr') return handleParsePnr(req, res);
   if (req.method === 'POST' && path === '/api/bookings/parse-text') return handleParseBookingText(req, res);
   if (req.method === 'GET' && path === '/api/finance/data') return handleFinanceData(req, res);
+
+  const proofUploadMatch = path.match(/^\/api\/payments\/([^/]+)\/proof-upload$/);
+  if (proofUploadMatch && req.method === 'POST') return handleCreatePaymentProofUpload(req, res, decodeURIComponent(proofUploadMatch[1]));
+
+  const proofCompleteMatch = path.match(/^\/api\/payments\/([^/]+)\/proof-complete$/);
+  if (proofCompleteMatch && req.method === 'POST') return handleCompletePaymentProofUpload(req, res, decodeURIComponent(proofCompleteMatch[1]));
+
+  const proofViewMatch = path.match(/^\/api\/payments\/([^/]+)\/proofs\/([^/]+)\/view-url$/);
+  if (proofViewMatch && req.method === 'GET') {
+    return handlePaymentProofViewUrl(req, res, decodeURIComponent(proofViewMatch[1]), decodeURIComponent(proofViewMatch[2]));
+  }
 
   const bulkFinanceMatch = path.match(/^\/api\/finance\/([a-z]+)\/bulk$/);
   if (bulkFinanceMatch && req.method === 'POST') return handleBulkImportFinance(req, res, bulkFinanceMatch[1]);

@@ -6,9 +6,10 @@
 // Records created before this workflow have no verification_status; they are
 // grandfathered as VERIFIED so historical ledgers do not change.
 
-export const VERIFICATION_STATUSES = ['TO_BE_VERIFIED', 'VERIFIED'];
+export const VERIFICATION_STATUSES = ['PENDING_UPLOAD', 'TO_BE_VERIFIED', 'VERIFIED'];
 
 export const VERIFICATION_LABELS = {
+  PENDING_UPLOAD: 'Pending Upload',
   TO_BE_VERIFIED: 'To Be Verified',
   VERIFIED: 'Verified',
 };

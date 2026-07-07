@@ -42,6 +42,15 @@ export const api = {
     method: 'PUT',
     body: record,
   }),
+  createPaymentProofUpload: (paymentId, payload) => request(`/api/payments/${encodeURIComponent(paymentId)}/proof-upload`, {
+    method: 'POST',
+    body: payload,
+  }),
+  completePaymentProofUpload: (paymentId, payload) => request(`/api/payments/${encodeURIComponent(paymentId)}/proof-complete`, {
+    method: 'POST',
+    body: payload,
+  }),
+  paymentProofViewUrl: (paymentId, proofId) => request(`/api/payments/${encodeURIComponent(paymentId)}/proofs/${encodeURIComponent(proofId)}/view-url`),
   bulkImportFinance: (collection, records) => request(`/api/finance/${collection}/bulk`, {
     method: 'POST',
     body: { records },

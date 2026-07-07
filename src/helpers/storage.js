@@ -115,7 +115,7 @@ async function fetchFinanceData() {
   }
 }
 
-function save(key, item) {
+function save(key, item, { sync = true } = {}) {
   const items = [...readData(key)];
   if (item.id) {
     const index = items.findIndex(i => i.id === item.id);
@@ -127,7 +127,7 @@ function save(key, item) {
     items.push(item);
   }
   writeData(key, items);
-  pushToServer(key, item);
+  if (sync) pushToServer(key, item);
   return item;
 }
 
@@ -142,6 +142,7 @@ export function getPayments(pnr = null) {
   return payments;
 }
 export function savePayment(payment) { return save(STORAGE_KEYS.PAYMENTS, payment); }
+export function rememberPayment(payment) { return save(STORAGE_KEYS.PAYMENTS, payment, { sync: false }); }
 
 // Refunds
 export function getRefunds() { return readData(STORAGE_KEYS.REFUNDS); }
