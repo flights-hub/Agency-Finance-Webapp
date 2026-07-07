@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { rememberPayment, savePayment } from '../helpers/storage';
 import { api } from '../helpers/api';
 import { createPaymentEntry, createSupplierPaymentEntry, getBookingLedger, numeric, PAYMENT_MODES } from '../helpers/calculations';
@@ -23,7 +23,7 @@ import {
 } from '../helpers/paymentVerification';
 import { canVerifyPayments } from '../helpers/access';
 import { formatCurrency } from '../helpers/format';
-import { Loader2, Paperclip, ScanText } from 'lucide-react';
+import { FileText, Loader2, Paperclip, RotateCcw, RotateCw, ScanText, ZoomIn, ZoomOut } from 'lucide-react';
 
 const ATTACHMENT_TYPES = ['image/jpeg', 'image/png', 'application/pdf'];
 const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
@@ -114,7 +114,19 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
   const [proofFile, setProofFile] = useState(null);
   const [proofOcr, setProofOcr] = useState(editingPayment?.payment_proof_ocr || null);
   const [proofStatus, setProofStatus] = useState('');
+  const [proofPreviewUrl, setProofPreviewUrl] = useState(editingPayment?.attachment?.data_url || '');
+  const [proofZoom, setProofZoom] = useState(1);
+  const [proofRotation, setProofRotation] = useState(0);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!proofFile) return undefined;
+    const url = URL.createObjectURL(proofFile);
+    setProofPreviewUrl(url);
+    setProofZoom(1);
+    setProofRotation(0);
+    return () => URL.revokeObjectURL(url);
+  }, [proofFile]);
 
   const bookingLedger = useMemo(() => getBookingLedger(bookings, payments), [bookings, payments]);
   const pnrOptions = bookingLedger.filter((booking) => booking.pnr_n === 1);
@@ -162,6 +174,21 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
   const updateForm = (key, value) => {
     setForm((current) => ({ ...current, [key]: value }));
   };
+
+  const proofMeta = form.payment_proof || editingPayment?.payment_proof || null;
+  const proofAttachment = proofFile || form.attachment || null;
+  const proofName = proofFile?.name || proofMeta?.file_name || proofAttachment?.name || '';
+  const proofType = proofFile?.type || proofMeta?.content_type || proofAttachment?.type || '';
+  const hasProofPreview = Boolean(proofPreviewUrl);
+  const hasExistingProof = Boolean(proofMeta || proofAttachment);
+  const proofConfidence = proofOcr?.confidence;
+  const proofConfidenceLabel = Number.isFinite(Number(proofConfidence)) ? `${Number(proofConfidence).toFixed(1)}%` : '';
+  const extractedReference = proofOcr?.extracted?.bank_transaction_reference
+    || proofOcr?.extracted?.upi_transaction_id
+    || proofOcr?.extracted?.pos_transaction_reference
+    || proofOcr?.extracted?.gateway_transaction_id
+    || proofOcr?.extracted?.cheque_number
+    || '';
 
   const handleAttachment = async (event) => {
     const file = event.target.files?.[0];
@@ -363,6 +390,135 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
       <div className="card modal-card modal-card-wide" style={{ maxHeight: '92vh', overflowY: 'auto' }}>
         <h3>{editingPayment ? 'Edit Payment' : lockedPnr ? `Record Payment · ${lockedPnr}` : 'Record Payment'}</h3>
 
+        <div className="payment-proof-layout">
+          <aside className="payment-proof-panel">
+            <div className="payment-proof-header">
+              <span>Payment Proof</span>
+              {proofConfidenceLabel && (
+                <strong>
+                  <ScanText size={14} />
+                  OCR {proofConfidenceLabel}
+                </strong>
+              )}
+            </div>
+
+            <div className="payment-proof-viewer">
+              {hasProofPreview && proofType === 'application/pdf' ? (
+                <embed
+                  src={proofPreviewUrl}
+                  type="application/pdf"
+                  className="payment-proof-pdf"
+                  style={{
+                    transform: `scale(${proofZoom}) rotate(${proofRotation}deg)`,
+                    transformOrigin: 'center center',
+                  }}
+                />
+              ) : hasProofPreview ? (
+                <img
+                  src={proofPreviewUrl}
+                  alt="Payment proof"
+                  className="payment-proof-image"
+                  style={{
+                    transform: `scale(${proofZoom}) rotate(${proofRotation}deg)`,
+                    transformOrigin: 'center center',
+                  }}
+                />
+              ) : (
+                <div className="payment-proof-empty">
+                  <FileText size={34} />
+                  <strong>{hasExistingProof ? 'Secure proof attached' : 'Original receipt'}</strong>
+                  <span>{hasExistingProof ? 'Saved proof can be opened from verification.' : 'Upload JPG, PNG, or PDF'}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="payment-proof-controls" aria-label="Payment proof viewer controls">
+              <button type="button" className="icon-button" title="Zoom out" onClick={() => setProofZoom((value) => Math.max(0.5, Number((value - 0.1).toFixed(2))))} disabled={!hasProofPreview}>
+                <ZoomOut size={16} />
+              </button>
+              <span>{Math.round(proofZoom * 100)}%</span>
+              <button type="button" className="icon-button" title="Zoom in" onClick={() => setProofZoom((value) => Math.min(2.5, Number((value + 0.1).toFixed(2))))} disabled={!hasProofPreview}>
+                <ZoomIn size={16} />
+              </button>
+              <button type="button" className="icon-button" title="Rotate left" onClick={() => setProofRotation((value) => value - 90)} disabled={!hasProofPreview}>
+                <RotateCcw size={16} />
+              </button>
+              <button type="button" className="icon-button" title="Rotate right" onClick={() => setProofRotation((value) => value + 90)} disabled={!hasProofPreview}>
+                <RotateCw size={16} />
+              </button>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setProofZoom(1); setProofRotation(0); }} disabled={!hasProofPreview}>
+                Reset
+              </button>
+            </div>
+
+            <label className="payment-proof-upload">
+              <span>Payment Proof (JPG, PNG, PDF)</span>
+              <input type="file" accept=".jpg,.jpeg,.png,.pdf" onChange={handleAttachment} />
+            </label>
+
+            {(proofName || proofStatus || hasExistingProof || proofOcr) && (
+              <div className="payment-proof-meta">
+                {proofName && (
+                  <div>
+                    <span>Original</span>
+                    <strong>{proofName}</strong>
+                  </div>
+                )}
+                {proofMeta?.id && (
+                  <div>
+                    <span>Proof ID</span>
+                    <strong>{proofMeta.id}</strong>
+                  </div>
+                )}
+                {proofMeta?.created_by_user_id && (
+                  <div>
+                    <span>Uploaded by</span>
+                    <strong>{proofMeta.created_by_user_id}</strong>
+                  </div>
+                )}
+                {proofStatus && (
+                  <div>
+                    <span>OCR</span>
+                    <strong>{proofStatus}</strong>
+                  </div>
+                )}
+                {proofOcr?.extracted?.amount_paid && (
+                  <div>
+                    <span>Detected amount</span>
+                    <strong>{formatCurrency(proofOcr.extracted.amount_paid, proofOcr.extracted.transaction_currency || form.transaction_currency)}</strong>
+                  </div>
+                )}
+                {proofOcr?.extracted && (
+                  <div>
+                    <span>Detected reference</span>
+                    <strong>{extractedReference || '-'}</strong>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {form.attachment && (
+              <button
+                className="btn btn-secondary btn-sm payment-proof-remove"
+                type="button"
+                onClick={() => {
+                  setProofFile(null);
+                  setProofOcr(null);
+                  setProofStatus('');
+                  setProofZoom(1);
+                  setProofRotation(0);
+                  setProofPreviewUrl('');
+                  updateForm('attachment', null);
+                  updateForm('payment_proof', null);
+                }}
+              >
+                <Paperclip size={14} />
+                Remove Proof
+              </button>
+            )}
+          </aside>
+
+          <section className="payment-details-panel">
         <div className="modal-form-grid">
           <label>
             <span>Payment Date *</span>
@@ -468,65 +624,13 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
         </div>
 
         <div className="modal-form-grid" style={{ marginTop: '10px' }}>
-          <label>
+          <label className="span-2">
             <span>Notes</span>
             <input value={form.remarks} onChange={(event) => updateForm('remarks', event.target.value)} />
           </label>
-          <label>
-            <span>Payment Proof (JPG, PNG, PDF)</span>
-            <input type="file" accept=".jpg,.jpeg,.png,.pdf" onChange={handleAttachment} />
-          </label>
-          {form.attachment && (
-            <label>
-              <span>Attached</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Paperclip size={14} />
-                <span style={{ fontSize: '13px' }}>{form.attachment.name}</span>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  type="button"
-                  onClick={() => {
-                    setProofFile(null);
-                    setProofOcr(null);
-                    setProofStatus('');
-                    updateForm('attachment', null);
-                    updateForm('payment_proof', null);
-                  }}
-                >
-                  Remove
-                </button>
-              </div>
-            </label>
-          )}
         </div>
-
-        {(proofStatus || proofOcr) && (
-          <div className="auto-preview-list compact-preview" style={{ marginTop: '10px' }}>
-            <div>
-              <span>OCR</span>
-              <strong style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                <ScanText size={14} />
-                {proofStatus || proofOcr?.status || 'Ready'}
-              </strong>
-            </div>
-            {proofOcr?.extracted?.amount_paid && (
-              <div><span>Detected Amount</span><strong>{formatCurrency(proofOcr.extracted.amount_paid)} {proofOcr.extracted.transaction_currency || form.transaction_currency}</strong></div>
-            )}
-            {proofOcr?.extracted && (
-              <div>
-                <span>Detected Reference</span>
-                <strong>
-                  {proofOcr.extracted.bank_transaction_reference
-                    || proofOcr.extracted.upi_transaction_id
-                    || proofOcr.extracted.pos_transaction_reference
-                    || proofOcr.extracted.gateway_transaction_id
-                    || proofOcr.extracted.cheque_number
-                    || '-'}
-                </strong>
-              </div>
-            )}
-          </div>
-        )}
+          </section>
+        </div>
 
         <div className="auto-preview-list compact-preview">
           <div><span>Payment Ref</span><strong>{editingPayment ? (form.payment_reference || '-') : nextPaymentReference(payments, form.party_type === 'SUPPLIER' ? 'PAID' : form.payment_direction)}</strong></div>
