@@ -466,6 +466,66 @@ test('application throws all validation errors without mutating the booking grou
   assert.deepEqual(group, before);
 });
 
+[
+  ['missing', { finalizedAt: context.finalizedAt }],
+  ['blank', { actor: '   ', finalizedAt: context.finalizedAt }],
+].forEach(([description, invalidContext]) => {
+  test(`application rejects a ${description} finalization actor without mutating bookings`, () => {
+    const before = clone(group);
+
+    assert.throws(
+      () => applyDateChangeAmendment(amendment, group, invalidContext),
+      /Finalization actor is required/,
+    );
+    assert.deepEqual(group, before);
+  });
+});
+
+[
+  ['missing', { actor: context.actor }, /Finalization time is required/],
+  ['invalid', { actor: context.actor, finalizedAt: 'not-a-timestamp' }, /valid ISO timestamp/],
+].forEach(([description, invalidContext, expectedError]) => {
+  test(`application rejects a ${description} finalization time without mutating bookings`, () => {
+    const before = clone(group);
+
+    assert.throws(
+      () => applyDateChangeAmendment(amendment, group, invalidContext),
+      expectedError,
+    );
+    assert.deepEqual(group, before);
+  });
+});
+
+[
+  ['invalid date', 'departure_date', '2026-02-30', 'Departure date is invalid'],
+  ['invalid time', 'arrival_time', '17:7x', 'Arrival time is invalid'],
+].forEach(([description, field, value, expectedError]) => {
+  test(`validation rejects a non-empty ${description}`, () => {
+    const invalid = clone(amendment);
+    invalid.replacement_itinerary.outbound[0].connections[0][field] = value;
+
+    const errors = validateDateChangeFinalization(invalid, group);
+    assert.ok(errors.some((error) => error.includes(expectedError)), errors.join('\n'));
+  });
+});
+
+test("validation rejects a new ticket already held by an unaffected booking row", () => {
+  const collision = clone(amendment);
+  collision.passenger_reissues[0].new_ticket_no = group[1].ticket_no;
+
+  const errors = validateDateChangeFinalization(collision, group);
+  assert.ok(errors.some((error) => error.includes('unaffected booking row p2')), errors.join('\n'));
+});
+
+test('application persists an inferred stable booking reference on the completed amendment', () => {
+  const withoutBookingRef = clone(amendment);
+  delete withoutBookingRef.booking_ref;
+
+  const result = applyDateChangeAmendment(withoutBookingRef, group, context);
+
+  assert.equal(result.amendment.booking_ref, 'BOOK-1');
+});
+
 test('retry accepts original and intended-final rows without duplicating PNR history', () => {
   const pnrWide = {
     ...clone(amendment),

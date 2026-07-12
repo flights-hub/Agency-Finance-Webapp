@@ -30,6 +30,34 @@ const ticketKey = (value) => text(value).toUpperCase();
 const airportKey = (value) => text(value).toUpperCase();
 const pnrKey = (value) => bookingPnrAliases({ pnr: value })[0] || '';
 
+function dateParts(date) {
+  const match = text(date).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year
+    || parsed.getUTCMonth() !== month - 1
+    || parsed.getUTCDate() !== day
+  ) return null;
+
+  return { year, month, day };
+}
+
+function timeParts(time) {
+  const match = text(time).match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = Number(match[3] || 0);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  return { hour, minute, second };
+}
+
 export function isDateChangeType(type) {
   return type === 'DATE_CHANGE' || Boolean(LEGACY_DIRECTIONS[type]);
 }
@@ -73,28 +101,13 @@ export function createPassengerReissues(group = [], selectedIds = [], existing =
 }
 
 function dateTimeValue(date, time) {
-  const dateMatch = text(date).match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const timeMatch = text(time).match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (!dateMatch || !timeMatch) return null;
+  const parsedDate = dateParts(date);
+  const parsedTime = timeParts(time);
+  if (!parsedDate || !parsedTime) return null;
 
-  const year = Number(dateMatch[1]);
-  const month = Number(dateMatch[2]);
-  const day = Number(dateMatch[3]);
-  const hour = Number(timeMatch[1]);
-  const minute = Number(timeMatch[2]);
-  const second = Number(timeMatch[3] || 0);
+  const { year, month, day } = parsedDate;
+  const { hour, minute, second } = parsedTime;
   const value = Date.UTC(year, month - 1, day, hour, minute, second);
-  const parsed = new Date(value);
-
-  if (
-    parsed.getUTCFullYear() !== year
-    || parsed.getUTCMonth() !== month - 1
-    || parsed.getUTCDate() !== day
-    || parsed.getUTCHours() !== hour
-    || parsed.getUTCMinutes() !== minute
-    || parsed.getUTCSeconds() !== second
-  ) return null;
-
   return value;
 }
 
@@ -204,6 +217,17 @@ function validateConnectionSequence(directionKey, segments, errors) {
       if (!text(connection[key])) errors.push(`${directionLabel} connection ${index + 1}: ${label} is required.`);
     });
 
+    [
+      ['departure_date', 'Departure date', dateParts],
+      ['arrival_date', 'Arrival date', dateParts],
+      ['departure_time', 'Departure time', timeParts],
+      ['arrival_time', 'Arrival time', timeParts],
+    ].forEach(([key, label, parse]) => {
+      if (text(connection[key]) && !parse(connection[key])) {
+        errors.push(`${directionLabel} connection ${index + 1}: ${label} is invalid.`);
+      }
+    });
+
     const departure = dateTimeValue(connection.departure_date, connection.departure_time);
     const arrival = dateTimeValue(connection.arrival_date, connection.arrival_time);
     if (departure !== null && arrival !== null && arrival <= departure) {
@@ -274,6 +298,10 @@ export function validateDateChangeFinalization(amendment = {}, group = []) {
   const eligibleIds = new Set(eligible.map((row) => idKey(row.id)));
   const mappings = amendment.passenger_reissues || [];
   const mappingsById = mappingByBookingId(amendment);
+  const unaffectedTickets = new Map(group
+    .filter((row) => !affectedIds.has(idKey(row.id)))
+    .map((row) => [ticketKey(row.ticket_no), idKey(row.id)])
+    .filter(([ticket]) => ticket));
 
   if (scope !== 'PNR_WIDE' && scope !== 'SELECTED_PASSENGERS') {
     errors.push('Application scope must be PNR-wide or selected passengers.');
@@ -328,6 +356,11 @@ export function validateDateChangeFinalization(amendment = {}, group = []) {
         errors.push(`Affected passenger ${bookingId}'s new ticket number must differ from the old ticket number.`);
       }
       if (seenTickets.has(newTicket)) errors.push(`New ticket number ${text(mapping.new_ticket_no)} is duplicate.`);
+      if (unaffectedTickets.has(newTicket)) {
+        errors.push(
+          `New ticket number ${text(mapping.new_ticket_no)} is already used by unaffected booking row ${unaffectedTickets.get(newTicket)}.`,
+        );
+      }
       seenTickets.add(newTicket);
     }
 
@@ -338,6 +371,29 @@ export function validateDateChangeFinalization(amendment = {}, group = []) {
   });
 
   return [...new Set(errors)];
+}
+
+function validateFinalizationContext(context = {}) {
+  const errors = [];
+  const actor = text(context.actor);
+  const finalizedAt = text(context.finalizedAt);
+
+  if (!actor) errors.push('Finalization actor is required.');
+  if (!finalizedAt) {
+    errors.push('Finalization time is required.');
+  } else {
+    const match = finalizedAt.match(
+      /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/,
+    );
+    if (
+      !match
+      || !dateParts(match[1])
+      || !timeParts(match[2])
+      || Number.isNaN(Date.parse(finalizedAt))
+    ) errors.push('Finalization time must be a valid ISO timestamp.');
+  }
+
+  return errors;
 }
 
 function deduplicatePnrHistory(history = []) {
@@ -378,10 +434,14 @@ function deriveItineraryFields(itinerary) {
 }
 
 export function applyDateChangeAmendment(amendment = {}, group = [], context = {}) {
-  const errors = validateDateChangeFinalization(amendment, group);
+  const errors = [
+    ...validateDateChangeFinalization(amendment, group),
+    ...validateFinalizationContext(context),
+  ];
   if (errors.length) throw new Error(errors.join('\n'));
 
-  const { actor, finalizedAt } = context;
+  const actor = text(context.actor);
+  const finalizedAt = text(context.finalizedAt);
   const mappings = mappingByBookingId(amendment);
   const affectedIds = new Set(affectedRows(amendment, group).map((row) => idKey(row.id)));
   const finalItinerary = intendedItinerary(amendment);
@@ -394,6 +454,7 @@ export function applyDateChangeAmendment(amendment = {}, group = [], context = {
   const completed = {
     ...clone(amendment),
     amendment_type: 'DATE_CHANGE',
+    booking_ref: targetBookingRef(amendment, group),
     passenger_reissues: completedReissues,
     status: 'COMPLETED',
     finalized_at: finalizedAt,
