@@ -112,10 +112,6 @@ function exactBookingForFinanceRecord(record, rows) {
   return historicalMatches.length === 1 ? historicalMatches[0] : null;
 }
 
-function hasFinanceRowIdentity(record) {
-  return Boolean(token(record.booking_id) || token(record.ticket_no || record.ticket_id) || token(record.pnr));
-}
-
 function bookingsForFinanceRecord(record, indexes) {
   const stableRef = token(record.booking_ref);
   if (stableRef) {
@@ -123,7 +119,7 @@ function bookingsForFinanceRecord(record, indexes) {
     if (!stableRows?.length) return [];
     const exact = exactBookingForFinanceRecord(record, stableRows);
     if (exact) return [exact];
-    return stableRows.length > 1 && hasFinanceRowIdentity(record) ? [] : stableRows;
+    return stableRows.length === 1 ? stableRows : [];
   }
 
   const byId = indexes.byId.get(token(record.booking_id));
@@ -135,7 +131,7 @@ function bookingsForFinanceRecord(record, indexes) {
   const pnrRows = indexes.byPnr.get(token(record.pnr));
   if (!pnrRows?.length) return [];
   const exact = exactBookingForFinanceRecord(record, pnrRows);
-  return exact ? [exact] : pnrRows;
+  return exact ? [exact] : [];
 }
 
 export function scopedFinanceData(user, { bookings = [], payments = [], refunds = [], amendments = [], cancellations = [], expenses = [], allocations = [] }) {

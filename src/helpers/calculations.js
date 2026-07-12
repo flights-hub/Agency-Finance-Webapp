@@ -134,11 +134,6 @@ function exactBookingForFinanceRecord(record = {}, rows = []) {
   return historicalMatches.length === 1 ? historicalMatches[0] : null;
 }
 
-function hasFinanceRowIdentity(record = {}) {
-  return record.booking_id !== undefined && record.booking_id !== null
-    || Boolean(record.ticket_no || record.ticket_id || normalizePnr(record.pnr));
-}
-
 function bookingForFinanceRecord(record = {}, indexes) {
   const stableRef = String(record.booking_ref || '');
   if (stableRef) {
@@ -146,7 +141,7 @@ function bookingForFinanceRecord(record = {}, indexes) {
     if (!stableRows?.length) return null;
     const exact = exactBookingForFinanceRecord(record, stableRows);
     if (exact) return exact;
-    return stableRows.length > 1 && hasFinanceRowIdentity(record) ? null : stableRows[0];
+    return stableRows.length === 1 ? stableRows[0] : null;
   }
 
   if (record.booking_id !== undefined && record.booking_id !== null) {
@@ -159,7 +154,7 @@ function bookingForFinanceRecord(record = {}, indexes) {
   if (byTicket) return byTicket;
 
   const byPnr = indexes.byPnr.get(normalizePnr(record.pnr));
-  return byPnr?.length ? exactBookingForFinanceRecord(record, byPnr) || byPnr[0] : null;
+  return byPnr?.length ? exactBookingForFinanceRecord(record, byPnr) : null;
 }
 
 function financeRecordKey(record = {}, indexes) {
@@ -387,7 +382,7 @@ export function createPaymentEntry(input, bookings = [], payments = []) {
   const indexes = customerBookingIndexes(bookings);
   const relatedBooking = bookingForFinanceRecord({ ...rest, pnr: normalizedPnr }, indexes);
   const groupKey = relatedBooking ? customerBookingKey(relatedBooking) : financeRecordKey({ ...rest, pnr: normalizedPnr }, indexes);
-  const relatedBookings = relatedBooking ? (indexes.byGroup.get(groupKey) || [relatedBooking]) : [];
+  const relatedBookings = indexes.byGroup.get(groupKey) || (relatedBooking ? [relatedBooking] : []);
   const totalFare = relatedBookings.reduce((sum, booking) => sum + numeric(booking.fare_sold), 0);
   const agentPayments = payments.filter(isCustomerLedgerPayment);
   // Only posted payments count toward the running paid position.
@@ -402,12 +397,12 @@ export function createPaymentEntry(input, bookings = [], payments = []) {
     ...rest,
     payment_date,
     pnr: normalizedPnr,
-    booking_ref: stableBookingRef(relatedBooking) || rest.booking_ref || '',
+    booking_ref: (relatedBooking ? stableBookingRef(relatedBooking) : '') || rest.booking_ref || '',
     booking_id: relatedBooking?.id || rest.booking_id || '',
     payment_direction: rest.payment_direction || 'RECEIVED',
     party_type: rest.party_type || 'CUSTOMER',
-    party_name: rest.party_name || relatedBookings[0]?.bill_to_name || relatedBookings[0]?.passenger_name || '',
-    passenger_name: rest.passenger_name || relatedBookings[0]?.passenger_name || '',
+    party_name: rest.party_name || relatedBooking?.bill_to_name || relatedBooking?.passenger_name || '',
+    passenger_name: rest.passenger_name || relatedBooking?.passenger_name || '',
     amount_paid: amount,
     transaction_amount: amount,
     transaction_currency: rest.transaction_currency || 'EUR',

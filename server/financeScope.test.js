@@ -190,7 +190,7 @@ try {
   const rowScopedBookings = [
     {
       id: 'p1', booking_ref: 'SHARED-REF', pnr: 'P1-CURRENT', ticket_no: 'P1-TICKET',
-      pnr_history: ['SHARED-OLD'], supplier_id: 'SUP-1', supplier_name: 'Supplier One',
+      pnr_history: ['P1-OLD', 'SHARED-OLD'], supplier_id: 'SUP-1', supplier_name: 'Supplier One',
     },
     {
       id: 'p2', booking_ref: 'SHARED-REF', pnr: 'P2-CURRENT', pnr_history: ['P2-OLD', 'SHARED-OLD'],
@@ -204,15 +204,25 @@ try {
       { id: 'ref-p2', booking_ref: 'SHARED-REF', booking_id: 'p2' },
     ],
     amendments: [
+      { id: 'amd-p1-ticket', booking_ref: 'SHARED-REF', ticket_no: 'P1-TICKET' },
+      { id: 'amd-p1-current', booking_ref: 'SHARED-REF', pnr: 'P1-CURRENT' },
+      { id: 'amd-p1-history', booking_ref: 'SHARED-REF', pnr: 'P1-OLD' },
       { id: 'amd-p2-ticket', booking_ref: 'SHARED-REF', ticket_no: 'P2-TICKET' },
       { id: 'amd-p2-current', booking_ref: 'SHARED-REF', pnr: 'P2-CURRENT' },
       { id: 'amd-p2-history', booking_ref: 'SHARED-REF', pnr: 'P2-OLD' },
       { id: 'amd-shared-history', booking_ref: 'SHARED-REF', pnr: 'SHARED-OLD' },
+      { id: 'amd-legacy-shared-history', pnr: 'SHARED-OLD' },
+      { id: 'amd-group-only', booking_ref: 'SHARED-REF' },
+      { id: 'amd-unknown-ref', booking_ref: 'UNKNOWN-REF', pnr: 'P1-CURRENT' },
     ],
   });
 
   assert.deepEqual(rowScopedSupplier.refunds.map((record) => record.id), ['ref-p1']);
-  assert.deepEqual(rowScopedSupplier.amendments.map((record) => record.id), []);
+  assert.deepEqual(rowScopedSupplier.amendments.map((record) => record.id), [
+    'amd-p1-ticket',
+    'amd-p1-current',
+    'amd-p1-history',
+  ]);
 
   const splitCustomerBookings = [
     {
@@ -225,7 +235,7 @@ try {
     },
   ];
   const oldPnrPayment = {
-    id: 'pay-split', pnr: 'OLD111', amount_paid: 200, payment_date: '2026-07-01',
+    id: 'pay-split', booking_ref: 'INV-1', pnr: 'OLD111', amount_paid: 200, payment_date: '2026-07-01',
     payment_direction: 'RECEIVED', verification_status: 'VERIFIED', verified_at: '2026-07-01T10:00:00Z',
   };
   const bookingLedger = calculations.getBookingLedger(splitCustomerBookings, [oldPnrPayment]);

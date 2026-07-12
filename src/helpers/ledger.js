@@ -480,11 +480,6 @@ function exactBookingForRecord(record = {}, rows = []) {
   return historicalMatches.length === 1 ? historicalMatches[0] : null;
 }
 
-function hasFinanceRowIdentity(record = {}) {
-  return record.booking_id !== undefined && record.booking_id !== null
-    || Boolean(record.ticket_no || record.ticket_id || normalizePnr(record.pnr));
-}
-
 function bookingsForRecord(record = {}, indexes) {
   const stableRef = token(record.booking_ref);
   if (stableRef) {
@@ -492,7 +487,7 @@ function bookingsForRecord(record = {}, indexes) {
     if (!stableRows?.length) return [];
     const exact = exactBookingForRecord(record, stableRows);
     if (exact) return [exact];
-    return stableRows.length > 1 && hasFinanceRowIdentity(record) ? [] : stableRows;
+    return stableRows.length === 1 ? stableRows : [];
   }
 
   const byId = record.booking_id === undefined || record.booking_id === null
@@ -507,7 +502,7 @@ function bookingsForRecord(record = {}, indexes) {
   const byPnr = indexes.byPnr.get(normalizePnr(record.pnr));
   if (!byPnr?.length) return [];
   const exact = exactBookingForRecord(record, byPnr);
-  return exact ? [exact] : byPnr;
+  return exact ? [exact] : [];
 }
 
 // Posted refund payouts for a refund case: OUTGOING payments explicitly

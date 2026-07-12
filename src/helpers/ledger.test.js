@@ -148,13 +148,13 @@ test('split-row refund and amendment resolve the exact booking inside a stable g
   const first = {
     ...agentBooking({ fare: 500, pnr: 'FIRST111', agent: 'Agency A', ticket: 'TICKET-A' }),
     booking_ref: 'SHARED-REF',
-    pnr_history: ['SHARED-OLD'],
+    pnr_history: ['FIRST-OLD', 'SHARED-OLD'],
     supplier_name: 'Supplier A',
   };
   const second = {
     ...agentBooking({ fare: 400, pnr: 'SECOND222', agent: 'Agency B', ticket: 'TICKET-B' }),
     booking_ref: 'SHARED-REF',
-    pnr_history: ['SHARED-OLD'],
+    pnr_history: ['SECOND-OLD', 'SHARED-OLD'],
     supplier_name: 'Supplier B',
   };
   const refund = {
@@ -170,25 +170,82 @@ test('split-row refund and amendment resolve the exact booking inside a stable g
     pnr: 'SHARED-OLD',
     supplier_refund: 50,
   };
-  const amendment = {
-    id: uid('amd'),
-    booking_ref: 'SHARED-REF',
-    ticket_no: second.ticket_no,
-    pnr: second.pnr,
-    amendment_type: 'NAME_CHANGE',
-    status: 'QUOTED',
-  };
+  const amendments = [
+    {
+      id: uid('amd'), booking_ref: 'SHARED-REF', ticket_no: second.ticket_no,
+      amendment_type: 'NAME_CHANGE', status: 'QUOTED',
+    },
+    {
+      id: uid('amd'), booking_ref: 'SHARED-REF', pnr: first.pnr,
+      amendment_type: 'NAME_CHANGE', status: 'QUOTED',
+    },
+    {
+      id: uid('amd'), booking_ref: 'SHARED-REF', pnr: 'SECOND-OLD',
+      amendment_type: 'NAME_CHANGE', status: 'QUOTED',
+    },
+  ];
   const model = buildFinanceModel({
     bookings: [first, second],
     refunds: [refund, ambiguousRefund],
-    amendments: [amendment],
+    amendments,
   });
 
   assert.equal(account(model, 'SUPPLIER', 'Supplier A').refunds.length, 0);
   assert.deepEqual(account(model, 'SUPPLIER', 'Supplier B').refunds.map((entry) => entry.refund.id), [refund.id]);
   assert.equal(model.refundsById.has(ambiguousRefund.id), true);
+  assert.deepEqual(account(model, 'AGENT', 'Agency A').amendments.map(({ amendment }) => amendment.id), [amendments[1].id]);
+  assert.deepEqual(account(model, 'AGENT', 'Agency B').amendments.map(({ amendment }) => amendment.id), [
+    amendments[0].id,
+    amendments[2].id,
+  ]);
+});
+
+test('ambiguous aliases and group-only references never infer the first booking row', () => {
+  const first = {
+    ...agentBooking({ fare: 500, pnr: 'FIRST333', agent: 'Agency A', ticket: 'TICKET-C' }),
+    booking_ref: 'GROUP-ONLY',
+    pnr_history: ['AMBIGUOUS-OLD'],
+    supplier_name: 'Supplier A',
+  };
+  const second = {
+    ...agentBooking({ fare: 400, pnr: 'SECOND444', agent: 'Agency B', ticket: 'TICKET-D' }),
+    booking_ref: 'GROUP-ONLY',
+    pnr_history: ['AMBIGUOUS-OLD'],
+    supplier_name: 'Supplier B',
+  };
+  const payments = [
+    verifiedPayment({ amount: 20, pnr: 'AMBIGUOUS-OLD', party: 'Fallback Agency' }),
+    verifiedPayment({ amount: 30, party: 'Fallback Agency', extra: { booking_ref: 'GROUP-ONLY' } }),
+    verifiedPayment({
+      amount: 40,
+      pnr: first.pnr,
+      party: 'Fallback Agency',
+      extra: { booking_ref: 'UNKNOWN-REF' },
+    }),
+  ];
+  const refunds = [
+    { id: uid('ref'), pnr: 'AMBIGUOUS-OLD', supplier_refund: 20 },
+    { id: uid('ref'), booking_ref: 'GROUP-ONLY', supplier_refund: 30 },
+    { id: uid('ref'), booking_ref: 'UNKNOWN-REF', pnr: first.pnr, supplier_refund: 40 },
+  ];
+  const amendments = [
+    { id: uid('amd'), pnr: 'AMBIGUOUS-OLD', amendment_type: 'NAME_CHANGE', status: 'QUOTED' },
+    { id: uid('amd'), booking_ref: 'GROUP-ONLY', amendment_type: 'NAME_CHANGE', status: 'QUOTED' },
+    {
+      id: uid('amd'), booking_ref: 'UNKNOWN-REF', pnr: first.pnr,
+      amendment_type: 'NAME_CHANGE', status: 'QUOTED',
+    },
+  ];
+  const model = buildFinanceModel({ bookings: [first, second], payments, refunds, amendments });
+
+  assert.equal(account(model, 'AGENT', 'Agency A').payments.length, 0);
+  assert.equal(account(model, 'AGENT', 'Agency B').payments.length, 0);
+  assert.deepEqual(account(model, 'AGENT', 'Fallback Agency').payments.map((payment) => payment.id), payments.map((payment) => payment.id));
+  assert.equal(account(model, 'SUPPLIER', 'Supplier A').refunds.length, 0);
+  assert.equal(account(model, 'SUPPLIER', 'Supplier B').refunds.length, 0);
+  assert.equal(refunds.every((refund) => model.refundsById.has(refund.id)), true);
   assert.equal(account(model, 'AGENT', 'Agency A').amendments.length, 0);
-  assert.equal(account(model, 'AGENT', 'Agency B').amendments[0].booking.id, second.id);
+  assert.equal(account(model, 'AGENT', 'Agency B').amendments.length, 0);
 });
 
 test('booking PNR aliases index each booking only once per alias', () => {
