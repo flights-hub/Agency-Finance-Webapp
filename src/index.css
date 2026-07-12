@@ -4002,6 +4002,217 @@ textarea:focus {
   resize: vertical;
 }
 
+.date-change-editor,
+.date-change-direction,
+.date-change-journey,
+.date-change-segment {
+  display: grid;
+  gap: 10px;
+}
+
+.date-change-editor {
+  margin-top: 8px;
+}
+
+.date-change-direction + .date-change-direction {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.date-change-direction-title {
+  margin: 0;
+  color: var(--ink-800);
+  font-size: var(--t-14);
+}
+
+.date-change-comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.date-change-journey {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--paper);
+}
+
+.date-change-journey-original {
+  background: var(--bg-secondary);
+}
+
+.date-change-journey-head,
+.date-change-segment-head,
+.date-change-connection-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.date-change-journey-head h6,
+.date-change-segment-title {
+  margin: 0;
+  color: var(--ink-800);
+  font-size: var(--t-12);
+}
+
+.date-change-journey-kicker {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--ink-500);
+  font-family: var(--f-mono);
+  font-size: var(--t-11);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.date-change-segment {
+  min-width: 0;
+}
+
+.date-change-segment + .date-change-segment {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.date-change-segment-head {
+  align-items: center;
+}
+
+.date-change-connection-card {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.date-change-connection-card + .date-change-connection-card {
+  margin-top: 8px;
+}
+
+.date-change-connection-head {
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.date-change-connection-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.date-change-connection-head strong {
+  color: var(--ink-800);
+  font-size: var(--t-12);
+}
+
+.date-change-connection-head span {
+  color: var(--ink-500);
+  font-size: var(--t-11);
+}
+
+.date-change-connection-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.date-change-connection-grid label,
+.date-change-readonly-grid > div {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.date-change-connection-grid label > span,
+.date-change-readonly-grid dt {
+  color: var(--ink-500);
+  font-size: var(--t-11);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.date-change-connection-grid input {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--ink-800);
+  font-size: var(--t-12);
+}
+
+.date-change-connection-grid input:disabled {
+  cursor: not-allowed;
+  background: var(--bg-secondary);
+  color: var(--ink-500);
+}
+
+.date-change-readonly-grid dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink-800);
+  font-size: var(--t-12);
+  overflow-wrap: anywhere;
+}
+
+.date-change-empty {
+  margin: 0;
+  color: var(--ink-500);
+  font-size: var(--t-12);
+}
+
+.date-change-empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.date-change-editor .btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.reissue-mapping-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-12);
+}
+
+.reissue-mapping-table th,
+.reissue-mapping-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.reissue-mapping-table th {
+  color: var(--ink-500);
+  font-size: var(--t-11);
+  text-transform: uppercase;
+}
+
+.reissue-mapping-table input {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 9px;
+}
+
+@media (max-width: 980px) {
+  .date-change-comparison {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (min-width: 1180px) {
   .servicing-modal .modal-form-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -4024,7 +4235,8 @@ textarea:focus {
 
   .modal-form-grid,
   .modal-card-wide .modal-form-grid,
-  .servicing-modal .modal-form-grid {
+  .servicing-modal .modal-form-grid,
+  .date-change-connection-grid {
     grid-template-columns: 1fr;
   }
 
@@ -4035,6 +4247,24 @@ textarea:focus {
   .servicing-modal {
     width: calc(100vw - 20px);
     max-height: calc(100vh - 20px);
+  }
+
+  .date-change-journey-head,
+  .date-change-segment-head,
+  .date-change-connection-head,
+  .date-change-empty-state {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .date-change-connection-head .btn,
+  .date-change-segment-head .btn,
+  .date-change-empty-state .btn {
+    width: 100%;
+  }
+
+  .reissue-mapping-table {
+    min-width: 680px;
   }
 }
 
