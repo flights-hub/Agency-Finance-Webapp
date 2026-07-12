@@ -23,6 +23,7 @@ import {
 } from '../helpers/paymentVerification';
 import { canVerifyPayments } from '../helpers/access';
 import { formatCurrency } from '../helpers/format';
+import { bookingPnrAliases, stableBookingRef } from '../helpers/bookingIdentity';
 import { FileText, Loader2, Paperclip, RotateCcw, RotateCw, ScanText, ZoomIn, ZoomOut } from 'lucide-react';
 
 const ATTACHMENT_TYPES = ['image/jpeg', 'image/png', 'application/pdf'];
@@ -145,7 +146,26 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
   }, []);
 
   const bookingLedger = useMemo(() => getBookingLedger(bookings, payments), [bookings, payments]);
-  const pnrOptions = bookingLedger.filter((booking) => booking.pnr_n === 1);
+  const pnrOptions = useMemo(() => {
+    const balanceByGroup = new Map();
+    bookingLedger.forEach((booking) => {
+      if (booking.balance_due === null || booking.balance_due === undefined) return;
+      const key = stableBookingRef(booking) || booking.pnr;
+      balanceByGroup.set(key, booking.balance_due);
+    });
+
+    const seen = new Set();
+    return bookingLedger
+      .filter((booking) => {
+        if (!booking.pnr || seen.has(booking.pnr)) return false;
+        seen.add(booking.pnr);
+        return true;
+      })
+      .map((booking) => ({
+        ...booking,
+        balance_due: balanceByGroup.get(stableBookingRef(booking) || booking.pnr) ?? booking.balance_due,
+      }));
+  }, [bookingLedger]);
 
   // Agents and suppliers come from the authenticated user directory so the
   // selected name and linked party key always refer to the same profile.
@@ -176,7 +196,7 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     if (form.party_type !== 'CUSTOMER' || !form.pnr) return [];
     const normalized = form.pnr.replace(/[^a-z0-9]/gi, '').toUpperCase();
     return bookings
-      .filter((booking) => (booking.pnr || '').replace(/[^a-z0-9]/gi, '').toUpperCase() === normalized)
+      .filter((booking) => bookingPnrAliases(booking).includes(normalized))
       .map((booking) => ({ id: booking.ticket_no || booking.id, label: `${booking.passenger_name || 'Passenger'}${booking.ticket_no ? ` · ${booking.ticket_no}` : ''}` }));
   }, [bookings, form.party_type, form.pnr]);
 
@@ -337,7 +357,19 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     }
 
     if (form.party_type === 'CUSTOMER') {
-      return createPaymentEntry({ ...shared, pnr: form.pnr, amount_paid: amount }, bookings, payments);
+      const normalizedPnr = form.pnr.replace(/[^a-z0-9]/gi, '').toUpperCase();
+      const matchingBookings = bookings.filter((booking) => bookingPnrAliases(booking).includes(normalizedPnr));
+      const relatedBooking = matchingBookings.find((booking) => (
+        form.ticket_id
+        && (String(booking.ticket_no) === String(form.ticket_id) || String(booking.id) === String(form.ticket_id))
+      )) || matchingBookings[0];
+      return createPaymentEntry({
+        ...shared,
+        pnr: form.pnr,
+        booking_ref: stableBookingRef(relatedBooking),
+        booking_id: relatedBooking?.id || '',
+        amount_paid: amount,
+      }, bookings, payments);
     }
 
     // AGENT party: a settlement payment from/to an agent, not tied to a PNR.

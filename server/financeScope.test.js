@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'vite';
+import { scopedFinanceData as scopedServerFinanceData } from './financeAccess.js';
 
 const vite = await createServer({
   server: { middlewareMode: true },
@@ -127,6 +128,98 @@ try {
   assert.equal(access.canCreateBookings(staleAgentWithCreate), false);
   assert.equal(access.canEditBookings(staleAgentWithCreate), false);
   assert.equal(access.canCreateBookings(employeeWithCreate), true);
+
+  const splitBookings = [
+    {
+      ...bookings[0],
+      booking_ref: 'BOOK-1',
+      pnr: 'NEW-PNR',
+      pnr_history: ['OLD-PNR'],
+    },
+    {
+      ...bookings[1],
+      booking_ref: 'BOOK-2',
+      supplier_id: 'SUP-2',
+      supplier_name: 'Supplier Two',
+    },
+  ];
+  const continuityRecords = {
+    bookings: splitBookings,
+    payments: [
+      { id: 'pay-old', payment_direction: 'RECEIVED', pnr: 'OLD-PNR' },
+      { id: 'pay-ref', payment_direction: 'RECEIVED', booking_ref: 'BOOK-1', pnr: 'MISMATCH' },
+      { id: 'pay-unrelated', payment_direction: 'RECEIVED', booking_ref: 'BOOK-2', pnr: 'PNR2' },
+      { id: 'pay-conflict', payment_direction: 'RECEIVED', booking_ref: 'BOOK-2', pnr: 'OLD-PNR' },
+    ],
+    refunds: [
+      { id: 'ref-old', pnr: 'OLD-PNR' },
+      { id: 'ref-ref', booking_ref: 'BOOK-1', pnr: 'MISMATCH' },
+      { id: 'ref-unrelated', booking_ref: 'BOOK-2', pnr: 'PNR2' },
+    ],
+    amendments: [
+      { id: 'amd-old', pnr: 'OLD-PNR' },
+      { id: 'amd-ref', booking_ref: 'BOOK-1', pnr: 'MISMATCH' },
+      { id: 'amd-unrelated', booking_ref: 'BOOK-2', pnr: 'PNR2' },
+      { id: 'amd-conflict', booking_ref: 'BOOK-2', pnr: 'OLD-PNR' },
+    ],
+    cancellations: [
+      { id: 'can-old', pnr: 'OLD-PNR' },
+      { id: 'can-ref', booking_ref: 'BOOK-1', pnr: 'MISMATCH' },
+      { id: 'can-unrelated', booking_ref: 'BOOK-2', pnr: 'PNR2' },
+    ],
+    allocations: [
+      { id: 'alc-old', pnr: 'OLD-PNR' },
+      { id: 'alc-ref', booking_ref: 'BOOK-1', pnr: 'MISMATCH' },
+      { id: 'alc-unrelated', booking_ref: 'BOOK-2', pnr: 'PNR2' },
+    ],
+  };
+  const continuityAgent = scopedServerFinanceData(agent, continuityRecords);
+  assert.deepEqual(continuityAgent.payments.map((record) => record.id), ['pay-old', 'pay-ref']);
+  assert.deepEqual(continuityAgent.refunds.map((record) => record.id), ['ref-old', 'ref-ref']);
+  assert.deepEqual(continuityAgent.amendments.map((record) => record.id), ['amd-old', 'amd-ref']);
+  assert.deepEqual(continuityAgent.cancellations.map((record) => record.id), ['can-old', 'can-ref']);
+  assert.deepEqual(continuityAgent.allocations.map((record) => record.id), ['alc-old', 'alc-ref']);
+
+  const continuitySupplier = scopedServerFinanceData(supplier, continuityRecords);
+  assert.deepEqual(continuitySupplier.refunds.map((record) => record.id), ['ref-old', 'ref-ref']);
+  assert.deepEqual(continuitySupplier.amendments.map((record) => record.id), ['amd-old', 'amd-ref']);
+  assert.deepEqual(continuitySupplier.cancellations.map((record) => record.id), ['can-old', 'can-ref']);
+  assert.deepEqual(continuitySupplier.allocations.map((record) => record.id), ['alc-old', 'alc-ref']);
+
+  const splitCustomerBookings = [
+    {
+      id: 'p1', booking_ref: 'INV-1', pnr: 'NEW111', pnr_history: ['OLD111'],
+      passenger_name: 'Passenger One', fare_sold: 500,
+    },
+    {
+      id: 'p2', booking_ref: 'INV-1', pnr: 'SPLIT222', pnr_history: ['OLD111'],
+      passenger_name: 'Passenger Two', fare_sold: 300,
+    },
+  ];
+  const oldPnrPayment = {
+    id: 'pay-split', pnr: 'OLD111', amount_paid: 200, payment_date: '2026-07-01',
+    payment_direction: 'RECEIVED', verification_status: 'VERIFIED', verified_at: '2026-07-01T10:00:00Z',
+  };
+  const bookingLedger = calculations.getBookingLedger(splitCustomerBookings, [oldPnrPayment]);
+  assert.equal(bookingLedger[0].total_paid, 200);
+  assert.equal(bookingLedger[0].balance_due, 600);
+  assert.equal(bookingLedger[1].total_paid, null);
+
+  const paymentLedger = calculations.getPaymentLedger(splitCustomerBookings, [oldPnrPayment]);
+  assert.equal(paymentLedger[0].total_fare, 800);
+  assert.equal(paymentLedger[0].remaining_balance, 600);
+
+  const nextPayment = calculations.createPaymentEntry({
+    payment_date: '2026-07-02',
+    pnr: 'SPLIT222',
+    amount_paid: 100,
+    payment_mode: 'CASH',
+  }, splitCustomerBookings, [oldPnrPayment]);
+  assert.equal(nextPayment.booking_ref, 'INV-1');
+  assert.equal(nextPayment.booking_id, 'p2');
+  assert.equal(nextPayment.instalment_no, 2);
+  assert.equal(nextPayment.total_fare, 800);
+  assert.equal(nextPayment.remaining_balance, 500);
 
   console.log('Finance role scoping checks passed');
 } finally {

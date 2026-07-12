@@ -27,6 +27,8 @@ import {
   isSupplierPayment,
   getLedgerPostingStatus,
 } from './paymentVerification.js';
+import { bookingPnrAliases, stableBookingRef } from './bookingIdentity.js';
+import { isDateChangeType } from './dateChangeAmendments.js';
 
 export function numeric(value) {
   const parsed = Number(value);
@@ -88,8 +90,8 @@ export const REFUND_CASE_STATUSES = [
   'CANCELLED',
 ];
 
-// Amendment cases (booking servicing spec §3–§7). Financial posting happens
-// at CONFIRMED; COMPLETED is the separate operational milestone.
+// Amendment cases (booking servicing spec §3–§7). Date changes post at the
+// finalized COMPLETED milestone; other servicing cases continue at CONFIRMED.
 export const AMENDMENT_TYPES = [
   'DATE_CHANGE',
   'OUTBOUND_DATE_CHANGE',
@@ -201,17 +203,19 @@ export function bookingSupplierCosts(booking = {}) {
   return [{ name: String(fallback), amount: numeric(booking.fare_issued) }];
 }
 
-// Counterparty of a payment. PNR attribution wins so the payment lands in the
-// same account as the tickets it pays for; explicit party fields are the
-// fallback for account-level (no PNR) payments.
-export function paymentCounterparty(payment = {}, bookingsByPnr = new Map()) {
+// Counterparty of a payment. Stable booking identity and PNR/ticket aliases
+// keep it on the ticket account; explicit party fields are the fallback for
+// account-level payments.
+export function paymentCounterparty(payment = {}, bookingsByPnr = new Map(), bookingIndexes = null) {
   if (isSupplierPayment(payment)) {
     const name = payment.supplier_name || payment.supplier_id || payment.party_name || 'Unknown supplier';
     return { type: 'SUPPLIER', name: String(name), key: accountId('SUPPLIER', name) };
   }
-  const pnr = normalizePnr(payment.pnr);
-  const related = pnr ? bookingsByPnr.get(pnr) : null;
-  if (related && related.length) return bookingCounterparty(related[0]);
+  const indexes = bookingIndexes || bookingsByPnr.bookingIndexes;
+  const related = indexes
+    ? bookingsForRecord(payment, indexes)
+    : (bookingsByPnr.get(normalizePnr(payment.pnr)) || []);
+  if (related.length) return bookingCounterparty(related[0]);
   if (payment.party_name) {
     const type = payment.party_type === 'AGENT' ? 'AGENT' : 'CUSTOMER';
     return { type, name: String(payment.party_name), key: accountId(type, payment.party_name) };
@@ -276,8 +280,8 @@ export function amendmentTotalImpact(amendment = {}) {
   );
 }
 
-// Financial posting happens at CONFIRMED (spec §6); COMPLETED keeps it posted.
 export function isAmendmentPosted(amendment = {}) {
+  if (isDateChangeType(amendment.amendment_type)) return amendment.status === 'COMPLETED';
   return ['CONFIRMED', 'COMPLETED'].includes(amendment.status);
 }
 
@@ -419,12 +423,55 @@ function ensureAccount(accounts, party) {
 export function groupBookingsByPnr(bookings = []) {
   const map = new Map();
   bookings.forEach((booking) => {
-    const pnr = normalizePnr(booking.pnr);
-    if (!pnr) return;
-    if (!map.has(pnr)) map.set(pnr, []);
-    map.get(pnr).push(booking);
+    bookingPnrAliases(booking).forEach((pnr) => addBookingToIndex(map, pnr, booking));
   });
   return map;
+}
+
+function addBookingToIndex(map, key, booking) {
+  if (!key) return;
+  if (!map.has(key)) map.set(key, []);
+  const rows = map.get(key);
+  const duplicate = rows.some((row) => (
+    row === booking
+    || (booking.id !== undefined && booking.id !== null && String(row.id) === String(booking.id))
+  ));
+  if (!duplicate) rows.push(booking);
+}
+
+function buildBookingIndexes(bookings, bookingsByPnr) {
+  const byRef = new Map();
+  const byId = new Map();
+  const byTicket = new Map();
+
+  bookings.forEach((booking) => {
+    addBookingToIndex(byRef, token(stableBookingRef(booking)), booking);
+    if (booking.id !== undefined && booking.id !== null) byId.set(String(booking.id), booking);
+    if (booking.ticket_no) byTicket.set(token(booking.ticket_no), booking);
+  });
+
+  const indexes = { byRef, byId, byPnr: bookingsByPnr, byTicket };
+  // paymentCounterparty is also used by the Payments page with only the PNR
+  // map, so keep the stable indexes alongside that public map.
+  bookingsByPnr.bookingIndexes = indexes;
+  return indexes;
+}
+
+function bookingsForRecord(record = {}, indexes) {
+  const stableRows = indexes.byRef.get(token(record.booking_ref));
+  if (stableRows?.length) return stableRows;
+
+  const byId = record.booking_id === undefined || record.booking_id === null
+    ? null
+    : indexes.byId.get(String(record.booking_id));
+  if (byId) return [byId];
+
+  const byPnr = indexes.byPnr.get(normalizePnr(record.pnr));
+  if (byPnr?.length) return byPnr;
+
+  const ticket = record.ticket_no || record.ticket_id;
+  const byTicket = ticket ? indexes.byTicket.get(token(ticket)) : null;
+  return byTicket ? [byTicket] : [];
 }
 
 // Posted refund payouts for a refund case: OUTGOING payments explicitly
@@ -441,7 +488,7 @@ function postedPayoutsForRefund(refund, payments) {
 export function buildFinanceModel({ bookings = [], payments = [], refunds = [], allocations = [], amendments = [] } = {}) {
   const bookingsByPnr = groupBookingsByPnr(bookings);
   const bookingsByTicket = new Map(bookings.filter((b) => b.ticket_no).map((b) => [token(b.ticket_no), b]));
-  const bookingsById = new Map(bookings.map((b) => [String(b.id), b]));
+  const bookingIndexes = buildBookingIndexes(bookings, bookingsByPnr);
   const accounts = new Map();
 
   bookings.forEach((booking) => {
@@ -453,12 +500,11 @@ export function buildFinanceModel({ bookings = [], payments = [], refunds = [], 
   });
 
   payments.forEach((payment) => {
-    ensureAccount(accounts, paymentCounterparty(payment, bookingsByPnr)).payments.push(payment);
+    ensureAccount(accounts, paymentCounterparty(payment, bookingsByPnr, bookingIndexes)).payments.push(payment);
   });
 
   refunds.forEach((refund) => {
-    const booking = bookingsByTicket.get(token(refund.ticket_no))
-      || (bookingsByPnr.get(normalizePnr(refund.pnr)) || [])[0];
+    const booking = bookingsForRecord(refund, bookingIndexes)[0];
     const party = booking ? bookingCounterparty(booking) : null;
     const enriched = { refund, booking };
     if (party) ensureAccount(accounts, party).refunds.push(enriched);
@@ -476,8 +522,7 @@ export function buildFinanceModel({ bookings = [], payments = [], refunds = [], 
 
   // Amendment cases land on the same receivable account as their booking.
   amendments.forEach((amendment) => {
-    const booking = bookingsById.get(String(amendment.booking_id))
-      || (bookingsByPnr.get(normalizePnr(amendment.pnr)) || [])[0];
+    const booking = bookingsForRecord(amendment, bookingIndexes)[0];
     if (!booking) return;
     ensureAccount(accounts, bookingCounterparty(booking)).amendments.push({ amendment, booking });
   });
@@ -618,7 +663,7 @@ export function getAccountOpenItems(account, model) {
     });
 
   // Posted amendment cases: positive impact = receivable open item, negative
-  // impact = credit open item. A confirmed amendment with zero impact posts
+  // impact = credit open item. A posted amendment with zero impact adds
   // nothing (spec §6).
   const amendmentItems = account.amendments
     .filter(({ amendment }) => isAmendmentPosted(amendment) && amendmentTotalImpact(amendment) !== 0)
@@ -674,7 +719,8 @@ export function getAccountOpenItems(account, model) {
 }
 
 function amendmentPostingDate(amendment = {}) {
-  const stamp = amendment.confirmed_at || amendment.approved_at || amendment.updated_at || amendment.created_at;
+  const stamp = amendment.finalized_at || amendment.completed_at || amendment.confirmed_at
+    || amendment.approved_at || amendment.updated_at || amendment.created_at;
   return stamp ? String(stamp).slice(0, 10) : '';
 }
 
@@ -753,7 +799,7 @@ export function getAccountLedger(account) {
       }
     });
 
-    // Confirmed amendment cases: positive impact debits the counterparty
+    // Posted amendment cases: positive impact debits the counterparty
     // (AMENDMENT_CHARGE), negative impact credits it (AMENDMENT_CREDIT).
     account.amendments.forEach(({ amendment, booking }) => {
       if (!isAmendmentPosted(amendment)) return;
