@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { rememberPayment, savePayment } from '../helpers/storage';
 import { api } from '../helpers/api';
 import { createPaymentEntry, createSupplierPaymentEntry, getBookingLedger, numeric, PAYMENT_MODES } from '../helpers/calculations';
@@ -33,6 +33,8 @@ const EMPTY_FORM = {
   payment_direction: 'RECEIVED',
   party_type: 'CUSTOMER',
   party_name: '',
+  agent_id: '',
+  supplier_id: '',
   pnr: '',
   ticket_id: '',
   amount_paid: '',
@@ -118,6 +120,8 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
   const [proofZoom, setProofZoom] = useState(1);
   const [proofRotation, setProofRotation] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [registeredUsers, setRegisteredUsers] = useState([]);
+  const editedFields = useRef(new Set());
 
   useEffect(() => {
     if (!proofFile) return undefined;
@@ -128,31 +132,45 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     return () => URL.revokeObjectURL(url);
   }, [proofFile]);
 
+  useEffect(() => {
+    let active = true;
+    api.listDirectoryUsers()
+      .then((data) => {
+        if (active) setRegisteredUsers(data.users || []);
+      })
+      .catch(() => {
+        if (active) setRegisteredUsers([]);
+      });
+    return () => { active = false; };
+  }, []);
+
   const bookingLedger = useMemo(() => getBookingLedger(bookings, payments), [bookings, payments]);
   const pnrOptions = bookingLedger.filter((booking) => booking.pnr_n === 1);
 
-  // Party suggestions per party type, from the data this user can see.
+  // Agents and suppliers come from the authenticated user directory so the
+  // selected name and linked party key always refer to the same profile.
   const partyOptions = useMemo(() => {
-    const customers = new Set();
-    const agents = new Set();
-    const suppliers = new Set();
-    bookings.forEach((booking) => {
-      [booking.bill_to_name, booking.passenger_name].filter(Boolean).forEach((name) => customers.add(name));
-      [booking.booked_by, booking.agent_issued_by].filter(Boolean).forEach((name) => agents.add(name));
-      [booking.supplier_name, booking.supplier, booking.airline].filter(Boolean).forEach((name) => suppliers.add(name));
-      (booking.supplier_segments || []).forEach((segment) => segment.supplier_name && suppliers.add(segment.supplier_name));
-    });
+    const forRole = (role) => registeredUsers
+      .filter((entry) => entry.role === role && entry.name)
+      .map((entry) => ({ id: entry.party_id || entry.id, name: entry.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
     return {
-      CUSTOMER: [...customers].sort(),
-      AGENT: [...agents].sort(),
-      SUPPLIER: [...suppliers].sort(),
+      AGENT: forRole('AGENT'),
+      SUPPLIER: forRole('SUPPLIER'),
     };
-  }, [bookings]);
+  }, [registeredUsers]);
 
   const methodFields = methodFieldsFor(form.payment_method);
   const hasGrossAmount = methodFields.some((field) => field.key === 'gross_amount');
   const grossAmount = numeric(form.gross_amount) || numeric(form.amount_paid);
   const netSettlement = grossAmount - numeric(form.processing_fee);
+  const activePartyOptions = partyOptions[form.party_type] || [];
+  const storedPartyId = form.party_type === 'AGENT' ? form.agent_id : form.supplier_id;
+  const selectedPartyOption = activePartyOptions.find((option) => (
+    option.id === storedPartyId || option.name === form.party_name
+  ));
+  const partySelectValue = selectedPartyOption?.id || (form.party_name ? '__current__' : '');
 
   const ticketOptions = useMemo(() => {
     if (form.party_type !== 'CUSTOMER' || !form.pnr) return [];
@@ -172,7 +190,35 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
   }, [bookings, form, payments, user]);
 
   const updateForm = (key, value) => {
+    editedFields.current.add(key);
     setForm((current) => ({ ...current, [key]: value }));
+  };
+
+  const updatePartyType = (partyType) => {
+    editedFields.current.add('party_type');
+    editedFields.current.add('party_name');
+    setForm((current) => ({
+      ...current,
+      party_type: partyType,
+      party_name: '',
+      agent_id: '',
+      supplier_id: '',
+      pnr: partyType === 'CUSTOMER' ? current.pnr : '',
+      ticket_id: '',
+      payment_direction: partyType === 'SUPPLIER' ? 'PAID' : current.payment_direction,
+    }));
+  };
+
+  const updateParty = (partyId) => {
+    const selected = (partyOptions[form.party_type] || []).find((option) => option.id === partyId);
+    editedFields.current.add('party_name');
+    editedFields.current.add(form.party_type === 'AGENT' ? 'agent_id' : 'supplier_id');
+    setForm((current) => ({
+      ...current,
+      party_name: selected?.name || '',
+      agent_id: current.party_type === 'AGENT' ? (selected?.id || '') : '',
+      supplier_id: current.party_type === 'SUPPLIER' ? (selected?.id || '') : '',
+    }));
   };
 
   const proofMeta = form.payment_proof || editingPayment?.payment_proof || null;
@@ -211,7 +257,10 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     try {
       const ocr = await extractPaymentProof(file);
       setProofOcr(ocr);
-      setForm((current) => mergePaymentProofDraft(current, ocr.extracted));
+      setForm((current) => mergePaymentProofDraft(current, ocr.extracted, {
+        protectedFields: editedFields.current,
+        overwriteFields: editingPayment ? [] : ['payment_date', 'payment_method', 'transaction_currency'],
+      }));
       setProofStatus(ocr.warnings?.length
         ? `OCR finished with ${ocr.warnings.length} field warning${ocr.warnings.length === 1 ? '' : 's'}`
         : 'OCR fields detected');
@@ -226,6 +275,13 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
   // reference) are filled in.
   const buildRecord = () => {
     const amount = numeric(form.amount_paid);
+    const selectedParty = (partyOptions[form.party_type] || []).find((option) => (
+      option.id === (form.party_type === 'AGENT' ? form.agent_id : form.supplier_id)
+      || option.name === form.party_name
+    ));
+    const partyId = selectedParty?.id
+      || (form.party_type === 'AGENT' ? form.agent_id : form.supplier_id)
+      || '';
     const methodValues = {};
     methodFields.forEach((field) => {
       methodValues[field.key] = form[field.key] ?? '';
@@ -246,6 +302,8 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
       // Customer payments take the party name from the booking's lead
       // passenger; there is no manual customer field in the form.
       party_name: form.party_type === 'CUSTOMER' ? '' : form.party_name,
+      agent_id: form.party_type === 'AGENT' ? partyId : '',
+      supplier_id: form.party_type === 'SUPPLIER' ? partyId : '',
       ticket_id: form.party_type === 'CUSTOMER' ? form.ticket_id : '',
       transaction_currency: form.transaction_currency,
       payment_mode: form.payment_method,
@@ -536,22 +594,25 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
           </label>
           <label>
             <span>Party Type *</span>
-            <select value={form.party_type} disabled={Boolean(lockedPnr)} onChange={(event) => updateForm('party_type', event.target.value)}>
+            <select value={form.party_type} disabled={Boolean(lockedPnr)} onChange={(event) => updatePartyType(event.target.value)}>
               {PARTY_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
             </select>
           </label>
           {form.party_type !== 'CUSTOMER' && (
             <label>
               <span>{form.party_type === 'AGENT' ? 'Agent *' : 'Supplier *'}</span>
-              <input
-                list="payment-party-options"
-                value={form.party_name}
-                onChange={(event) => updateForm('party_name', event.target.value)}
-                placeholder={`Search ${form.party_type.toLowerCase()}...`}
-              />
-              <datalist id="payment-party-options">
-                {(partyOptions[form.party_type] || []).map((name) => <option key={name} value={name} />)}
-              </datalist>
+              <select
+                value={partySelectValue}
+                onChange={(event) => updateParty(event.target.value)}
+              >
+                <option value="">Select {form.party_type.toLowerCase()}</option>
+                {partySelectValue === '__current__' && (
+                  <option value="__current__">{form.party_name}</option>
+                )}
+                {activePartyOptions.map((option) => (
+                  <option key={option.id} value={option.id}>{option.name}</option>
+                ))}
+              </select>
             </label>
           )}
           {form.party_type === 'CUSTOMER' && (

@@ -478,6 +478,27 @@ async function handleListUsers(req, res) {
   });
 }
 
+async function handleUserDirectory(req, res) {
+  await currentUser(req);
+  const profiles = await supabaseRequest(
+    '/rest/v1/profiles?status=eq.ACTIVE&select=id,name,role,status,linked_agent_id,linked_supplier_id&order=name.asc',
+  );
+
+  json(res, 200, {
+    users: (profiles || []).map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      role: profile.role,
+      status: profile.status,
+      party_id: profile.role === 'AGENT'
+        ? (profile.linked_agent_id || profile.id)
+        : profile.role === 'SUPPLIER'
+          ? (profile.linked_supplier_id || profile.id)
+          : profile.id,
+    })),
+  });
+}
+
 async function handleUpdateUser(req, res, id) {
   const actor = await requireAdmin(req);
   const body = await readBody(req);
@@ -1018,6 +1039,7 @@ async function route(req, res) {
   if (req.method === 'POST' && path === '/api/bookings/parse-pnr') return handleParsePnr(req, res);
   if (req.method === 'POST' && path === '/api/bookings/parse-text') return handleParseBookingText(req, res);
   if (req.method === 'GET' && path === '/api/finance/data') return handleFinanceData(req, res);
+  if (req.method === 'GET' && path === '/api/directory/users') return handleUserDirectory(req, res);
 
   const proofUploadMatch = path.match(/^\/api\/payments\/([^/]+)\/proof-upload$/);
   if (proofUploadMatch && req.method === 'POST') return handleCreatePaymentProofUpload(req, res, decodeURIComponent(proofUploadMatch[1]));

@@ -145,16 +145,18 @@ export function parsePaymentProofText(rawText) {
   };
 }
 
-export function mergePaymentProofDraft(form, extracted = {}) {
+export function mergePaymentProofDraft(form, extracted = {}, options = {}) {
   const next = { ...form };
+  const protectedFields = new Set(options.protectedFields || []);
+  const overwriteFields = new Set(options.overwriteFields || []);
+
   Object.entries(extracted).forEach(([key, value]) => {
     if (value === undefined || value === null || value === '') return;
     if (key === 'amount_paid' && Number(value) <= 0) return;
-    if (next[key] === undefined || next[key] === null || String(next[key]).trim() === '') {
+    if (protectedFields.has(key)) return;
+    if (overwriteFields.has(key) || next[key] === undefined || next[key] === null || String(next[key]).trim() === '') {
       next[key] = key === 'amount_paid' ? String(value) : value;
     }
   });
-  if (extracted.payment_method) next.payment_method = extracted.payment_method;
-  if (extracted.payment_date && !form.payment_date) next.payment_date = extracted.payment_date;
   return next;
 }

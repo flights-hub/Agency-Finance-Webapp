@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePaymentProofText } from './paymentProofParser.js';
+import { mergePaymentProofDraft, parsePaymentProofText } from './paymentProofParser.js';
 
 test('parsePaymentProofText extracts bank transfer proof fields', () => {
   const result = parsePaymentProofText(`
@@ -33,4 +33,35 @@ test('parsePaymentProofText extracts UPI proof fields', () => {
   assert.equal(result.extracted.transaction_currency, 'INR');
   assert.equal(result.extracted.upi_transaction_id, '627181928372');
   assert.equal(result.extracted.upi_party_name, 'RAHUL SHARMA');
+});
+
+test('mergePaymentProofDraft preserves fields edited while OCR is running', () => {
+  const form = {
+    party_type: 'SUPPLIER',
+    party_name: 'Current Supplier',
+    supplier_id: 'supplier-1',
+    payment_date: '2026-07-08',
+    payment_method: 'BANK_TRANSFER',
+    transaction_currency: 'EUR',
+    amount_paid: '',
+  };
+  const extracted = {
+    payment_date: '2026-07-07',
+    payment_method: 'UPI',
+    transaction_currency: 'INR',
+    amount_paid: 5000,
+  };
+
+  const merged = mergePaymentProofDraft(form, extracted, {
+    protectedFields: ['payment_method'],
+    overwriteFields: ['payment_date', 'payment_method', 'transaction_currency'],
+  });
+
+  assert.equal(merged.party_type, 'SUPPLIER');
+  assert.equal(merged.party_name, 'Current Supplier');
+  assert.equal(merged.supplier_id, 'supplier-1');
+  assert.equal(merged.payment_date, '2026-07-07');
+  assert.equal(merged.payment_method, 'BANK_TRANSFER');
+  assert.equal(merged.transaction_currency, 'INR');
+  assert.equal(merged.amount_paid, '5000');
 });

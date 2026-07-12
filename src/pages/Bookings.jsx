@@ -837,7 +837,7 @@ export default function Bookings() {
   // so these dropdowns must load them from the same source rather than seeded booking data.
   useEffect(() => {
     let active = true;
-    api.listUsers()
+    api.listDirectoryUsers()
       .then((data) => {
         if (active) setRegisteredUsers(data.users || []);
       })
