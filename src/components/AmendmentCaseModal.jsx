@@ -171,6 +171,12 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
   );
   const posted = existing ? isAmendmentPosted(existing) : false;
   const closed = existing ? ['REJECTED', 'CANCELLED', 'COMPLETED'].includes(existing.status) : false;
+  const legacyDateChange = Boolean(
+    existing
+    && isDateChangeType(existing.amendment_type)
+    && !existing.original_itinerary
+    && !existing.replacement_itinerary,
+  );
   const initialAmendmentType = isDateChangeType(existing?.amendment_type || 'DATE_CHANGE')
     ? 'DATE_CHANGE'
     : existing.amendment_type;
@@ -211,6 +217,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
   const [affected, setAffected] = useState(() => affectedForType(initialAmendmentType, existing));
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [recordId] = useState(() => existing?.id || crypto.randomUUID());
   const reissueMemory = useRef(mergeReissueMemory(
     existing?.passenger_reissues || [],
     initialDateChange.passenger_reissues,
@@ -228,7 +235,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
   const party = bookingCounterparty(booking);
   const actor = user?.name || user?.email || '';
   const dateChange = isDateChangeType(form.amendment_type);
-  const financialsLocked = posted || closed;
+  const financialsLocked = posted || closed || legacyDateChange;
   const pickerDisabled = financialsLocked ? true : (TYPE_DISABLED[form.amendment_type] || TYPE_DISABLED.OTHER);
   const activeKey = activeAffectedKey(form.amendment_type);
   const pickerRequired = {
@@ -314,7 +321,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
       : [];
     return {
       ...(existing || {}),
-      id: existing?.id || crypto.randomUUID(),
+      id: recordId,
       amendment_number: existing?.amendment_number || nextAmendmentNumber(amendments),
       booking_id: existing?.booking_id || booking.id,
       booking_ref: existing?.booking_ref || stableBookingRef(group[0] || booking),
@@ -452,7 +459,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
               {SELECTABLE_AMENDMENT_TYPES.map((type) => <option key={type} value={type}>{type.replace(/_/g, ' ')}</option>)}
             </select>
           </label>
-          {dateChange && (
+          {dateChange && !legacyDateChange && (
             <>
               <label>
                 <span>Application Scope *</span>
@@ -480,7 +487,11 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
             </>
           )}
         </div>
-        {dateChange ? (
+        {legacyDateChange ? (
+          <div className="allocation-warning">
+            Legacy date-change record (read-only). No itinerary snapshots were stored, so the dates below are the original recorded request. To use modern finalization, create a new date-change case and enter the replacement itinerary and passenger reissue details.
+          </div>
+        ) : dateChange ? (
           <AffectedItemsPicker
             options={options}
             value={{ passengers: form.selected_passenger_ids, tickets: [], segments: [] }}
@@ -500,7 +511,26 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
         )}
 
         <h4 className="servicing-section-title">Requested change</h4>
-        {dateChange ? (
+        {legacyDateChange ? (
+          <div className="modal-form-grid">
+            <label>
+              <span>Current Outbound Date</span>
+              <input value={existing?.requested_changes?.current_outbound_date || '-'} readOnly disabled />
+            </label>
+            <label>
+              <span>New Outbound Date</span>
+              <input value={existing?.requested_changes?.new_outbound_date || '-'} readOnly disabled />
+            </label>
+            <label>
+              <span>Current Inbound Date</span>
+              <input value={existing?.requested_changes?.current_inbound_date || '-'} readOnly disabled />
+            </label>
+            <label>
+              <span>New Inbound Date</span>
+              <input value={existing?.requested_changes?.new_inbound_date || '-'} readOnly disabled />
+            </label>
+          </div>
+        ) : dateChange ? (
           <>
             <DateChangeItineraryEditor
               original={form.original_itinerary}
@@ -600,7 +630,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
                 step="0.01"
                 min={key === 'fare_difference' ? undefined : '0'}
                 value={form[key]}
-                disabled={financialsLocked}
+                disabled={financialsLocked || saving}
                 onChange={(e) => update(key, e.target.value)}
                 placeholder="0.00"
               />
@@ -608,11 +638,11 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
           ))}
           <label>
             <span>Other Charge Description</span>
-            <input value={form.other_charge_description} disabled={financialsLocked} onChange={(e) => update('other_charge_description', e.target.value)} />
+            <input value={form.other_charge_description} disabled={financialsLocked || saving} onChange={(e) => update('other_charge_description', e.target.value)} />
           </label>
           <label>
             <span>Supplier Quote Reference</span>
-            <input value={form.supplier_quote_reference} disabled={financialsLocked} onChange={(e) => update('supplier_quote_reference', e.target.value)} />
+            <input value={form.supplier_quote_reference} disabled={financialsLocked || saving} onChange={(e) => update('supplier_quote_reference', e.target.value)} />
           </label>
           <label>
             <span><Upload size={12} style={{ marginRight: 4 }} />Quote Evidence / Screenshot</span>
@@ -620,16 +650,16 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
               <span className="attachment-name">
                 {form.evidence_document.name}
                 {!financialsLocked && (
-                  <button type="button" className="icon-button" onClick={() => update('evidence_document', null)} aria-label="Remove document"><X size={13} /></button>
+                  <button type="button" className="icon-button" disabled={saving} onClick={() => update('evidence_document', null)} aria-label="Remove document"><X size={13} /></button>
                 )}
               </span>
             ) : (
-              <input type="file" accept=".jpg,.jpeg,.png,.pdf" disabled={financialsLocked} onChange={(e) => readAttachment(e, (doc) => update('evidence_document', doc))} />
+              <input type="file" accept=".jpg,.jpeg,.png,.pdf" disabled={financialsLocked || saving} onChange={(e) => readAttachment(e, (doc) => update('evidence_document', doc))} />
             )}
           </label>
           <label className="span-2">
             <span>Internal Notes</span>
-            <input value={form.internal_notes} disabled={financialsLocked} onChange={(e) => update('internal_notes', e.target.value)} />
+            <input value={form.internal_notes} disabled={financialsLocked || saving} onChange={(e) => update('internal_notes', e.target.value)} />
           </label>
         </div>
 
@@ -672,7 +702,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
             </>
           )}
           {!dateChange && posted && status === 'CONFIRMED' && (
-            <button className="btn btn-primary" type="button" onClick={() => transition('COMPLETED')}>Mark Completed</button>
+            <button className="btn btn-primary" type="button" disabled={saving} onClick={() => transition('COMPLETED')}>Mark Completed</button>
           )}
         </div>
         {posted && (
