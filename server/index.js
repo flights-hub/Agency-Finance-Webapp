@@ -1,5 +1,10 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import {
+  finalizationHttpError,
+  loadBookingGroupByRef,
+  persistDateChangeFinalization,
+} from './amendmentFinalization.js';
 import { parseBookingText } from './bookingParser.js';
 import { scopedFinanceData } from './financeAccess.js';
 import { canVerifyPayments, enforcePaymentRules } from './paymentRules.js';
@@ -280,6 +285,7 @@ const ACTION_MODULES = {
   upload_payment_proof: 'finance',
   verify_payment: 'finance',
   unverify_payment: 'finance',
+  finalize_date_change_amendment: 'finance',
 };
 
 async function audit(req, actor, action, targetUserId, extras = {}) {
@@ -855,6 +861,75 @@ async function handleBulkImportFinance(req, res, collection) {
   json(res, 200, { records: imported });
 }
 
+async function performFinalizeAmendment(req, res) {
+  const user = await requireFinanceWriter(req, 'bookings');
+  await requireFinanceWriter(req, 'amendments');
+  const body = await readBody(req);
+  const submitted = body?.amendment;
+
+  if (!submitted || typeof submitted !== 'object' || Array.isArray(submitted)) {
+    const error = new Error('Amendment is required.');
+    error.status = 400;
+    throw error;
+  }
+
+  const bookingRef = String(submitted.booking_ref || '').trim();
+  if (!bookingRef) {
+    const error = new Error('Booking reference is required.');
+    error.status = 400;
+    throw error;
+  }
+  if (!['PNR_WIDE', 'SELECTED_PASSENGERS'].includes(submitted.application_scope)) {
+    const error = new Error('Application scope must be PNR-wide or selected passengers.');
+    error.status = 400;
+    throw error;
+  }
+
+  const draft = {
+    ...submitted,
+    id: submitted.id || crypto.randomUUID(),
+    booking_ref: bookingRef,
+  };
+  const repository = {
+    loadBookingGroup: (targetRef) => loadBookingGroupByRef(targetRef, supabaseRequest),
+    loadAmendment: async (id) => {
+      const row = await getFinanceRow('amendments', id);
+      return row ? flattenFinanceRow(row) : null;
+    },
+    saveBooking: (booking) => upsertFinanceRow('bookings', booking, user.id),
+    saveAmendment: (amendment) => upsertFinanceRow('amendments', amendment, user.id),
+  };
+
+  const result = await persistDateChangeFinalization({
+    draft,
+    actor: user,
+    repository,
+    finalizedAt: new Date().toISOString(),
+  });
+
+  await audit(req, user, 'finalize_date_change_amendment', null, {
+    recordType: 'amendment',
+    recordId: result.amendment.id,
+    oldValue: { status: submitted.status || null },
+    newValue: {
+      status: result.amendment.status,
+      booking_ref: result.amendment.booking_ref,
+      finalized_at: result.amendment.finalized_at,
+    },
+    risk: 'medium',
+  });
+
+  json(res, 200, result);
+}
+
+async function handleFinalizeAmendment(req, res) {
+  try {
+    return await performFinalizeAmendment(req, res);
+  } catch (error) {
+    throw finalizationHttpError(error);
+  }
+}
+
 async function handleCreatePaymentProofUpload(req, res, paymentId) {
   const user = await requireFinanceWriter(req, 'payments');
   const body = await readBody(req);
@@ -1054,6 +1129,8 @@ async function route(req, res) {
 
   const bulkFinanceMatch = path.match(/^\/api\/finance\/([a-z]+)\/bulk$/);
   if (bulkFinanceMatch && req.method === 'POST') return handleBulkImportFinance(req, res, bulkFinanceMatch[1]);
+
+  if (req.method === 'POST' && path === '/api/amendments/finalize') return handleFinalizeAmendment(req, res);
 
   const financeMatch = path.match(/^\/api\/finance\/([a-z]+)\/([^/]+)$/);
   if (financeMatch && req.method === 'PUT') return handleSaveFinanceRecord(req, res, financeMatch[1], financeMatch[2]);

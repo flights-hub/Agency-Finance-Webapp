@@ -43,6 +43,10 @@ export const api = {
     method: 'PUT',
     body: record,
   }),
+  finalizeAmendment: (record) => request('/api/amendments/finalize', {
+    method: 'POST',
+    body: { amendment: record },
+  }),
   createPaymentProofUpload: (paymentId, payload) => request(`/api/payments/${encodeURIComponent(paymentId)}/proof-upload`, {
     method: 'POST',
     body: payload,

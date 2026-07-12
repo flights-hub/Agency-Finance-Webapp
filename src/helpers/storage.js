@@ -151,6 +151,11 @@ export function saveRefund(refund) { return save(STORAGE_KEYS.REFUNDS, refund); 
 // Amendments
 export function getAmendments() { return readData(STORAGE_KEYS.AMENDMENTS); }
 export function saveAmendment(amendment) { return save(STORAGE_KEYS.AMENDMENTS, amendment); }
+export async function finalizeAmendment(amendment) {
+  const result = await api.finalizeAmendment(amendment);
+  result.bookings.forEach((booking) => save(STORAGE_KEYS.BOOKINGS, booking, { sync: false }));
+  return save(STORAGE_KEYS.AMENDMENTS, result.amendment, { sync: false });
+}
 
 // Cancellation cases
 export function getCancellations() { return readData(STORAGE_KEYS.CANCELLATIONS); }
