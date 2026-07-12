@@ -4,10 +4,18 @@
 // the finance model. All amounts are entered by the employee — nothing is
 // hardcoded.
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { X, Upload } from 'lucide-react';
 import { formatCurrency } from '../helpers/format';
-import { saveAmendment } from '../helpers/storage';
+import { stableBookingRef } from '../helpers/bookingIdentity';
+import {
+  createPassengerReissues,
+  isDateChangeType,
+  normalizeDateChange,
+  snapshotItinerary,
+  validateDateChangeFinalization,
+} from '../helpers/dateChangeAmendments';
+import { finalizeAmendment, saveAmendment } from '../helpers/storage';
 import {
   AMENDMENT_TYPES,
   AMENDMENT_CASE_STATUSES,
@@ -18,6 +26,7 @@ import {
   numeric,
 } from '../helpers/ledger';
 import AffectedItemsPicker, { bookingGroupOptions, selectedItems, readAttachment } from './AffectedItemsPicker';
+import DateChangeItineraryEditor from './DateChangeItineraryEditor';
 
 const FINANCIAL_FIELDS = [
   ['fare_difference', 'Fare Difference (±)'],
@@ -40,6 +49,16 @@ const TYPE_DISABLED = {
   BAGGAGE_CHANGE: { passengers: true, tickets: false, segments: true },
   OTHER: { passengers: true, tickets: false, segments: true },
 };
+
+const DATE_CHANGE_DIRECTIONS = {
+  OUTBOUND: ['outbound'],
+  INBOUND: ['inbound'],
+  BOTH: ['outbound', 'inbound'],
+};
+
+const SELECTABLE_AMENDMENT_TYPES = AMENDMENT_TYPES.filter((type) => (
+  !['OUTBOUND_DATE_CHANGE', 'INBOUND_DATE_CHANGE', 'BOTH_DATE_CHANGE'].includes(type)
+));
 
 const emptyAffected = () => ({ passengers: [], tickets: [], segments: [] });
 
@@ -64,14 +83,100 @@ const affectedForType = (type, existing = null) => {
   return next;
 };
 
+const clone = (value) => structuredClone(value);
+const rowId = (row) => String(row.id);
+
+const normalizedItinerary = (value, fallback) => {
+  const itinerary = clone(value || fallback);
+  return {
+    ...itinerary,
+    outbound: Array.isArray(itinerary?.outbound) ? itinerary.outbound : [],
+    inbound: Array.isArray(itinerary?.inbound) ? itinerary.inbound : [],
+  };
+};
+
+const storedSelectedPassengerIds = (existing) => {
+  if (existing?.selected_passenger_ids?.length) return existing.selected_passenger_ids.map(String);
+  if (existing?.passenger_reissues?.length) return existing.passenger_reissues.map((mapping) => String(mapping.booking_id));
+  return existing?.affected_passengers?.map((passenger) => String(passenger.id)) || [];
+};
+
+const initialDateChangeState = (existing, booking, group) => {
+  const snapshot = snapshotItinerary(group[0] || booking);
+  const original = normalizedItinerary(existing?.original_itinerary, snapshot);
+  const replacement = normalizedItinerary(existing?.replacement_itinerary, original);
+  const normalized = normalizeDateChange(existing?.amendment_type || 'DATE_CHANGE', existing?.travel_direction);
+  const hasInbound = original.inbound.length > 0;
+  const direction = DATE_CHANGE_DIRECTIONS[normalized.direction]
+    && (normalized.direction === 'OUTBOUND' || hasInbound)
+    ? normalized.direction
+    : 'OUTBOUND';
+  const applicationScope = existing?.application_scope === 'SELECTED_PASSENGERS'
+    ? 'SELECTED_PASSENGERS'
+    : 'PNR_WIDE';
+  const selectedIds = applicationScope === 'PNR_WIDE'
+    ? group.map(rowId)
+    : storedSelectedPassengerIds(existing);
+
+  return {
+    amendment_type: normalized.amendmentType,
+    application_scope: applicationScope,
+    travel_direction: direction,
+    original_itinerary: original,
+    replacement_itinerary: replacement,
+    selected_passenger_ids: selectedIds,
+    passenger_reissues: createPassengerReissues(group, selectedIds, existing?.passenger_reissues || []),
+  };
+};
+
+const mergeReissueMemory = (stored, current) => {
+  const byBookingId = new Map(stored.map((mapping) => [String(mapping.booking_id), mapping]));
+  current.forEach((mapping) => byBookingId.set(String(mapping.booking_id), mapping));
+  return [...byBookingId.values()];
+};
+
+const affectedSegmentIds = (itinerary, direction) => {
+  const ids = [];
+  (DATE_CHANGE_DIRECTIONS[direction] || []).forEach((directionKey) => {
+    (itinerary?.[directionKey] || []).forEach((segment) => {
+      (segment.connections || []).forEach((connection) => {
+        const label = [
+          `${connection.airline || ''}${connection.flight_number || ''}`,
+          `${connection.origin || connection.departure_city || '?'}-${connection.destination || connection.arrival_city || '?'}`,
+        ].filter(Boolean).join(' ');
+        ids.push(`${label}|${connection.departure_date || ''}`);
+      });
+    });
+  });
+  return ids;
+};
+
+const serverErrorMessage = (error) => {
+  const details = Array.isArray(error?.details)
+    ? error.details
+    : error?.details && typeof error.details === 'object'
+      ? Object.values(error.details).flat()
+      : error?.details ? [error.details] : [];
+  return [error?.message || 'Unable to finalize amendment.', ...details]
+    .map((message) => String(message).trim())
+    .filter(Boolean)
+    .join('\n');
+};
+
 export default function AmendmentCaseModal({ user, booking, group, amendments, existing = null, onClose, onSaved }) {
   const options = useMemo(() => bookingGroupOptions(group), [group]);
+  const initialDateChange = useMemo(
+    () => initialDateChangeState(existing, booking, group),
+    [booking, existing, group],
+  );
   const posted = existing ? isAmendmentPosted(existing) : false;
   const closed = existing ? ['REJECTED', 'CANCELLED', 'COMPLETED'].includes(existing.status) : false;
-  const initialAmendmentType = existing?.amendment_type || 'DATE_CHANGE';
+  const initialAmendmentType = isDateChangeType(existing?.amendment_type || 'DATE_CHANGE')
+    ? 'DATE_CHANGE'
+    : existing.amendment_type;
 
   const [form, setForm] = useState(() => existing ? {
-    amendment_type: initialAmendmentType,
+    ...initialDateChange,
     new_outbound_date: existing.requested_changes?.new_outbound_date || '',
     new_inbound_date: existing.requested_changes?.new_inbound_date || '',
     new_passenger_name: existing.requested_changes?.new_passenger_name || '',
@@ -87,7 +192,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
     internal_notes: existing.internal_notes || '',
     evidence_document: existing.evidence_document || null,
   } : {
-    amendment_type: 'DATE_CHANGE',
+    ...initialDateChange,
     new_outbound_date: '',
     new_inbound_date: '',
     new_passenger_name: '',
@@ -105,12 +210,24 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
   });
   const [affected, setAffected] = useState(() => affectedForType(initialAmendmentType, existing));
   const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const reissueMemory = useRef(mergeReissueMemory(
+    existing?.passenger_reissues || [],
+    initialDateChange.passenger_reissues,
+  ));
+  const selectedPassengerMemory = useRef(
+    initialDateChange.application_scope === 'SELECTED_PASSENGERS'
+      ? initialDateChange.selected_passenger_ids
+      : [],
+  );
+  const savingRef = useRef(false);
 
   const update = (key, value) => { setForm((c) => ({ ...c, [key]: value })); setError(''); };
 
   const total = amendmentTotalImpact(form);
   const party = bookingCounterparty(booking);
   const actor = user?.name || user?.email || '';
+  const dateChange = isDateChangeType(form.amendment_type);
   const financialsLocked = posted || closed;
   const pickerDisabled = financialsLocked ? true : (TYPE_DISABLED[form.amendment_type] || TYPE_DISABLED.OTHER);
   const activeKey = activeAffectedKey(form.amendment_type);
@@ -125,11 +242,48 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
     setAffected(affectedForType(type, existing));
   };
 
+  const setDateChangeSelection = (ids) => {
+    const selectedIds = ids.map(String);
+    selectedPassengerMemory.current = selectedIds;
+    const passengerReissues = createPassengerReissues(group, selectedIds, reissueMemory.current);
+    reissueMemory.current = mergeReissueMemory(reissueMemory.current, passengerReissues);
+    setForm((current) => ({
+      ...current,
+      selected_passenger_ids: selectedIds,
+      passenger_reissues: passengerReissues,
+    }));
+    setError('');
+  };
+
+  const setApplicationScope = (applicationScope) => {
+    const selectedIds = applicationScope === 'PNR_WIDE'
+      ? group.map(rowId)
+      : selectedPassengerMemory.current;
+    const passengerReissues = createPassengerReissues(group, selectedIds, reissueMemory.current);
+    reissueMemory.current = mergeReissueMemory(reissueMemory.current, passengerReissues);
+    setForm((current) => ({
+      ...current,
+      application_scope: applicationScope,
+      selected_passenger_ids: selectedIds,
+      passenger_reissues: passengerReissues,
+    }));
+    setError('');
+  };
+
+  const updatePassengerReissue = (bookingId, key, value) => {
+    const passengerReissues = form.passenger_reissues.map((mapping) => (
+      String(mapping.booking_id) === String(bookingId) ? { ...mapping, [key]: value } : mapping
+    ));
+    reissueMemory.current = mergeReissueMemory(reissueMemory.current, passengerReissues);
+    update('passenger_reissues', passengerReissues);
+  };
+
   const validate = (needsFinancials) => {
     if (!form.amendment_type) return 'Amendment type is required.';
-    if (activeKey === 'passengers' && !affected.passengers.length) return 'Select at least one affected passenger.';
-    if (activeKey === 'tickets' && !affected.tickets.length) return 'Select at least one affected ticket.';
-    if (activeKey === 'segments' && !affected.segments.length) return 'Select at least one affected segment.';
+    if (dateChange && !form.selected_passenger_ids.length) return 'Select at least one affected passenger.';
+    if (!dateChange && activeKey === 'passengers' && !affected.passengers.length) return 'Select at least one affected passenger.';
+    if (!dateChange && activeKey === 'tickets' && !affected.tickets.length) return 'Select at least one affected ticket.';
+    if (!dateChange && activeKey === 'segments' && !affected.segments.length) return 'Select at least one affected segment.';
     if (!form.remarks.trim()) return 'Amendment remarks are required.';
     if (needsFinancials) {
       const fees = ['supplier_change_fee', 'flyforsure_service_fee', 'agent_markup', 'tax_difference', 'other_charges'];
@@ -140,16 +294,51 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
 
   const buildRecord = (status) => {
     const now = new Date().toISOString();
+    const selectedDateRows = dateChange
+      ? group.filter((row) => form.selected_passenger_ids.includes(rowId(row)))
+      : [];
+    const dateAffectedPassengers = dateChange
+      ? selectedItems(options.passengers, form.selected_passenger_ids)
+      : [];
+    const dateAffectedTickets = selectedDateRows
+      .filter((row) => row.ticket_no)
+      .map((row) => ({
+        id: String(row.ticket_no),
+        label: `${row.ticket_no} · ${row.passenger_name || ''}`.trim(),
+      }));
+    const dateAffectedSegments = dateChange
+      ? selectedItems(
+        options.segments,
+        affectedSegmentIds(form.original_itinerary, form.travel_direction),
+      )
+      : [];
     return {
       ...(existing || {}),
+      id: existing?.id || crypto.randomUUID(),
       amendment_number: existing?.amendment_number || nextAmendmentNumber(amendments),
       booking_id: existing?.booking_id || booking.id,
+      booking_ref: existing?.booking_ref || stableBookingRef(group[0] || booking),
       pnr: existing?.pnr || booking.pnr,
-      ticket_no: selectedItems(options.tickets, affected.tickets)[0]?.id || existing?.ticket_no || booking.ticket_no || '',
-      passenger_name: selectedItems(options.passengers, affected.passengers)[0]?.label || booking.passenger_name || '',
+      ticket_no: dateAffectedTickets[0]?.id
+        || selectedItems(options.tickets, affected.tickets)[0]?.id
+        || existing?.ticket_no
+        || booking.ticket_no
+        || '',
+      passenger_name: dateAffectedPassengers[0]?.label
+        || selectedItems(options.passengers, affected.passengers)[0]?.label
+        || booking.passenger_name
+        || '',
       counterparty_type: party.type,
       counterparty_name: party.name,
-      amendment_type: form.amendment_type,
+      amendment_type: dateChange ? 'DATE_CHANGE' : form.amendment_type,
+      ...(dateChange ? {
+        application_scope: form.application_scope,
+        travel_direction: form.travel_direction,
+        original_itinerary: clone(form.original_itinerary),
+        replacement_itinerary: clone(form.replacement_itinerary),
+        selected_passenger_ids: [...form.selected_passenger_ids],
+        passenger_reissues: clone(form.passenger_reissues),
+      } : {}),
       currency: 'EUR',
       fare_difference: numeric(form.fare_difference),
       supplier_change_fee: numeric(form.supplier_change_fee),
@@ -171,22 +360,56 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
         current_passenger_name: booking.passenger_name || '',
         new_passenger_name: form.new_passenger_name,
       },
-      affected_passengers: selectedItems(options.passengers, affected.passengers),
-      affected_tickets: selectedItems(options.tickets, affected.tickets).map(({ id, label }) => ({ id, label })),
-      affected_segments: selectedItems(options.segments, affected.segments),
+      affected_passengers: dateChange
+        ? dateAffectedPassengers
+        : selectedItems(options.passengers, affected.passengers),
+      affected_tickets: dateChange
+        ? dateAffectedTickets
+        : selectedItems(options.tickets, affected.tickets).map(({ id, label }) => ({ id, label })),
+      affected_segments: dateChange
+        ? dateAffectedSegments
+        : selectedItems(options.segments, affected.segments),
       status,
       created_by: existing?.created_by || actor,
       created_at: existing?.created_at || now,
       updated_at: now,
-      ...(status === 'CONFIRMED' && !existing?.confirmed_at ? { confirmed_by: actor, confirmed_at: now } : {}),
+      ...(status === 'CONFIRMED' && !dateChange && !existing?.confirmed_at
+        ? { confirmed_by: actor, confirmed_at: now }
+        : {}),
       ...(status === 'COMPLETED' && !existing?.completed_at ? { completed_at: now } : {}),
     };
   };
 
-  const saveWithStatus = (status, { needsFinancials = false } = {}) => {
+  const saveWithStatus = async (status, { needsFinancials = false } = {}) => {
+    if (savingRef.current) return;
     const problem = validate(needsFinancials || status === 'CONFIRMED');
     if (problem) { setError(problem); return; }
-    saveAmendment(buildRecord(status));
+    const candidate = buildRecord(status);
+
+    if (dateChange && status === 'CONFIRMED') {
+      const validationErrors = validateDateChangeFinalization(candidate, group);
+      if (validationErrors.length) {
+        setError(validationErrors.join('\n'));
+        return;
+      }
+
+      savingRef.current = true;
+      setSaving(true);
+      setError('');
+      try {
+        await finalizeAmendment(candidate);
+        savingRef.current = false;
+        setSaving(false);
+        onSaved();
+      } catch (finalizationError) {
+        setError(serverErrorMessage(finalizationError));
+        savingRef.current = false;
+        setSaving(false);
+      }
+      return;
+    }
+
+    saveAmendment(candidate);
     onSaved();
   };
 
@@ -218,55 +441,148 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
               {party.type} · {party.name} · PNR {booking.pnr || '-'} · Draft and quoted amendments never change the ledger; posting happens on confirmation.
             </p>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close"><X size={17} /></button>
+          <button className="icon-button" type="button" disabled={saving} onClick={onClose} aria-label="Close"><X size={17} /></button>
         </div>
 
         <h4 className="servicing-section-title">Amendment scope</h4>
         <div className="modal-form-grid">
           <label>
             <span>Amendment Type *</span>
-            <select value={form.amendment_type} disabled={financialsLocked} onChange={(e) => setAmendmentType(e.target.value)}>
-              {AMENDMENT_TYPES.map((type) => <option key={type} value={type}>{type.replace(/_/g, ' ')}</option>)}
+            <select value={form.amendment_type} disabled={financialsLocked || saving} onChange={(e) => setAmendmentType(e.target.value)}>
+              {SELECTABLE_AMENDMENT_TYPES.map((type) => <option key={type} value={type}>{type.replace(/_/g, ' ')}</option>)}
             </select>
           </label>
+          {dateChange && (
+            <>
+              <label>
+                <span>Application Scope *</span>
+                <select
+                  value={form.application_scope}
+                  disabled={financialsLocked || saving}
+                  onChange={(event) => setApplicationScope(event.target.value)}
+                >
+                  <option value="PNR_WIDE">PNR-wide</option>
+                  <option value="SELECTED_PASSENGERS">Selected passengers</option>
+                </select>
+              </label>
+              <label>
+                <span>Travel Direction *</span>
+                <select
+                  value={form.travel_direction}
+                  disabled={financialsLocked || saving}
+                  onChange={(event) => update('travel_direction', event.target.value)}
+                >
+                  <option value="OUTBOUND">Outbound</option>
+                  {form.original_itinerary.inbound.length > 0 && <option value="INBOUND">Inbound</option>}
+                  {form.original_itinerary.inbound.length > 0 && <option value="BOTH">Both</option>}
+                </select>
+              </label>
+            </>
+          )}
         </div>
-        <AffectedItemsPicker
-          options={options}
-          value={affected}
-          onChange={(next) => { setAffected(next); setError(''); }}
-          disabled={pickerDisabled}
-          required={pickerRequired}
-        />
+        {dateChange ? (
+          <AffectedItemsPicker
+            options={options}
+            value={{ passengers: form.selected_passenger_ids, tickets: [], segments: [] }}
+            onChange={(next) => setDateChangeSelection(next.passengers)}
+            disabled={financialsLocked || saving || form.application_scope === 'PNR_WIDE'}
+            show={{ tickets: false, segments: false }}
+            required={{ passengers: form.application_scope === 'SELECTED_PASSENGERS' }}
+          />
+        ) : (
+          <AffectedItemsPicker
+            options={options}
+            value={affected}
+            onChange={(next) => { setAffected(next); setError(''); }}
+            disabled={pickerDisabled}
+            required={pickerRequired}
+          />
+        )}
 
         <h4 className="servicing-section-title">Requested change</h4>
+        {dateChange ? (
+          <>
+            <DateChangeItineraryEditor
+              original={form.original_itinerary}
+              replacement={form.replacement_itinerary}
+              direction={form.travel_direction}
+              disabled={financialsLocked || saving}
+              onChange={(replacement) => update('replacement_itinerary', replacement)}
+            />
+
+            <h4 className="servicing-section-title">Passenger reissues</h4>
+            {form.passenger_reissues.length ? form.passenger_reissues.map((mapping) => (
+              <div key={mapping.booking_id}>
+                <h5>{mapping.passenger_name || 'Passenger'}</h5>
+                <div className="modal-form-grid">
+                  <label>
+                    <span>Original PNR</span>
+                    <input value={mapping.old_pnr || '-'} readOnly disabled />
+                  </label>
+                  <label>
+                    <span>New PNR</span>
+                    <input
+                      value={mapping.new_pnr || ''}
+                      disabled={financialsLocked || saving}
+                      onChange={(event) => updatePassengerReissue(mapping.booking_id, 'new_pnr', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Original Ticket</span>
+                    <input value={mapping.old_ticket_no || '-'} readOnly disabled />
+                  </label>
+                  <label>
+                    <span>New Ticket</span>
+                    <input
+                      value={mapping.new_ticket_no || ''}
+                      disabled={financialsLocked || saving}
+                      onChange={(event) => updatePassengerReissue(mapping.booking_id, 'new_ticket_no', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Reissue Reference</span>
+                    <input
+                      value={mapping.reissue_reference || ''}
+                      disabled={financialsLocked || saving}
+                      onChange={(event) => updatePassengerReissue(mapping.booking_id, 'reissue_reference', event.target.value)}
+                    />
+                  </label>
+                </div>
+              </div>
+            )) : <p className="affected-picker-empty">Select at least one passenger to map the reissue.</p>}
+          </>
+        ) : (
+          <div className="modal-form-grid">
+            <label>
+              <span>Current Outbound Date</span>
+              <input value={booking.outbound_date || '-'} readOnly disabled />
+            </label>
+            <label>
+              <span>New Outbound Date</span>
+              <input type="date" value={form.new_outbound_date} disabled={financialsLocked} onChange={(e) => update('new_outbound_date', e.target.value)} />
+            </label>
+            <label>
+              <span>Current Inbound Date</span>
+              <input value={booking.inbound_date || '-'} readOnly disabled />
+            </label>
+            <label>
+              <span>New Inbound Date</span>
+              <input type="date" value={form.new_inbound_date} disabled={financialsLocked} onChange={(e) => update('new_inbound_date', e.target.value)} />
+            </label>
+            <label>
+              <span>Current Passenger Name</span>
+              <input value={booking.passenger_name || '-'} readOnly disabled />
+            </label>
+            <label>
+              <span>New Passenger Name</span>
+              <input value={form.new_passenger_name} disabled={financialsLocked} onChange={(e) => update('new_passenger_name', e.target.value)} />
+            </label>
+          </div>
+        )}
         <div className="modal-form-grid">
-          <label>
-            <span>Current Outbound Date</span>
-            <input value={booking.outbound_date || '-'} readOnly disabled />
-          </label>
-          <label>
-            <span>New Outbound Date</span>
-            <input type="date" value={form.new_outbound_date} disabled={financialsLocked} onChange={(e) => update('new_outbound_date', e.target.value)} />
-          </label>
-          <label>
-            <span>Current Inbound Date</span>
-            <input value={booking.inbound_date || '-'} readOnly disabled />
-          </label>
-          <label>
-            <span>New Inbound Date</span>
-            <input type="date" value={form.new_inbound_date} disabled={financialsLocked} onChange={(e) => update('new_inbound_date', e.target.value)} />
-          </label>
-          <label>
-            <span>Current Passenger Name</span>
-            <input value={booking.passenger_name || '-'} readOnly disabled />
-          </label>
-          <label>
-            <span>New Passenger Name</span>
-            <input value={form.new_passenger_name} disabled={financialsLocked} onChange={(e) => update('new_passenger_name', e.target.value)} />
-          </label>
           <label className="span-2">
             <span>Amendment Remarks *</span>
-            <textarea rows={2} value={form.remarks} onChange={(e) => update('remarks', e.target.value)} />
+            <textarea rows={2} value={form.remarks} disabled={financialsLocked || saving} onChange={(e) => update('remarks', e.target.value)} />
           </label>
         </div>
 
@@ -313,7 +629,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
           </label>
           <label className="span-2">
             <span>Internal Notes</span>
-            <input value={form.internal_notes} onChange={(e) => update('internal_notes', e.target.value)} />
+            <input value={form.internal_notes} disabled={financialsLocked} onChange={(e) => update('internal_notes', e.target.value)} />
           </label>
         </div>
 
@@ -332,24 +648,30 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
           </p>
         )}
 
-        {error && <div className="allocation-warning">{error}</div>}
+        {error && (
+          <div className="allocation-warning">
+            {error.split('\n').map((line, index) => <div key={`${line}-${index}`}>{line}</div>)}
+          </div>
+        )}
 
         <div className="form-actions">
-          <button className="btn btn-secondary" type="button" onClick={onClose}>Close</button>
+          <button className="btn btn-secondary" type="button" disabled={saving} onClick={onClose}>Close</button>
           {!financialsLocked && (
             <>
-              <button className="btn btn-secondary" type="button" onClick={() => saveWithStatus('DRAFT')}>Save Draft</button>
-              <button className="btn btn-secondary" type="button" onClick={() => saveWithStatus('QUOTED', { needsFinancials: true })}>Create Quote</button>
+              <button className="btn btn-secondary" type="button" disabled={saving} onClick={() => saveWithStatus('DRAFT')}>Save Draft</button>
+              <button className="btn btn-secondary" type="button" disabled={saving} onClick={() => saveWithStatus('QUOTED', { needsFinancials: true })}>Create Quote</button>
               {['QUOTED', 'QUOTE_PENDING'].includes(status) && (
-                <button className="btn btn-secondary" type="button" onClick={() => saveWithStatus('CUSTOMER_APPROVED', { needsFinancials: true })}>Customer Approved</button>
+                <button className="btn btn-secondary" type="button" disabled={saving} onClick={() => saveWithStatus('CUSTOMER_APPROVED', { needsFinancials: true })}>Customer Approved</button>
               )}
               {existing && (
-                <button className="btn btn-danger" type="button" onClick={() => transition('REJECTED')}>Reject</button>
+                <button className="btn btn-danger" type="button" disabled={saving} onClick={() => transition('REJECTED')}>Reject</button>
               )}
-              <button className="btn btn-primary" type="button" onClick={() => saveWithStatus('CONFIRMED', { needsFinancials: true })}>Confirm Amendment</button>
+              <button className="btn btn-primary" type="button" disabled={saving} onClick={() => saveWithStatus('CONFIRMED', { needsFinancials: true })}>
+                {saving ? 'Confirming…' : 'Confirm Amendment'}
+              </button>
             </>
           )}
-          {posted && status === 'CONFIRMED' && (
+          {!dateChange && posted && status === 'CONFIRMED' && (
             <button className="btn btn-primary" type="button" onClick={() => transition('COMPLETED')}>Mark Completed</button>
           )}
         </div>
