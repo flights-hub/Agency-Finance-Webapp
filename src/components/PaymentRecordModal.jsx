@@ -359,14 +359,17 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     if (form.party_type === 'CUSTOMER') {
       const normalizedPnr = form.pnr.replace(/[^a-z0-9]/gi, '').toUpperCase();
       const matchingBookings = bookings.filter((booking) => bookingPnrAliases(booking).includes(normalizedPnr));
-      const relatedBooking = matchingBookings.find((booking) => (
+      const ticketBooking = matchingBookings.find((booking) => (
         form.ticket_id
         && (String(booking.ticket_no) === String(form.ticket_id) || String(booking.id) === String(form.ticket_id))
-      )) || matchingBookings[0];
+      ));
+      const relatedBooking = ticketBooking || (matchingBookings.length === 1 ? matchingBookings[0] : null);
+      const matchingRefs = new Set(matchingBookings.map((booking) => stableBookingRef(booking)));
+      const sharedBookingRef = matchingRefs.size === 1 ? [...matchingRefs][0] : '';
       return createPaymentEntry({
         ...shared,
         pnr: form.pnr,
-        booking_ref: stableBookingRef(relatedBooking),
+        booking_ref: stableBookingRef(relatedBooking) || sharedBookingRef,
         booking_id: relatedBooking?.id || '',
         amount_paid: amount,
       }, bookings, payments);

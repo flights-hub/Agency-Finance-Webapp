@@ -328,7 +328,6 @@ export function getBookingLedger(bookings = [], payments = []) {
 
 export function getPaymentLedger(bookings = [], payments = []) {
   const fareByGroup = new Map();
-  const firstPassengerByGroup = new Map();
   const runningByGroup = new Map();
   const instalmentsByGroup = new Map();
   const indexes = customerBookingIndexes(bookings);
@@ -337,13 +336,13 @@ export function getPaymentLedger(bookings = [], payments = []) {
   bookings.forEach((booking) => {
     const key = customerBookingKey(booking);
     fareByGroup.set(key, (fareByGroup.get(key) || 0) + numeric(booking.fare_sold));
-    if (!firstPassengerByGroup.has(key)) firstPassengerByGroup.set(key, booking.passenger_name);
   });
 
   return [...agentPayments]
     .sort((a, b) => String(a.payment_date || '').localeCompare(String(b.payment_date || '')))
     .map((payment, index) => {
       const pnr = normalizePnr(payment.pnr);
+      const relatedBooking = bookingForFinanceRecord(payment, indexes);
       const groupKey = financeRecordKey(payment, indexes);
       // Pending/ineligible payments stay visible in the ledger but contribute
       // nothing to the running totals until they are verified and posted.
@@ -361,7 +360,7 @@ export function getPaymentLedger(bookings = [], payments = []) {
         payment_direction: payment.payment_direction || 'AGENT_IN',
         sl: index + 1,
         pnr,
-        passenger_name: payment.passenger_name || firstPassengerByGroup.get(groupKey) || '',
+        passenger_name: payment.passenger_name || relatedBooking?.passenger_name || '',
         amount_paid: numeric(payment.amount_paid),
         instalment_no: payment.instalment_no || instalmentNo,
         instalment_type: payment.instalment_type || getInstalmentType(instalmentNo, cumulativePaid, totalFare),

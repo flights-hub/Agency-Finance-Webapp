@@ -58,3 +58,41 @@ test('finance row resolution requires exact or uniquely matching booking identit
   assert.equal(unknownRef.booking_id, '');
   assert.equal(unknownRef.total_fare, 0);
 });
+
+test('payment ledger preserves only explicit passenger data for an ambiguous group-only payment', () => {
+  const payments = calculations.getPaymentLedger(bookings, [
+    {
+      id: 'group-only-blank',
+      booking_ref: 'SHARED-REF',
+      payment_date: '2026-07-04',
+      payment_direction: 'RECEIVED',
+      party_type: 'CUSTOMER',
+      amount_paid: 10,
+    },
+    {
+      id: 'group-only-explicit',
+      booking_ref: 'SHARED-REF',
+      passenger_name: 'Recorded Passenger',
+      payment_date: '2026-07-05',
+      payment_direction: 'RECEIVED',
+      party_type: 'CUSTOMER',
+      amount_paid: 10,
+    },
+  ]);
+
+  assert.deepEqual(payments.map((payment) => payment.passenger_name), ['', 'Recorded Passenger']);
+});
+
+test('payment ledger backfills the passenger from an exactly resolved row', () => {
+  const [payment] = calculations.getPaymentLedger(bookings, [{
+    id: 'exact-row',
+    booking_ref: 'SHARED-REF',
+    booking_id: 'p2',
+    payment_date: '2026-07-04',
+    payment_direction: 'RECEIVED',
+    party_type: 'CUSTOMER',
+    amount_paid: 10,
+  }]);
+
+  assert.equal(payment.passenger_name, 'Passenger Two');
+});
