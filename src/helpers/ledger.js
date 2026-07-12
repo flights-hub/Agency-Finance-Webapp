@@ -457,21 +457,57 @@ function buildBookingIndexes(bookings, bookingsByPnr) {
   return indexes;
 }
 
+function exactBookingForRecord(record = {}, rows = []) {
+  if (record.booking_id !== undefined && record.booking_id !== null) {
+    const byId = rows.find((booking) => String(booking.id) === String(record.booking_id));
+    if (byId) return byId;
+  }
+
+  const ticket = record.ticket_no || record.ticket_id;
+  if (ticket) {
+    const byTicket = rows.find((booking) => token(booking.ticket_no) === token(ticket));
+    if (byTicket) return byTicket;
+  }
+
+  const pnr = normalizePnr(record.pnr);
+  if (!pnr) return null;
+  const currentMatches = rows.filter((booking) => normalizePnr(booking.pnr) === pnr);
+  if (currentMatches.length === 1) return currentMatches[0];
+  if (currentMatches.length > 1) return null;
+  const historicalMatches = rows.filter((booking) => (
+    booking.pnr_history || []
+  ).some((alias) => normalizePnr(alias) === pnr));
+  return historicalMatches.length === 1 ? historicalMatches[0] : null;
+}
+
+function hasFinanceRowIdentity(record = {}) {
+  return record.booking_id !== undefined && record.booking_id !== null
+    || Boolean(record.ticket_no || record.ticket_id || normalizePnr(record.pnr));
+}
+
 function bookingsForRecord(record = {}, indexes) {
-  const stableRows = indexes.byRef.get(token(record.booking_ref));
-  if (stableRows?.length) return stableRows;
+  const stableRef = token(record.booking_ref);
+  if (stableRef) {
+    const stableRows = indexes.byRef.get(stableRef);
+    if (!stableRows?.length) return [];
+    const exact = exactBookingForRecord(record, stableRows);
+    if (exact) return [exact];
+    return stableRows.length > 1 && hasFinanceRowIdentity(record) ? [] : stableRows;
+  }
 
   const byId = record.booking_id === undefined || record.booking_id === null
     ? null
     : indexes.byId.get(String(record.booking_id));
   if (byId) return [byId];
 
-  const byPnr = indexes.byPnr.get(normalizePnr(record.pnr));
-  if (byPnr?.length) return byPnr;
-
   const ticket = record.ticket_no || record.ticket_id;
   const byTicket = ticket ? indexes.byTicket.get(token(ticket)) : null;
-  return byTicket ? [byTicket] : [];
+  if (byTicket) return [byTicket];
+
+  const byPnr = indexes.byPnr.get(normalizePnr(record.pnr));
+  if (!byPnr?.length) return [];
+  const exact = exactBookingForRecord(record, byPnr);
+  return exact ? [exact] : byPnr;
 }
 
 // Posted refund payouts for a refund case: OUTGOING payments explicitly
@@ -719,8 +755,10 @@ export function getAccountOpenItems(account, model) {
 }
 
 function amendmentPostingDate(amendment = {}) {
-  const stamp = amendment.finalized_at || amendment.completed_at || amendment.confirmed_at
-    || amendment.approved_at || amendment.updated_at || amendment.created_at;
+  const stamp = isDateChangeType(amendment.amendment_type)
+    ? amendment.finalized_at || amendment.completed_at || amendment.confirmed_at
+      || amendment.approved_at || amendment.updated_at || amendment.created_at
+    : amendment.confirmed_at || amendment.approved_at || amendment.updated_at || amendment.created_at;
   return stamp ? String(stamp).slice(0, 10) : '';
 }
 

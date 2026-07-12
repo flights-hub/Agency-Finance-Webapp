@@ -90,18 +90,52 @@ function financeBookingIndexes(bookings) {
   return { byRef, byId, byPnr, byTicket };
 }
 
+function exactBookingForFinanceRecord(record, rows) {
+  const bookingId = token(record.booking_id);
+  if (bookingId) {
+    const byId = rows.find((booking) => token(booking.id) === bookingId);
+    if (byId) return byId;
+  }
+
+  const ticket = token(record.ticket_no || record.ticket_id);
+  if (ticket) {
+    const byTicket = rows.find((booking) => token(booking.ticket_no) === ticket);
+    if (byTicket) return byTicket;
+  }
+
+  const pnr = token(record.pnr);
+  if (!pnr) return null;
+  const currentMatches = rows.filter((booking) => token(booking.pnr) === pnr);
+  if (currentMatches.length === 1) return currentMatches[0];
+  if (currentMatches.length > 1) return null;
+  const historicalMatches = rows.filter((booking) => tokensFrom(booking.pnr_history).includes(pnr));
+  return historicalMatches.length === 1 ? historicalMatches[0] : null;
+}
+
+function hasFinanceRowIdentity(record) {
+  return Boolean(token(record.booking_id) || token(record.ticket_no || record.ticket_id) || token(record.pnr));
+}
+
 function bookingsForFinanceRecord(record, indexes) {
-  const stableRows = indexes.byRef.get(token(record.booking_ref));
-  if (stableRows?.length) return stableRows;
+  const stableRef = token(record.booking_ref);
+  if (stableRef) {
+    const stableRows = indexes.byRef.get(stableRef);
+    if (!stableRows?.length) return [];
+    const exact = exactBookingForFinanceRecord(record, stableRows);
+    if (exact) return [exact];
+    return stableRows.length > 1 && hasFinanceRowIdentity(record) ? [] : stableRows;
+  }
 
   const byId = indexes.byId.get(token(record.booking_id));
   if (byId) return [byId];
 
-  const pnrRows = indexes.byPnr.get(token(record.pnr));
-  if (pnrRows?.length) return pnrRows;
-
   const byTicket = indexes.byTicket.get(token(record.ticket_no || record.ticket_id));
-  return byTicket ? [byTicket] : [];
+  if (byTicket) return [byTicket];
+
+  const pnrRows = indexes.byPnr.get(token(record.pnr));
+  if (!pnrRows?.length) return [];
+  const exact = exactBookingForFinanceRecord(record, pnrRows);
+  return exact ? [exact] : pnrRows;
 }
 
 export function scopedFinanceData(user, { bookings = [], payments = [], refunds = [], amendments = [], cancellations = [], expenses = [], allocations = [] }) {

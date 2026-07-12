@@ -111,20 +111,55 @@ function customerBookingIndexes(bookings = []) {
   return { byRef, byId, byPnr, byTicket, byGroup };
 }
 
+function exactBookingForFinanceRecord(record = {}, rows = []) {
+  if (record.booking_id !== undefined && record.booking_id !== null) {
+    const byId = rows.find((booking) => String(booking.id) === String(record.booking_id));
+    if (byId) return byId;
+  }
+
+  const ticket = record.ticket_no || record.ticket_id;
+  if (ticket) {
+    const byTicket = rows.find((booking) => token(booking.ticket_no) === token(ticket));
+    if (byTicket) return byTicket;
+  }
+
+  const pnr = normalizePnr(record.pnr);
+  if (!pnr) return null;
+  const currentMatches = rows.filter((booking) => normalizePnr(booking.pnr) === pnr);
+  if (currentMatches.length === 1) return currentMatches[0];
+  if (currentMatches.length > 1) return null;
+  const historicalMatches = rows.filter((booking) => (
+    booking.pnr_history || []
+  ).some((alias) => normalizePnr(alias) === pnr));
+  return historicalMatches.length === 1 ? historicalMatches[0] : null;
+}
+
+function hasFinanceRowIdentity(record = {}) {
+  return record.booking_id !== undefined && record.booking_id !== null
+    || Boolean(record.ticket_no || record.ticket_id || normalizePnr(record.pnr));
+}
+
 function bookingForFinanceRecord(record = {}, indexes) {
-  const stableRows = indexes.byRef.get(String(record.booking_ref || ''));
-  if (stableRows?.length) return stableRows[0];
+  const stableRef = String(record.booking_ref || '');
+  if (stableRef) {
+    const stableRows = indexes.byRef.get(stableRef);
+    if (!stableRows?.length) return null;
+    const exact = exactBookingForFinanceRecord(record, stableRows);
+    if (exact) return exact;
+    return stableRows.length > 1 && hasFinanceRowIdentity(record) ? null : stableRows[0];
+  }
 
   if (record.booking_id !== undefined && record.booking_id !== null) {
     const byId = indexes.byId.get(String(record.booking_id));
     if (byId) return byId;
   }
 
-  const byPnr = indexes.byPnr.get(normalizePnr(record.pnr));
-  if (byPnr?.length) return byPnr[0];
-
   const ticket = record.ticket_no || record.ticket_id;
-  return ticket ? indexes.byTicket.get(token(ticket)) : null;
+  const byTicket = ticket ? indexes.byTicket.get(token(ticket)) : null;
+  if (byTicket) return byTicket;
+
+  const byPnr = indexes.byPnr.get(normalizePnr(record.pnr));
+  return byPnr?.length ? exactBookingForFinanceRecord(record, byPnr) || byPnr[0] : null;
 }
 
 function financeRecordKey(record = {}, indexes) {
@@ -350,12 +385,7 @@ export function createPaymentEntry(input, bookings = [], payments = []) {
   const { payment_date, pnr, amount_paid, payment_mode, receipt_ref, received_by, remarks, ...rest } = input;
   const normalizedPnr = normalizePnr(pnr);
   const indexes = customerBookingIndexes(bookings);
-  const pnrBookings = indexes.byPnr.get(normalizedPnr) || [];
-  const selectedTicket = rest.ticket_id || rest.ticket_no;
-  const relatedBooking = pnrBookings.find((booking) => (
-    selectedTicket
-    && (String(booking.ticket_no) === String(selectedTicket) || String(booking.id) === String(selectedTicket))
-  )) || bookingForFinanceRecord({ ...rest, pnr: normalizedPnr }, indexes);
+  const relatedBooking = bookingForFinanceRecord({ ...rest, pnr: normalizedPnr }, indexes);
   const groupKey = relatedBooking ? customerBookingKey(relatedBooking) : financeRecordKey({ ...rest, pnr: normalizedPnr }, indexes);
   const relatedBookings = relatedBooking ? (indexes.byGroup.get(groupKey) || [relatedBooking]) : [];
   const totalFare = relatedBookings.reduce((sum, booking) => sum + numeric(booking.fare_sold), 0);

@@ -144,6 +144,53 @@ test('stable booking reference wins before a conflicting PNR fallback', () => {
   assert.equal(account(model, 'AGENT', 'Agency B').payments.length, 0);
 });
 
+test('split-row refund and amendment resolve the exact booking inside a stable group', () => {
+  const first = {
+    ...agentBooking({ fare: 500, pnr: 'FIRST111', agent: 'Agency A', ticket: 'TICKET-A' }),
+    booking_ref: 'SHARED-REF',
+    pnr_history: ['SHARED-OLD'],
+    supplier_name: 'Supplier A',
+  };
+  const second = {
+    ...agentBooking({ fare: 400, pnr: 'SECOND222', agent: 'Agency B', ticket: 'TICKET-B' }),
+    booking_ref: 'SHARED-REF',
+    pnr_history: ['SHARED-OLD'],
+    supplier_name: 'Supplier B',
+  };
+  const refund = {
+    id: uid('ref'),
+    booking_ref: 'SHARED-REF',
+    booking_id: second.id,
+    pnr: second.pnr,
+    supplier_refund: 100,
+  };
+  const ambiguousRefund = {
+    id: uid('ref'),
+    booking_ref: 'SHARED-REF',
+    pnr: 'SHARED-OLD',
+    supplier_refund: 50,
+  };
+  const amendment = {
+    id: uid('amd'),
+    booking_ref: 'SHARED-REF',
+    ticket_no: second.ticket_no,
+    pnr: second.pnr,
+    amendment_type: 'NAME_CHANGE',
+    status: 'QUOTED',
+  };
+  const model = buildFinanceModel({
+    bookings: [first, second],
+    refunds: [refund, ambiguousRefund],
+    amendments: [amendment],
+  });
+
+  assert.equal(account(model, 'SUPPLIER', 'Supplier A').refunds.length, 0);
+  assert.deepEqual(account(model, 'SUPPLIER', 'Supplier B').refunds.map((entry) => entry.refund.id), [refund.id]);
+  assert.equal(model.refundsById.has(ambiguousRefund.id), true);
+  assert.equal(account(model, 'AGENT', 'Agency A').amendments.length, 0);
+  assert.equal(account(model, 'AGENT', 'Agency B').amendments[0].booking.id, second.id);
+});
+
 test('booking PNR aliases index each booking only once per alias', () => {
   const booking = {
     ...agentBooking({ pnr: 'SAME111' }),
@@ -513,6 +560,25 @@ test('date change posts only when completed and uses finalized date', () => {
   const entry = completedModel.accountList[0].ledger.find((item) => item.reference_id === amendment.id);
 
   assert.equal(entry.entry_date, '2026-07-12');
+});
+
+test('completed non-date amendment keeps its confirmed posting date', () => {
+  const booking = agentBooking({ fare: 800, pnr: 'AMD-NAME' });
+  const amendment = {
+    id: uid('amd'),
+    booking_id: booking.id,
+    pnr: booking.pnr,
+    amendment_type: 'NAME_CHANGE',
+    fare_difference: 50,
+    status: 'COMPLETED',
+    confirmed_at: '2026-07-01T10:00:00Z',
+    completed_at: '2026-07-05T10:00:00Z',
+  };
+  const model = buildFinanceModel({ bookings: [booking], amendments: [amendment] });
+  const entry = account(model, 'AGENT', 'ABC Travels').ledger
+    .find((item) => item.reference_id === amendment.id);
+
+  assert.equal(entry.entry_date, '2026-07-01');
 });
 
 // Servicing spec §6 — negative amendment total posts a credit open item and
