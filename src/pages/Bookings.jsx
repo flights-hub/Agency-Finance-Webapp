@@ -1236,6 +1236,9 @@ export default function Bookings() {
       const initialPayment = createPaymentEntry({
         payment_date: formValues.booking_date,
         pnr: savedRows[0].pnr,
+        booking_ref: savedRows[0].booking_ref || savedRows[0].invoice_no,
+        party_type: savedRows[0].bill_to_type,
+        party_name: savedRows[0].bill_to_name,
         amount_paid: numeric(formValues.amount_paid),
         payment_mode: formValues.payment_mode,
         receipt_ref: '',

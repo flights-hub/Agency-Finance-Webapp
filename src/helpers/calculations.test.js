@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test, { after } from 'node:test';
 import { createServer } from 'vite';
 
@@ -95,4 +96,56 @@ test('payment ledger backfills the passenger from an exactly resolved row', () =
   }]);
 
   assert.equal(payment.passenger_name, 'Passenger Two');
+});
+
+test('multi-passenger opening payment stays on the shared booking reference without row identity', () => {
+  const savedRows = [
+    {
+      id: 'new-p1', booking_ref: 'NEW-SHARED-REF', pnr: 'NEW-CURRENT',
+      passenger_name: 'New Passenger One', bill_to_type: 'AGENT', bill_to_name: 'Agency Blue', fare_sold: 500,
+    },
+    {
+      id: 'new-p2', booking_ref: 'NEW-SHARED-REF', pnr: 'NEW-CURRENT',
+      passenger_name: 'New Passenger Two', bill_to_type: 'AGENT', bill_to_name: 'Agency Blue', fare_sold: 300,
+    },
+  ];
+  const openingPayment = calculations.createPaymentEntry({
+    payment_date: '2026-07-13',
+    pnr: savedRows[0].pnr,
+    booking_ref: savedRows[0].booking_ref,
+    party_type: savedRows[0].bill_to_type,
+    party_name: savedRows[0].bill_to_name,
+    amount_paid: 200,
+    payment_mode: 'CASH',
+  }, savedRows);
+
+  assert.equal(openingPayment.verification_status, 'TO_BE_VERIFIED');
+  assert.equal(calculations.getBookingLedger(savedRows, [openingPayment])[0].total_paid, 0);
+
+  const postedOpeningPayment = {
+    ...openingPayment,
+    verification_status: 'VERIFIED',
+    ledger_posting_status: 'POSTED',
+  };
+  const bookingLedger = calculations.getBookingLedger(savedRows, [postedOpeningPayment]);
+  const [paymentLedger] = calculations.getPaymentLedger(savedRows, [postedOpeningPayment]);
+
+  assert.deepEqual(bookingLedger.map((booking) => booking.total_paid), [200, null]);
+  assert.deepEqual(bookingLedger.map((booking) => booking.balance_due), [600, null]);
+  assert.equal(paymentLedger.total_fare, 800);
+  assert.equal(paymentLedger.cumulative_paid, 200);
+  assert.equal(paymentLedger.remaining_balance, 600);
+  assert.equal(paymentLedger.booking_id, '');
+  assert.equal(paymentLedger.booking_ref, 'NEW-SHARED-REF');
+  assert.equal(paymentLedger.party_type, 'AGENT');
+  assert.equal(paymentLedger.party_name, 'Agency Blue');
+
+  const bookingsSource = readFileSync(new URL('../pages/Bookings.jsx', import.meta.url), 'utf8');
+  const openingPaymentCall = bookingsSource.match(
+    /const initialPayment = createPaymentEntry\(\{([\s\S]*?)\}, \[\.\.\.bookings, \.\.\.savedRows\], payments\);/,
+  )?.[1] || '';
+  assert.match(openingPaymentCall, /booking_ref:\s*savedRows\[0\]\.booking_ref\s*\|\|\s*savedRows\[0\]\.invoice_no,/);
+  assert.match(openingPaymentCall, /party_type:\s*savedRows\[0\]\.bill_to_type,/);
+  assert.match(openingPaymentCall, /party_name:\s*savedRows\[0\]\.bill_to_name,/);
+  assert.doesNotMatch(openingPaymentCall, /booking_id:/);
 });
