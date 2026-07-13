@@ -4319,13 +4319,131 @@ textarea:focus {
   min-width: 1080px;
 }
 .refund-lines-table input.allocation-amount-input { width: 82px; }
-.servicing-case-list { display: flex; flex-direction: column; gap: 6px; }
-.servicing-case-list .servicing-case-row {
+.booking-itinerary-group + .booking-itinerary-group {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.booking-itinerary-passengers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+.booking-itinerary-passenger {
+  display: grid;
+  gap: 1px;
+  min-width: 150px;
+  font-size: var(--t-11);
+}
+.booking-itinerary-passenger strong { color: var(--ink-800); }
+.booking-itinerary-passenger span { color: var(--ink-500); }
+.booking-itinerary-leg-label {
+  margin: 8px 0 4px;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+}
+.booking-itinerary-connection {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding: 6px 0;
+}
+.booking-itinerary-leg-label + .booking-itinerary-connection {
+  border-top: 0.5px solid var(--color-border-tertiary);
+}
+.booking-itinerary-flight {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.booking-airline-logo {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.booking-airline-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.booking-airline-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: var(--color-background-secondary);
+  font-size: 8.5px;
+  font-weight: 600;
+}
+.booking-airline-fallback.is-hidden { display: none; }
+.booking-segment-status {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 9px;
+  background: #E1F5EE;
+  color: #085041;
+  font-size: 11px;
+}
+.booking-itinerary-baggage {
+  margin: 4px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+}
+.booking-itinerary-empty {
+  padding: 8px 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+.booking-timeline-heading {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.booking-timeline-detail {
+  margin: 2px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.servicing-case-list { display: flex; flex-direction: column; gap: 6px; }
+.servicing-case-list .servicing-case-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
   border-top: 0.5px solid var(--border);
   font-size: 12px;
+}
+.servicing-case-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.servicing-case-summary {
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.servicing-case-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
