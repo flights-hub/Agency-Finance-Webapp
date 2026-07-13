@@ -18,8 +18,8 @@ export function groupPnrAliases(bookings = []) {
 
 export function bookingMatchesRecord(booking = {}, record = {}) {
   const bookingRef = stableBookingRef(booking);
-  if (record.booking_ref && bookingRef && String(record.booking_ref) === bookingRef) return true;
-  if (record.booking_id && String(record.booking_id) === String(booking.id)) return true;
+  if (record.booking_ref) return Boolean(bookingRef && String(record.booking_ref) === bookingRef);
+  if (record.booking_id) return String(record.booking_id) === String(booking.id);
   const pnr = normalizeBookingPnr(record.pnr);
   return Boolean(pnr && bookingPnrAliases(booking).includes(pnr));
 }

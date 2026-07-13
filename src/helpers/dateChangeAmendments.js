@@ -494,7 +494,17 @@ function journeySummary(segments = []) {
     ...connections.map((connection) => text(connection.arrival_city)),
   ].filter(Boolean).join('-');
   const departureDate = text(connections[0].departure_date);
-  return [route, departureDate].filter(Boolean).join(' ');
+  const connectionDetails = connections.map((connection) => {
+    const flight = `${text(connection.airline)}${text(connection.flight_number)}`;
+    const times = [text(connection.departure_time), text(connection.arrival_time)]
+      .filter(Boolean)
+      .join('–');
+    return [flight, times].filter(Boolean).join(' ');
+  }).filter(Boolean).join(', ');
+  return [
+    [route, departureDate].filter(Boolean).join(' '),
+    connectionDetails,
+  ].filter(Boolean).join(' · ');
 }
 
 export function amendmentTimelineSummary(amendment = {}) {
@@ -507,9 +517,16 @@ export function amendmentTimelineSummary(amendment = {}) {
   }[direction] || direction;
   const mappings = amendment.passenger_reissues || [];
   const passengers = unique(mappings.map((mapping) => text(mapping.passenger_name)));
-  const pnrChanges = mappings
-    .filter((mapping) => pnrKey(mapping.old_pnr) !== pnrKey(effectiveNewPnr(mapping)))
-    .map((mapping) => `${text(mapping.old_pnr)} → ${effectiveNewPnr(mapping)}`);
+  const seenPnrChanges = new Set();
+  const pnrChanges = mappings.flatMap((mapping) => {
+    const oldPnr = text(mapping.old_pnr);
+    const newPnr = effectiveNewPnr(mapping);
+    if (!oldPnr && !newPnr) return [];
+    const key = `${pnrKey(oldPnr)}→${pnrKey(newPnr)}`;
+    if (seenPnrChanges.has(key)) return [];
+    seenPnrChanges.add(key);
+    return `${oldPnr || '-'} → ${newPnr || '-'}`;
+  });
   const ticketChanges = mappings
     .filter((mapping) => text(mapping.old_ticket_no) || text(mapping.new_ticket_no))
     .map((mapping) => `${text(mapping.old_ticket_no) || '-'} → ${text(mapping.new_ticket_no) || '-'}`);

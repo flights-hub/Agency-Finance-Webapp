@@ -22,3 +22,25 @@ test('recordMatchesBookingGroup prefers permanent booking ref and falls back to 
   assert.equal(recordMatchesBookingGroup({ booking_id: 'p1' }, group), true);
   assert.equal(recordMatchesBookingGroup({ pnr: 'NOPE' }, group), false);
 });
+
+test('recordMatchesBookingGroup rejects a conflicting permanent booking ref despite shared PNR history', () => {
+  const bookA = [
+    { id: 'a1', booking_ref: 'BOOK-A', pnr: 'CURRENT-A', pnr_history: ['SHARED-OLD'] },
+  ];
+
+  assert.equal(recordMatchesBookingGroup({
+    booking_ref: 'BOOK-B',
+    pnr: 'SHARED-OLD',
+  }, bookA), false);
+});
+
+test('recordMatchesBookingGroup rejects an outside booking row ID despite shared PNR history', () => {
+  const bookA = [
+    { id: 'a1', booking_ref: 'BOOK-A', pnr: 'CURRENT-A', pnr_history: ['SHARED-OLD'] },
+  ];
+
+  assert.equal(recordMatchesBookingGroup({
+    booking_id: 'b1',
+    pnr: 'SHARED-OLD',
+  }, bookA), false);
+});

@@ -580,3 +580,94 @@ test('timeline summary includes scope, direction, passenger, PNR split, and tick
   assert.match(summary, /ABC123 → SPLIT9/);
   assert.match(summary, /OLD-TKT-1 → NEW-TKT-1/);
 });
+
+test('timeline summary includes each unique PNR mapping once without losing passengers or tickets', () => {
+  const summary = amendmentTimelineSummary({
+    ...clone(amendment),
+    passenger_reissues: [
+      {
+        booking_id: 'p1',
+        passenger_name: 'Ada Lovelace',
+        old_pnr: 'ABC123',
+        new_pnr: 'NEW999',
+        old_ticket_no: 'OLD-TKT-1',
+        new_ticket_no: 'NEW-TKT-1',
+      },
+      {
+        booking_id: 'p2',
+        passenger_name: 'Grace Hopper',
+        old_pnr: 'ABC123',
+        new_pnr: 'NEW999',
+        old_ticket_no: 'OLD-TKT-2',
+        new_ticket_no: 'NEW-TKT-2',
+      },
+      {
+        booking_id: 'p3',
+        passenger_name: 'Katherine Johnson',
+        old_pnr: 'ABC123',
+        new_pnr: 'ABC123',
+        old_ticket_no: 'OLD-TKT-3',
+        new_ticket_no: 'NEW-TKT-3',
+      },
+    ],
+  });
+
+  assert.equal(summary.split('ABC123 → NEW999').length - 1, 1);
+  assert.equal(summary.split('ABC123 → ABC123').length - 1, 1);
+  assert.match(summary, /Ada Lovelace, Grace Hopper, Katherine Johnson/);
+  assert.match(summary, /OLD-TKT-1 → NEW-TKT-1/);
+  assert.match(summary, /OLD-TKT-2 → NEW-TKT-2/);
+  assert.match(summary, /OLD-TKT-3 → NEW-TKT-3/);
+});
+
+test('timeline summary distinguishes same-route flight and time changes with compact connection details', () => {
+  const originalConnection = connection('original', {
+    airline: 'AZ',
+    flight_number: '100',
+    departure_city: 'FCO',
+    arrival_city: 'DEL',
+    departure_date: '2026-08-01',
+    arrival_date: '2026-08-01',
+    departure_time: '10:00',
+    arrival_time: '12:00',
+  });
+  const replacementConnection = connection('replacement', {
+    airline: 'AZ',
+    flight_number: '900',
+    departure_city: 'FCO',
+    arrival_city: 'DEL',
+    departure_date: '2026-08-01',
+    arrival_date: '2026-08-01',
+    departure_time: '18:00',
+    arrival_time: '20:00',
+  });
+  const summary = amendmentTimelineSummary({
+    ...clone(amendment),
+    original_itinerary: {
+      outbound: [{ label: 'Outbound', connections: [originalConnection] }],
+      inbound: [],
+    },
+    replacement_itinerary: {
+      outbound: [{ label: 'Outbound', connections: [replacementConnection] }],
+      inbound: [],
+    },
+  });
+
+  assert.match(
+    summary,
+    /Outbound: FCO-DEL 2026-08-01 · AZ100 10:00–12:00 → FCO-DEL 2026-08-01 · AZ900 18:00–20:00/,
+  );
+});
+
+test('timeline summary keeps multi-connection flight and time details readable', () => {
+  const summary = amendmentTimelineSummary(amendment);
+
+  assert.match(
+    summary,
+    /FCO-DOH-DEL 2026-07-20 · QR100 10:00–17:00, QR570 20:00–02:00/,
+  );
+  assert.match(
+    summary,
+    /FCO-IST-DEL 2026-07-25 · TK1862 09:00–13:00, TK716 15:00–00:30/,
+  );
+});

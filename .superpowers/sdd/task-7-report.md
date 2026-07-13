@@ -45,3 +45,28 @@ Implemented and verified.
 ## Concern
 
 - Vite retains the existing large-chunk warning (main bundle above 500 kB); the build succeeds and Task 7 does not add a dependency.
+
+## Formal review remediation
+
+### TDD evidence
+
+- RED: `node --test src/helpers/bookingIdentity.test.js src/helpers/dateChangeAmendments.test.js` — 29 tests, 24 passed, 5 failed. The failures reproduced both conflicting stable-identity leaks, duplicate/omitted PNR-pair audit output, indistinguishable same-route flight/time changes, and missing multi-connection details.
+- GREEN: `node --test src/helpers/bookingIdentity.test.js src/helpers/dateChangeAmendments.test.js` — 29 passed, 0 failed.
+
+### Implementation
+
+- `bookingMatchesRecord` now treats a stored `booking_ref` as authoritative, then a stored `booking_id` as authoritative; historical PNR aliases are consulted only when neither stable identity exists.
+- Completed date-change summaries now emit every distinct normalized old/new PNR pair exactly once, including unchanged pairs, while retaining all affected passenger names and passenger-specific ticket reissues.
+- Compact itinerary summaries now include route, departure date, and each connection's airline/flight plus departure/arrival times, so flight- or time-only reissues remain distinguishable and connections stay readable.
+- Booking Detail already consumes the corrected pure helpers, so no component integration change was required.
+
+### Verification
+
+- Identity/domain/finance: `node --test src/helpers/dateChangeAmendments.test.js src/helpers/bookingIdentity.test.js src/helpers/ledger.test.js src/helpers/calculations.test.js` — 59 passed, 0 failed.
+- Changed-file ESLint: `npx eslint src/helpers/bookingIdentity.js src/helpers/bookingIdentity.test.js src/helpers/dateChangeAmendments.js src/helpers/dateChangeAmendments.test.js` — exit 0.
+- Production build: `npm run build` — exit 0; 1,853 modules transformed.
+- Full Node suite (run once): `node --test` — 165 passed, 0 failed.
+
+### Remaining concern
+
+- Vite still reports the pre-existing large-chunk warning; this remediation adds no dependency or bundle surface.
