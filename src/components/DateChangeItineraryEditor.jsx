@@ -218,6 +218,11 @@ export default function DateChangeItineraryEditor({
   onChange,
 }) {
   const directionKeys = DIRECTION_KEYS[direction] || [];
+  const visibleDirectionKeys = ['outbound', 'inbound'].filter((directionKey) => (
+    directionKeys.includes(directionKey)
+    || original[directionKey]?.length
+    || replacement[directionKey]?.length
+  ));
 
   const updateConnection = (directionKey, segmentIndex, connectionIndex, key, value) => {
     if (disabled || key === 'duration') return;
@@ -268,10 +273,19 @@ export default function DateChangeItineraryEditor({
 
   return (
     <div className="date-change-editor">
-      {directionKeys.map((directionKey) => {
+      {visibleDirectionKeys.map((directionKey) => {
         const directionLabel = DIRECTION_LABELS[directionKey];
         const originalSegments = Array.isArray(original[directionKey]) ? original[directionKey] : [];
         const replacementSegments = Array.isArray(replacement[directionKey]) ? replacement[directionKey] : [];
+
+        if (!directionKeys.includes(directionKey)) {
+          return (
+            <section className="date-change-direction date-change-unchanged" key={directionKey} aria-label={`${directionLabel} journey unchanged`}>
+              <h5 className="date-change-direction-title">{directionLabel} journey</h5>
+              <span className="badge badge-neutral">Unchanged</span>
+            </section>
+          );
+        }
 
         return (
           <section className="date-change-direction" key={directionKey} aria-label={`${directionLabel} date change`}>

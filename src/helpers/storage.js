@@ -2,11 +2,12 @@
 // in-memory cache so pages can keep reading data without async plumbing.
 //
 // App.jsx calls loadFinanceData() once after login; pages then read through the
-// sync getters. Saves update the cache immediately and push to the server in
-// the background (last write wins). localStorage keeps a mirror copy so data
-// created before the database existed can be imported on first load.
+// sync getters. Most legacy saves update the cache immediately and push to the
+// server in the background. Amendment saves await server acceptance before
+// updating the cache so lifecycle/CAS conflicts remain visible in the modal.
+// localStorage keeps a mirror copy for pre-database imports.
 
-import { api } from './api';
+import { api } from './api.js';
 
 const STORAGE_KEYS = {
   BOOKINGS: 'ffs_bookings',
@@ -150,7 +151,15 @@ export function saveRefund(refund) { return save(STORAGE_KEYS.REFUNDS, refund); 
 
 // Amendments
 export function getAmendments() { return readData(STORAGE_KEYS.AMENDMENTS); }
-export function saveAmendment(amendment) { return save(STORAGE_KEYS.AMENDMENTS, amendment); }
+export async function saveAmendment(amendment) {
+  try {
+    const result = await api.saveFinanceRecord('amendments', amendment);
+    return save(STORAGE_KEYS.AMENDMENTS, result.record || amendment, { sync: false });
+  } catch (error) {
+    syncError = error;
+    throw error;
+  }
+}
 export async function finalizeAmendment(amendment) {
   const result = await api.finalizeAmendment(amendment);
   result.bookings.forEach((booking) => save(STORAGE_KEYS.BOOKINGS, booking, { sync: false }));

@@ -7,6 +7,8 @@ import {
   createPassengerReissues,
   isDateChangeType,
   normalizeDateChange,
+  itinerarySnapshotsEqual,
+  selectCompatibleItinerary,
   snapshotItinerary,
   validateDateChangeFinalization,
 } from './dateChangeAmendments.js';
@@ -170,6 +172,8 @@ const amendment = {
 const context = {
   actor: 'Ops User',
   finalizedAt: '2026-07-12T14:00:00.000Z',
+  amendmentId: amendment.id,
+  finalizationFingerprint: 'fingerprint-amd-1',
 };
 
 test('date-change types normalize legacy directions without changing other amendment types', () => {
@@ -266,6 +270,8 @@ test('outbound passenger-wise finalization preserves inbound and the unselected 
   const result = applyDateChangeAmendment(amendment, group, {
     actor: 'Ops User',
     finalizedAt: '2026-07-12T14:00:00.000Z',
+    amendmentId: amendment.id,
+    finalizationFingerprint: 'fingerprint-amd-1',
   });
   const changed = result.bookings.find((row) => row.id === 'p1');
   const unchanged = result.bookings.find((row) => row.id === 'p2');
@@ -322,10 +328,15 @@ test('inbound PNR-wide finalization changes every passenger and preserves outbou
     })),
   };
 
-  const result = applyDateChangeAmendment(inboundAmendment, group, context);
+  const result = applyDateChangeAmendment(inboundAmendment, group, {
+    ...context,
+    amendmentId: inboundAmendment.id,
+  });
 
   assert.equal(result.bookings.length, 2);
   assert.equal(result.bookings[0].ticket_no, 'NEW-TKT-1');
+  assert.equal(result.bookings[0].last_date_change_amendment_id, inboundAmendment.id);
+  assert.equal(result.bookings[0].last_date_change_fingerprint, context.finalizationFingerprint);
   assert.equal(result.bookings[1].ticket_no, 'NEW-TKT-2');
   assert.deepEqual(result.bookings[0].flight_segments[0], group[0].flight_segments[0]);
   assert.equal(result.bookings[0].flight_segments[1].connections.length, 1);
@@ -526,7 +537,7 @@ test('application persists an inferred stable booking reference on the completed
   assert.equal(result.amendment.booking_ref, 'BOOK-1');
 });
 
-test('retry accepts original and intended-final rows without duplicating PNR history', () => {
+test('partial recovery accepts original and intended-final rows without duplicating PNR history', () => {
   const pnrWide = {
     ...clone(amendment),
     application_scope: 'PNR_WIDE',
@@ -545,17 +556,77 @@ test('retry accepts original and intended-final rows without duplicating PNR his
     ],
   };
   const first = applyDateChangeAmendment(pnrWide, group, context);
-  const retry = applyDateChangeAmendment(pnrWide, first.bookings, context);
+  const retry = applyDateChangeAmendment(pnrWide, first.bookings, {
+    ...context,
+    allowPartialRecovery: true,
+  });
   assert.deepEqual(retry.bookings, first.bookings);
   assert.deepEqual(retry.bookings[0].pnr_history, ['ABC123']);
 
   const partial = [first.bookings[0], group[1]];
-  const completedRetry = applyDateChangeAmendment(pnrWide, partial, context);
+  assert.throws(
+    () => applyDateChangeAmendment(pnrWide, partial, context),
+    /compatible itinerary cohort|stale/i,
+  );
+  const completedRetry = applyDateChangeAmendment(pnrWide, partial, {
+    ...context,
+    amendmentId: pnrWide.id,
+    allowPartialRecovery: true,
+  });
   assert.deepEqual(completedRetry.bookings, first.bookings);
 
   const stale = clone(partial);
   stale[1].flight_segments[0].connections[0].flight_number = 'THIRD-STATE';
-  assert.throws(() => applyDateChangeAmendment(pnrWide, stale, context), /stale/);
+  assert.throws(() => applyDateChangeAmendment(pnrWide, stale, {
+    ...context,
+    allowPartialRecovery: true,
+  }), /stale/);
+});
+
+test('fresh amendment rejects an already-final cohort even when every row matches the requested final state', () => {
+  const pnrWide = {
+    ...clone(amendment),
+    application_scope: 'PNR_WIDE',
+    selected_passenger_ids: ['p1', 'p2'],
+    passenger_reissues: [
+      clone(amendment.passenger_reissues[0]),
+      {
+        booking_id: 'p2',
+        passenger_name: 'Grace Hopper',
+        old_pnr: 'ABC123',
+        new_pnr: 'ABC123',
+        old_ticket_no: 'OLD-TKT-2',
+        new_ticket_no: 'NEW-TKT-2',
+        reissue_reference: '',
+      },
+    ],
+  };
+  const finalized = applyDateChangeAmendment(pnrWide, group, context);
+
+  const errors = validateDateChangeFinalization(pnrWide, finalized.bookings);
+  assert.ok(errors.some((error) => /stale|already reflects/i.test(error)), errors.join('\n'));
+});
+
+test('a later legitimate amendment overwrites prior ownership markers on an original-state row', () => {
+  const previouslyOwned = clone(group).map((row) => ({
+    ...row,
+    last_date_change_amendment_id: 'older-amendment',
+    last_date_change_fingerprint: 'older-fingerprint',
+  }));
+
+  const result = applyDateChangeAmendment(amendment, previouslyOwned, context);
+
+  assert.equal(result.bookings[0].last_date_change_amendment_id, amendment.id);
+  assert.equal(result.bookings[0].last_date_change_fingerprint, context.finalizationFingerprint);
+  assert.equal(result.bookings[1].last_date_change_amendment_id, 'older-amendment');
+});
+
+test('canonical itinerary comparison ignores object identity but not a changed flight', () => {
+  const left = snapshotItinerary(group[0]);
+  const right = clone(left);
+  assert.equal(itinerarySnapshotsEqual(left, right), true);
+  right.outbound[0].connections[0].flight_number = 'DIFFERENT';
+  assert.equal(itinerarySnapshotsEqual(left, right), false);
 });
 
 test('route continuity compares airport values case-insensitively', () => {
@@ -670,4 +741,110 @@ test('timeline summary keeps multi-connection flight and time details readable',
     summary,
     /FCO-IST-DEL 2026-07-25 · TK1862 09:00–13:00, TK716 15:00–00:30/,
   );
+});
+
+test('stale validation keeps outbound and inbound boundaries independent', () => {
+  const tampered = clone(amendment);
+  tampered.original_itinerary = {
+    outbound: [...clone(originalItinerary.outbound), ...clone(originalItinerary.inbound)],
+    inbound: [],
+  };
+  tampered.replacement_itinerary.inbound = [];
+
+  const errors = validateDateChangeFinalization(tampered, group);
+  assert.ok(errors.some((error) => /stale|direction boundary/i.test(error)), errors.join('\n'));
+});
+
+test('outbound application preserves each affected row own inbound itinerary', () => {
+  const divergent = clone(group);
+  divergent[0].flight_segments[1].connections[0].flight_number = 'OWN-INBOUND';
+  const ownOriginal = snapshotItinerary(divergent[0]);
+  const passengerDraft = {
+    ...clone(amendment),
+    original_itinerary: ownOriginal,
+    replacement_itinerary: { outbound: clone(replacementOutbound), inbound: clone(ownOriginal.inbound) },
+  };
+
+  const result = applyDateChangeAmendment(passengerDraft, divergent, context);
+  assert.equal(result.bookings[0].flight_segments[1].connections[0].flight_number, 'OWN-INBOUND');
+});
+
+test('inbound-inclusive changes reject affected one-way rows', () => {
+  const oneWay = clone(group);
+  oneWay[0].flight_segments = clone(originalItinerary.outbound);
+  oneWay[0].inbound_date = '';
+  const inbound = {
+    ...clone(amendment),
+    travel_direction: 'INBOUND',
+    original_itinerary: snapshotItinerary(oneWay[0]),
+  };
+  const errors = validateDateChangeFinalization(inbound, oneWay);
+  assert.ok(errors.some((error) => /no inbound itinerary/i.test(error)), errors.join('\n'));
+});
+
+test('server financial validation normalizes totals and rejects invalid fee values', () => {
+  const valid = {
+    ...clone(amendment),
+    fare_difference: '-20.25',
+    supplier_change_fee: '10',
+    flyforsure_service_fee: 2.5,
+    agent_markup: 1,
+    tax_difference: 3,
+    other_charges: 4,
+    total_financial_impact: 999999,
+  };
+  const result = applyDateChangeAmendment(valid, group, context);
+  assert.equal(result.amendment.total_financial_impact, 0.25);
+  assert.equal(result.amendment.fare_difference, -20.25);
+
+  for (const [field, value] of [
+    ['supplier_change_fee', -1],
+    ['flyforsure_service_fee', 'Infinity'],
+    ['agent_markup', 'not-a-number'],
+    ['tax_difference', -0.01],
+    ['other_charges', Number.NaN],
+  ]) {
+    const invalid = { ...clone(amendment), [field]: value };
+    assert.throws(() => applyDateChangeAmendment(invalid, group, context), /financial|finite|negative/i);
+  }
+});
+
+test('completed audit stores the exact canonical itinerary applied to the booking', () => {
+  const raw = clone(amendment);
+  raw.replacement_itinerary.inbound[0].connections[0].flight_number = 'ABANDONED';
+  raw.replacement_itinerary.outbound[0].connections[0].duration = 'client value';
+  const result = applyDateChangeAmendment(raw, group, context);
+  const persisted = snapshotItinerary(result.bookings[0]);
+
+  assert.deepEqual(result.amendment.replacement_itinerary, persisted);
+  assert.equal(result.amendment.replacement_itinerary.inbound[0].connections[0].flight_number, '571');
+  assert.equal(result.amendment.replacement_itinerary.outbound[0].connections[0].duration, '4h 0m');
+});
+
+test('compatible itinerary selection follows selected passenger and detects divergent cohorts', () => {
+  const divergent = clone(group);
+  divergent[1].flight_segments[0].connections[0].flight_number = 'P2-ONLY';
+
+  const p2 = selectCompatibleItinerary(divergent, ['p2']);
+  assert.equal(p2.compatible, true);
+  assert.equal(p2.snapshot.outbound[0].connections[0].flight_number, 'P2-ONLY');
+
+  const both = selectCompatibleItinerary(divergent, ['p1', 'p2']);
+  assert.equal(both.compatible, false);
+  assert.deepEqual(both.incompatibleIds, ['p2']);
+});
+
+test('multiple affected passengers must share the same canonical current itinerary', () => {
+  const divergent = clone(group);
+  divergent[1].flight_segments[0].connections[0].flight_number = 'P2-ONLY';
+  const pnrWide = {
+    ...clone(amendment),
+    application_scope: 'PNR_WIDE',
+    passenger_reissues: createPassengerReissues(divergent, ['p1', 'p2'], []).map((mapping, index) => ({
+      ...mapping,
+      new_ticket_no: `NEW-COHORT-${index}`,
+    })),
+  };
+  const errors = validateDateChangeFinalization(pnrWide, divergent);
+  assert.ok(errors.some((error) => /compatible itinerary cohort/i.test(error)), errors.join('\n'));
 });

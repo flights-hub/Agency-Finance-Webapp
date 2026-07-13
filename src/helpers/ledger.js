@@ -28,7 +28,6 @@ import {
   getLedgerPostingStatus,
 } from './paymentVerification.js';
 import { bookingPnrAliases, stableBookingRef } from './bookingIdentity.js';
-import { isDateChangeType } from './dateChangeAmendments.js';
 
 export function numeric(value) {
   const parsed = Number(value);
@@ -281,7 +280,7 @@ export function amendmentTotalImpact(amendment = {}) {
 }
 
 export function isAmendmentPosted(amendment = {}) {
-  if (isDateChangeType(amendment.amendment_type)) return amendment.status === 'COMPLETED';
+  if (amendment.amendment_type === 'DATE_CHANGE') return amendment.status === 'COMPLETED';
   return ['CONFIRMED', 'COMPLETED'].includes(amendment.status);
 }
 
@@ -750,7 +749,7 @@ export function getAccountOpenItems(account, model) {
 }
 
 function amendmentPostingDate(amendment = {}) {
-  const stamp = isDateChangeType(amendment.amendment_type)
+  const stamp = amendment.amendment_type === 'DATE_CHANGE'
     ? amendment.finalized_at || amendment.completed_at || amendment.confirmed_at
       || amendment.approved_at || amendment.updated_at || amendment.created_at
     : amendment.confirmed_at || amendment.approved_at || amendment.updated_at || amendment.created_at;

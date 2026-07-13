@@ -12,6 +12,15 @@ const DIRECTION_KEYS = {
   BOTH: ['outbound', 'inbound'],
 };
 
+const FINANCIAL_FIELDS = [
+  'fare_difference',
+  'supplier_change_fee',
+  'flyforsure_service_fee',
+  'agent_markup',
+  'tax_difference',
+  'other_charges',
+];
+
 const REQUIRED_CONNECTION_FIELDS = [
   ['airline', 'Airline'],
   ['flight_number', 'Flight number'],
@@ -139,8 +148,31 @@ function withCalculatedDurations(segments = []) {
   }));
 }
 
-function intendedItinerary(amendment = {}) {
-  const original = amendment.original_itinerary || {};
+function canonicalSnapshot(booking = {}) {
+  const snapshot = snapshotItinerary(booking);
+  return {
+    outbound: withCalculatedDurations(snapshot.outbound),
+    inbound: withCalculatedDurations(snapshot.inbound),
+  };
+}
+
+export function selectCompatibleItinerary(group = [], selectedIds = []) {
+  const selected = new Set(selectedIds.map(idKey));
+  const rows = group.filter((row) => selected.has(idKey(row.id)));
+  const snapshot = rows.length ? canonicalSnapshot(rows[0]) : { outbound: [], inbound: [] };
+  const incompatibleIds = rows
+    .slice(1)
+    .filter((row) => !sameValue(canonicalSnapshot(row), snapshot))
+    .map((row) => idKey(row.id));
+  return {
+    snapshot: clone(snapshot),
+    compatible: incompatibleIds.length === 0,
+    incompatibleIds,
+  };
+}
+
+function intendedItinerary(amendment = {}, baseItinerary = amendment.original_itinerary || {}) {
+  const original = baseItinerary || {};
   const replacement = amendment.replacement_itinerary || {};
   const selected = new Set(directionKeys(amendment));
 
@@ -172,6 +204,19 @@ function sameValue(left, right) {
   const rightKeys = Object.keys(right).sort();
   return leftKeys.length === rightKeys.length
     && leftKeys.every((key, index) => key === rightKeys[index] && sameValue(left[key], right[key]));
+}
+
+function sameItinerary(left = {}, right = {}) {
+  return sameValue(left.outbound || [], right.outbound || [])
+    && sameValue(left.inbound || [], right.inbound || []);
+}
+
+export function itinerarySnapshotsEqual(left = {}, right = {}) {
+  const canonical = (itinerary) => ({
+    outbound: withCalculatedDurations(itinerary?.outbound || []),
+    inbound: withCalculatedDurations(itinerary?.inbound || []),
+  });
+  return sameItinerary(canonical(left), canonical(right));
 }
 
 function targetBookingRef(amendment, group) {
@@ -267,8 +312,12 @@ function validateInboundAfterOutbound(amendment, errors) {
 }
 
 function rowState(row, mapping, amendment) {
-  const originalSegments = itinerarySegments(amendment.original_itinerary || {});
-  const finalSegments = itinerarySegments(intendedItinerary(amendment));
+  const currentItinerary = canonicalSnapshot(row);
+  const originalItinerary = {
+    outbound: withCalculatedDurations(amendment.original_itinerary?.outbound || []),
+    inbound: withCalculatedDurations(amendment.original_itinerary?.inbound || []),
+  };
+  const finalItinerary = intendedItinerary(amendment, originalItinerary);
   const oldPnr = pnrKey(mapping.old_pnr);
   const newPnr = pnrKey(effectiveNewPnr(mapping));
   const currentPnr = pnrKey(row.pnr);
@@ -278,17 +327,29 @@ function rowState(row, mapping, amendment) {
 
   const original = currentPnr === oldPnr
     && currentTicket === oldTicket
-    && sameValue(row.flight_segments || [], originalSegments);
+    && sameItinerary(currentItinerary, originalItinerary);
   const historyContainsOldPnr = oldPnr === newPnr || bookingPnrAliases(row).includes(oldPnr);
   const final = currentPnr === newPnr
     && currentTicket === newTicket
     && historyContainsOldPnr
-    && sameValue(row.flight_segments || [], finalSegments);
+    && sameItinerary(currentItinerary, finalItinerary);
 
   return { original, final };
 }
 
-export function validateDateChangeFinalization(amendment = {}, group = []) {
+function finalStateOwnedBy(row, amendment, options = {}) {
+  const amendmentId = text(options.amendmentId || amendment.id);
+  const fingerprint = text(options.finalizationFingerprint);
+  return Boolean(amendmentId && fingerprint)
+    && text(row.last_date_change_amendment_id) === amendmentId
+    && text(row.last_date_change_fingerprint) === fingerprint;
+}
+
+export function validateDateChangeFinalization(amendment = {}, group = [], {
+  allowPartialRecovery = false,
+  amendmentId = '',
+  finalizationFingerprint = '',
+} = {}) {
   const errors = [];
   const scope = amendment.application_scope;
   const eligible = eligibleRows(amendment, group);
@@ -302,6 +363,13 @@ export function validateDateChangeFinalization(amendment = {}, group = []) {
     .filter((row) => !affectedIds.has(idKey(row.id)))
     .map((row) => [ticketKey(row.ticket_no), idKey(row.id)])
     .filter(([ticket]) => ticket));
+
+  if (affected.length > 1) {
+    const compatibility = selectCompatibleItinerary(affected, affected.map((row) => row.id));
+    if (!compatibility.compatible && !allowPartialRecovery) {
+      errors.push('Affected passengers do not share one compatible itinerary cohort; finalize them passenger-wise.');
+    }
+  }
 
   if (scope !== 'PNR_WIDE' && scope !== 'SELECTED_PASSENGERS') {
     errors.push('Application scope must be PNR-wide or selected passengers.');
@@ -323,6 +391,13 @@ export function validateDateChangeFinalization(amendment = {}, group = []) {
   if (!selectedDirections.length) {
     errors.push('Travel direction must be OUTBOUND, INBOUND, or BOTH.');
   } else {
+    if (selectedDirections.includes('inbound')) {
+      affected.forEach((row) => {
+        if (!canonicalSnapshot(row).inbound.length) {
+          errors.push(`Booking row ${idKey(row.id)} has no inbound itinerary for this date change.`);
+        }
+      });
+    }
     selectedDirections.forEach((directionKey) => {
       validateConnectionSequence(directionKey, amendment.replacement_itinerary?.[directionKey] || [], errors);
     });
@@ -365,7 +440,11 @@ export function validateDateChangeFinalization(amendment = {}, group = []) {
     }
 
     const state = rowState(row, mapping, amendment);
-    if (!state.original && !state.final) {
+    const ownedFinal = state.final && finalStateOwnedBy(row, amendment, {
+      amendmentId,
+      finalizationFingerprint,
+    });
+    if (!state.original && !(allowPartialRecovery && ownedFinal)) {
       errors.push(`Booking row ${bookingId} is stale; refresh and review it before finalizing.`);
     }
   });
@@ -373,12 +452,38 @@ export function validateDateChangeFinalization(amendment = {}, group = []) {
   return [...new Set(errors)];
 }
 
+function normalizedFinancials(amendment = {}) {
+  const values = {};
+  const errors = [];
+  FINANCIAL_FIELDS.forEach((field) => {
+    const raw = amendment[field];
+    const value = raw === '' || raw === null || raw === undefined ? 0 : Number(raw);
+    if (!Number.isFinite(value)) {
+      errors.push(`${field.replace(/_/g, ' ')} must be a finite financial value.`);
+    } else if (field !== 'fare_difference' && value < 0) {
+      errors.push(`${field.replace(/_/g, ' ')} cannot be negative.`);
+    } else {
+      values[field] = Math.round((value + Number.EPSILON) * 100) / 100;
+    }
+  });
+  if (errors.length) throw new Error(errors.join('\n'));
+  const total = FINANCIAL_FIELDS.reduce((sum, field) => sum + values[field], 0);
+  return {
+    ...values,
+    total_financial_impact: Math.round((total + Number.EPSILON) * 100) / 100,
+  };
+}
+
 function validateFinalizationContext(context = {}) {
   const errors = [];
   const actor = text(context.actor);
   const finalizedAt = text(context.finalizedAt);
+  const amendmentId = text(context.amendmentId);
+  const fingerprint = text(context.finalizationFingerprint);
 
   if (!actor) errors.push('Finalization actor is required.');
+  if (!amendmentId) errors.push('Finalization amendment ID is required.');
+  if (!fingerprint) errors.push('Finalization fingerprint is required.');
   if (!finalizedAt) {
     errors.push('Finalization time is required.');
   } else {
@@ -435,16 +540,28 @@ function deriveItineraryFields(itinerary) {
 
 export function applyDateChangeAmendment(amendment = {}, group = [], context = {}) {
   const errors = [
-    ...validateDateChangeFinalization(amendment, group),
+    ...validateDateChangeFinalization(amendment, group, {
+      allowPartialRecovery: context.allowPartialRecovery === true,
+      amendmentId: context.amendmentId,
+      finalizationFingerprint: context.finalizationFingerprint,
+    }),
     ...validateFinalizationContext(context),
   ];
   if (errors.length) throw new Error(errors.join('\n'));
 
+  const financials = normalizedFinancials(amendment);
+
   const actor = text(context.actor);
   const finalizedAt = text(context.finalizedAt);
+  const amendmentId = text(context.amendmentId);
+  const fingerprint = text(context.finalizationFingerprint);
   const mappings = mappingByBookingId(amendment);
   const affectedIds = new Set(affectedRows(amendment, group).map((row) => idKey(row.id)));
-  const finalItinerary = intendedItinerary(amendment);
+  const baseItinerary = {
+    outbound: withCalculatedDurations(amendment.original_itinerary?.outbound || []),
+    inbound: withCalculatedDurations(amendment.original_itinerary?.inbound || []),
+  };
+  const finalItinerary = intendedItinerary(amendment, baseItinerary);
   const derived = deriveItineraryFields(finalItinerary);
   const completedReissues = (amendment.passenger_reissues || []).map((mapping) => ({
     ...clone(mapping),
@@ -455,6 +572,8 @@ export function applyDateChangeAmendment(amendment = {}, group = [], context = {
     ...clone(amendment),
     amendment_type: 'DATE_CHANGE',
     booking_ref: targetBookingRef(amendment, group),
+    ...financials,
+    replacement_itinerary: clone(finalItinerary),
     passenger_reissues: completedReissues,
     status: 'COMPLETED',
     finalized_at: finalizedAt,
@@ -468,6 +587,14 @@ export function applyDateChangeAmendment(amendment = {}, group = [], context = {
     const bookingId = idKey(row.id);
     if (!affectedIds.has(bookingId)) return row;
     const mapping = mappings.get(bookingId);
+    if (
+      context.allowPartialRecovery === true
+      && rowState(row, mapping, amendment).final
+      && finalStateOwnedBy(row, amendment, {
+        amendmentId,
+        finalizationFingerprint: fingerprint,
+      })
+    ) return row;
 
     return {
       ...row,
@@ -476,6 +603,8 @@ export function applyDateChangeAmendment(amendment = {}, group = [], context = {
       pnr_history: updatedPnrHistory(row, mapping),
       ticket_no: text(mapping.new_ticket_no),
       flight_segments: clone(itinerarySegments(finalItinerary)),
+      last_date_change_amendment_id: amendmentId,
+      last_date_change_fingerprint: fingerprint,
     };
   });
 

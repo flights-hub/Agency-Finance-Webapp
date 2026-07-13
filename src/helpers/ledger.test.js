@@ -609,7 +609,7 @@ test('date change posts only when completed and uses finalized date', () => {
     bookings: [booking],
     amendments: [{
       ...amendment,
-      amendment_type: 'OUTBOUND_DATE_CHANGE',
+      amendment_type: 'DATE_CHANGE',
       status: 'COMPLETED',
       finalized_at: '2026-07-12T14:00:00.000Z',
     }],
@@ -617,6 +617,26 @@ test('date change posts only when completed and uses finalized date', () => {
   const entry = completedModel.accountList[0].ledger.find((item) => item.reference_id === amendment.id);
 
   assert.equal(entry.entry_date, '2026-07-12');
+});
+
+test('legacy direction-specific date change keeps confirmed posting and confirmed date', () => {
+  const booking = agentBooking({ fare: 800, pnr: 'AMD-LEGACY-DATE' });
+  const amendment = {
+    id: uid('amd'),
+    booking_id: booking.id,
+    pnr: booking.pnr,
+    amendment_type: 'OUTBOUND_DATE_CHANGE',
+    fare_difference: 80,
+    status: 'CONFIRMED',
+    confirmed_at: '2026-07-10T10:00:00Z',
+    completed_at: '2026-07-12T14:00:00Z',
+  };
+  const model = buildFinanceModel({ bookings: [booking], amendments: [amendment] });
+  const agent = account(model, 'AGENT', 'ABC Travels');
+  const entry = agent.ledger.find((item) => item.reference_id === amendment.id);
+
+  assert.equal(agent.balance, 880);
+  assert.equal(entry.entry_date, '2026-07-10');
 });
 
 test('completed non-date amendment keeps its confirmed posting date', () => {
