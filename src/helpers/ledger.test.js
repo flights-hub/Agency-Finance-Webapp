@@ -10,6 +10,7 @@ import {
   buildAutoAllocation,
   buildAllocationRecords,
   buildFinanceModel,
+  groupBookingsByPnr,
   netRefundCredit,
   paymentAllocationSummary,
   refundCreditSummary,
@@ -111,6 +112,151 @@ test('unverified payment does not change the ledger balance', () => {
   assert.equal(agent.balance, 800);
   assert.equal(agent.ledger.length, 1);
   assert.equal(agent.pending_verification_count, 1);
+});
+
+test('payment on historical PNR stays on the booking account after passenger split', () => {
+  const booking = {
+    ...agentBooking({ fare: 500, pnr: 'NEW111', agent: 'Agency A' }),
+    booking_ref: 'INV-1',
+    pnr_history: ['OLD111'],
+  };
+  const payment = verifiedPayment({ amount: 200, pnr: 'OLD111', party: 'Wrong fallback' });
+  const model = buildFinanceModel({ bookings: [booking], payments: [payment] });
+
+  assert.equal(account(model, 'AGENT', 'Agency A').payments[0].id, payment.id);
+});
+
+test('stable booking reference wins before a conflicting PNR fallback', () => {
+  const intended = {
+    ...agentBooking({ fare: 500, pnr: 'NEW111', agent: 'Agency A' }),
+    booking_ref: 'INV-1',
+  };
+  const conflicting = agentBooking({ fare: 400, pnr: 'OTHER222', agent: 'Agency B' });
+  const payment = verifiedPayment({
+    amount: 200,
+    pnr: 'OTHER222',
+    party: '',
+    extra: { booking_ref: 'INV-1' },
+  });
+  const model = buildFinanceModel({ bookings: [intended, conflicting], payments: [payment] });
+
+  assert.equal(account(model, 'AGENT', 'Agency A').payments[0].id, payment.id);
+  assert.equal(account(model, 'AGENT', 'Agency B').payments.length, 0);
+});
+
+test('split-row refund and amendment resolve the exact booking inside a stable group', () => {
+  const first = {
+    ...agentBooking({ fare: 500, pnr: 'FIRST111', agent: 'Agency A', ticket: 'TICKET-A' }),
+    booking_ref: 'SHARED-REF',
+    pnr_history: ['FIRST-OLD', 'SHARED-OLD'],
+    supplier_name: 'Supplier A',
+  };
+  const second = {
+    ...agentBooking({ fare: 400, pnr: 'SECOND222', agent: 'Agency B', ticket: 'TICKET-B' }),
+    booking_ref: 'SHARED-REF',
+    pnr_history: ['SECOND-OLD', 'SHARED-OLD'],
+    supplier_name: 'Supplier B',
+  };
+  const refund = {
+    id: uid('ref'),
+    booking_ref: 'SHARED-REF',
+    booking_id: second.id,
+    pnr: second.pnr,
+    supplier_refund: 100,
+  };
+  const ambiguousRefund = {
+    id: uid('ref'),
+    booking_ref: 'SHARED-REF',
+    pnr: 'SHARED-OLD',
+    supplier_refund: 50,
+  };
+  const amendments = [
+    {
+      id: uid('amd'), booking_ref: 'SHARED-REF', ticket_no: second.ticket_no,
+      amendment_type: 'NAME_CHANGE', status: 'QUOTED',
+    },
+    {
+      id: uid('amd'), booking_ref: 'SHARED-REF', pnr: first.pnr,
+      amendment_type: 'NAME_CHANGE', status: 'QUOTED',
+    },
+    {
+      id: uid('amd'), booking_ref: 'SHARED-REF', pnr: 'SECOND-OLD',
+      amendment_type: 'NAME_CHANGE', status: 'QUOTED',
+    },
+  ];
+  const model = buildFinanceModel({
+    bookings: [first, second],
+    refunds: [refund, ambiguousRefund],
+    amendments,
+  });
+
+  assert.equal(account(model, 'SUPPLIER', 'Supplier A').refunds.length, 0);
+  assert.deepEqual(account(model, 'SUPPLIER', 'Supplier B').refunds.map((entry) => entry.refund.id), [refund.id]);
+  assert.equal(model.refundsById.has(ambiguousRefund.id), true);
+  assert.deepEqual(account(model, 'AGENT', 'Agency A').amendments.map(({ amendment }) => amendment.id), [amendments[1].id]);
+  assert.deepEqual(account(model, 'AGENT', 'Agency B').amendments.map(({ amendment }) => amendment.id), [
+    amendments[0].id,
+    amendments[2].id,
+  ]);
+});
+
+test('ambiguous aliases and group-only references never infer the first booking row', () => {
+  const first = {
+    ...agentBooking({ fare: 500, pnr: 'FIRST333', agent: 'Agency A', ticket: 'TICKET-C' }),
+    booking_ref: 'GROUP-ONLY',
+    pnr_history: ['AMBIGUOUS-OLD'],
+    supplier_name: 'Supplier A',
+  };
+  const second = {
+    ...agentBooking({ fare: 400, pnr: 'SECOND444', agent: 'Agency B', ticket: 'TICKET-D' }),
+    booking_ref: 'GROUP-ONLY',
+    pnr_history: ['AMBIGUOUS-OLD'],
+    supplier_name: 'Supplier B',
+  };
+  const payments = [
+    verifiedPayment({ amount: 20, pnr: 'AMBIGUOUS-OLD', party: 'Fallback Agency' }),
+    verifiedPayment({ amount: 30, party: 'Fallback Agency', extra: { booking_ref: 'GROUP-ONLY' } }),
+    verifiedPayment({
+      amount: 40,
+      pnr: first.pnr,
+      party: 'Fallback Agency',
+      extra: { booking_ref: 'UNKNOWN-REF' },
+    }),
+  ];
+  const refunds = [
+    { id: uid('ref'), pnr: 'AMBIGUOUS-OLD', supplier_refund: 20 },
+    { id: uid('ref'), booking_ref: 'GROUP-ONLY', supplier_refund: 30 },
+    { id: uid('ref'), booking_ref: 'UNKNOWN-REF', pnr: first.pnr, supplier_refund: 40 },
+  ];
+  const amendments = [
+    { id: uid('amd'), pnr: 'AMBIGUOUS-OLD', amendment_type: 'NAME_CHANGE', status: 'QUOTED' },
+    { id: uid('amd'), booking_ref: 'GROUP-ONLY', amendment_type: 'NAME_CHANGE', status: 'QUOTED' },
+    {
+      id: uid('amd'), booking_ref: 'UNKNOWN-REF', pnr: first.pnr,
+      amendment_type: 'NAME_CHANGE', status: 'QUOTED',
+    },
+  ];
+  const model = buildFinanceModel({ bookings: [first, second], payments, refunds, amendments });
+
+  assert.equal(account(model, 'AGENT', 'Agency A').payments.length, 0);
+  assert.equal(account(model, 'AGENT', 'Agency B').payments.length, 0);
+  assert.deepEqual(account(model, 'AGENT', 'Fallback Agency').payments.map((payment) => payment.id), payments.map((payment) => payment.id));
+  assert.equal(account(model, 'SUPPLIER', 'Supplier A').refunds.length, 0);
+  assert.equal(account(model, 'SUPPLIER', 'Supplier B').refunds.length, 0);
+  assert.equal(refunds.every((refund) => model.refundsById.has(refund.id)), true);
+  assert.equal(account(model, 'AGENT', 'Agency A').amendments.length, 0);
+  assert.equal(account(model, 'AGENT', 'Agency B').amendments.length, 0);
+});
+
+test('booking PNR aliases index each booking only once per alias', () => {
+  const booking = {
+    ...agentBooking({ pnr: 'SAME111' }),
+    pnr_history: ['OLD111', 'SAME111', 'old111'],
+  };
+  const grouped = groupBookingsByPnr([booking]);
+
+  assert.deepEqual(grouped.get('SAME111'), [booking]);
+  assert.deepEqual(grouped.get('OLD111'), [booking]);
 });
 
 // §12 — €5,000 payment for 8 × €800 tickets, auto-allocated oldest first.
@@ -412,16 +558,15 @@ test('amendment total impact sums all input components', () => {
   }), -70);
 });
 
-// Servicing spec §6/§7 — draft and quoted amendments never touch the ledger;
-// CONFIRMED posts an AMENDMENT_CHARGE and an open receivable item.
-test('amendment posts charge and open item only when confirmed', () => {
+// Non-date servicing cases retain the existing CONFIRMED posting milestone.
+test('non-date amendment posts charge and open item only when confirmed', () => {
   const booking = agentBooking({ fare: 800, pnr: 'AMD1' });
   const amendment = {
     id: uid('amd'),
     amendment_number: 'AMD-000001',
     booking_id: booking.id,
     pnr: 'AMD1',
-    amendment_type: 'DATE_CHANGE',
+    amendment_type: 'NAME_CHANGE',
     fare_difference: 80,
     supplier_change_fee: 25,
     flyforsure_service_fee: 10,
@@ -444,6 +589,75 @@ test('amendment posts charge and open item only when confirmed', () => {
   assert.equal(agent.control.matched, true);
 });
 
+test('date change posts only when completed and uses finalized date', () => {
+  const booking = agentBooking({ fare: 800, pnr: 'AMD-DATE' });
+  const amendment = {
+    id: uid('amd'),
+    amendment_number: 'AMD-000002',
+    booking_id: booking.id,
+    pnr: 'AMD-DATE',
+    amendment_type: 'DATE_CHANGE',
+    fare_difference: 80,
+    status: 'CONFIRMED',
+    confirmed_at: '2026-07-10T10:00:00Z',
+  };
+  const draftModel = buildFinanceModel({ bookings: [booking], amendments: [amendment] });
+
+  assert.equal(draftModel.accountList[0].ledger.some((entry) => entry.reference_id === amendment.id), false);
+
+  const completedModel = buildFinanceModel({
+    bookings: [booking],
+    amendments: [{
+      ...amendment,
+      amendment_type: 'DATE_CHANGE',
+      status: 'COMPLETED',
+      finalized_at: '2026-07-12T14:00:00.000Z',
+    }],
+  });
+  const entry = completedModel.accountList[0].ledger.find((item) => item.reference_id === amendment.id);
+
+  assert.equal(entry.entry_date, '2026-07-12');
+});
+
+test('legacy direction-specific date change keeps confirmed posting and confirmed date', () => {
+  const booking = agentBooking({ fare: 800, pnr: 'AMD-LEGACY-DATE' });
+  const amendment = {
+    id: uid('amd'),
+    booking_id: booking.id,
+    pnr: booking.pnr,
+    amendment_type: 'OUTBOUND_DATE_CHANGE',
+    fare_difference: 80,
+    status: 'CONFIRMED',
+    confirmed_at: '2026-07-10T10:00:00Z',
+    completed_at: '2026-07-12T14:00:00Z',
+  };
+  const model = buildFinanceModel({ bookings: [booking], amendments: [amendment] });
+  const agent = account(model, 'AGENT', 'ABC Travels');
+  const entry = agent.ledger.find((item) => item.reference_id === amendment.id);
+
+  assert.equal(agent.balance, 880);
+  assert.equal(entry.entry_date, '2026-07-10');
+});
+
+test('completed non-date amendment keeps its confirmed posting date', () => {
+  const booking = agentBooking({ fare: 800, pnr: 'AMD-NAME' });
+  const amendment = {
+    id: uid('amd'),
+    booking_id: booking.id,
+    pnr: booking.pnr,
+    amendment_type: 'NAME_CHANGE',
+    fare_difference: 50,
+    status: 'COMPLETED',
+    confirmed_at: '2026-07-01T10:00:00Z',
+    completed_at: '2026-07-05T10:00:00Z',
+  };
+  const model = buildFinanceModel({ bookings: [booking], amendments: [amendment] });
+  const entry = account(model, 'AGENT', 'ABC Travels').ledger
+    .find((item) => item.reference_id === amendment.id);
+
+  assert.equal(entry.entry_date, '2026-07-01');
+});
+
 // Servicing spec §6 — negative amendment total posts a credit open item and
 // never converts to a payout automatically.
 test('negative amendment total posts amendment credit', () => {
@@ -452,7 +666,7 @@ test('negative amendment total posts amendment credit', () => {
     id: uid('amd'),
     booking_id: booking.id,
     pnr: 'AMD2',
-    amendment_type: 'DATE_CHANGE',
+    amendment_type: 'NAME_CHANGE',
     fare_difference: -100,
     supplier_change_fee: 20,
     flyforsure_service_fee: 10,

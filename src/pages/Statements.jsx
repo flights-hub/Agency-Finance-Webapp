@@ -58,7 +58,7 @@ export default function Statements() {
   // generated per registered user, not from names found in seeded booking data.
   useEffect(() => {
     let active = true;
-    api.listUsers()
+    api.listDirectoryUsers()
       .then((data) => {
         if (active) setRegisteredUsers(data.users || []);
       })

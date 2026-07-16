@@ -27,6 +27,7 @@ export const api = {
   me: () => request('/api/auth/me'),
   changePassword: (password) => request('/api/auth/change-password', { method: 'POST', body: { password } }),
   listUsers: () => request('/api/admin/users'),
+  listDirectoryUsers: () => request('/api/directory/users'),
   createUser: (payload) => request('/api/admin/users', { method: 'POST', body: payload }),
   updateUser: (id, payload) => request(`/api/admin/users/${id}`, { method: 'PATCH', body: payload }),
   resetPassword: (id) => request(`/api/admin/users/${id}/reset-password`, { method: 'POST' }),
@@ -41,6 +42,10 @@ export const api = {
   saveFinanceRecord: (collection, record) => request(`/api/finance/${collection}/${encodeURIComponent(record.id)}`, {
     method: 'PUT',
     body: record,
+  }),
+  finalizeAmendment: (record) => request('/api/amendments/finalize', {
+    method: 'POST',
+    body: { amendment: record },
   }),
   createPaymentProofUpload: (paymentId, payload) => request(`/api/payments/${encodeURIComponent(paymentId)}/proof-upload`, {
     method: 'POST',

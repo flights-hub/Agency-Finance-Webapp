@@ -3,6 +3,8 @@
 // know exactly which financial items are touched, so these are stored as
 // structured lists — never as one text field.
 
+import { directionForSegment } from '../helpers/servicingTravelDirection';
+
 const ATTACHMENT_TYPES = ['image/jpeg', 'image/png', 'application/pdf'];
 const ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -26,7 +28,7 @@ export function bookingGroupOptions(group = []) {
   const segments = [];
   const seen = new Set();
   group.forEach((row) => {
-    (row.flight_segments || []).forEach((segment) => {
+    (row.flight_segments || []).forEach((segment, segmentIndex) => {
       (segment.connections || []).forEach((conn) => {
         const label = [
           `${conn.airline || ''}${conn.flight_number || ''}`,
@@ -35,7 +37,11 @@ export function bookingGroupOptions(group = []) {
         const key = `${label}|${conn.departure_date || ''}`;
         if (seen.has(key)) return;
         seen.add(key);
-        segments.push({ id: key, label: conn.departure_date ? `${label} · ${conn.departure_date}` : label });
+        segments.push({
+          id: key,
+          label: conn.departure_date ? `${label} · ${conn.departure_date}` : label,
+          direction: directionForSegment(segment, row, segmentIndex),
+        });
       });
     });
   });
@@ -109,7 +115,7 @@ export default function AffectedItemsPicker({ options, value, onChange, disabled
     <div className="affected-picker">
       {show.passengers !== false && (
         <ChipGroup
-          label="Affected Passengers"
+          label="Passengers"
           options={options.passengers}
           value={value.passengers || []}
           onChange={update('passengers')}
@@ -119,7 +125,7 @@ export default function AffectedItemsPicker({ options, value, onChange, disabled
       )}
       {show.tickets !== false && (
         <ChipGroup
-          label="Affected Tickets"
+          label="Tickets"
           options={options.tickets}
           value={value.tickets || []}
           onChange={update('tickets')}
@@ -129,7 +135,7 @@ export default function AffectedItemsPicker({ options, value, onChange, disabled
       )}
       {show.segments !== false && (
         <ChipGroup
-          label="Affected Segments"
+          label="Segments"
           options={options.segments}
           value={value.segments || []}
           onChange={update('segments')}

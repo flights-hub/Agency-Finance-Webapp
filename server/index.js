@@ -1,7 +1,14 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import {
+  finalizationHttpError,
+  isUniqueConstraintConflict,
+  loadBookingGroupByRef,
+  persistDateChangeFinalization,
+} from './amendmentFinalization.js';
 import { parseBookingText } from './bookingParser.js';
 import { scopedFinanceData } from './financeAccess.js';
+import { saveVersionedFinanceRecord } from './financeRecordInvariants.js';
 import { canVerifyPayments, enforcePaymentRules } from './paymentRules.js';
 import { completeProofUpload, createProofUpload, signedProofViewUrl } from './paymentProofs.js';
 import { loadEnvFile } from './env.js';
@@ -280,6 +287,7 @@ const ACTION_MODULES = {
   upload_payment_proof: 'finance',
   verify_payment: 'finance',
   unverify_payment: 'finance',
+  finalize_date_change_amendment: 'finance',
 };
 
 async function audit(req, actor, action, targetUserId, extras = {}) {
@@ -475,6 +483,27 @@ async function handleListUsers(req, res) {
 
   json(res, 200, {
     users: (profiles || []).map((profile) => publicProfile(profile, byUser.get(profile.id) || [])),
+  });
+}
+
+async function handleUserDirectory(req, res) {
+  await currentUser(req);
+  const profiles = await supabaseRequest(
+    '/rest/v1/profiles?status=eq.ACTIVE&select=id,name,role,status,linked_agent_id,linked_supplier_id&order=name.asc',
+  );
+
+  json(res, 200, {
+    users: (profiles || []).map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      role: profile.role,
+      status: profile.status,
+      party_id: profile.role === 'AGENT'
+        ? (profile.linked_agent_id || profile.id)
+        : profile.role === 'SUPPLIER'
+          ? (profile.linked_supplier_id || profile.id)
+          : profile.id,
+    })),
   });
 }
 
@@ -695,7 +724,7 @@ async function upsertFinanceRow(collection, record, userId) {
 
 async function getFinanceRow(collection, id) {
   const rows = await supabaseRequest(
-    `/rest/v1/${collection}?id=eq.${encodeURIComponent(id)}&select=id,data,created_by`,
+    `/rest/v1/${collection}?id=eq.${encodeURIComponent(id)}&select=id,data,created_by,updated_at`,
   );
   return rows?.[0] || null;
 }
@@ -773,6 +802,23 @@ async function handleSaveFinanceRecord(req, res, collection, id) {
     throw error;
   }
 
+  if (collection === 'bookings' || collection === 'amendments') {
+    const existingRow = await getFinanceRow(collection, id);
+    const bookingGroup = collection === 'amendments'
+      && existingRow?.data?.amendment_type === 'DATE_CHANGE'
+      ? await loadBookingGroupByRef(existingRow.data.booking_ref, supabaseRequest)
+      : [];
+    const record = await saveVersionedFinanceRecord({
+      collection,
+      record: body,
+      existingRow,
+      bookingGroup,
+      userId: user.id,
+      request: supabaseRequest,
+    });
+    return json(res, 200, { record });
+  }
+
   if (collection === 'payments') {
     // Verification is a server decision: only verify_payments holders can set
     // VERIFIED, financial edits to verified payments reset the status, and
@@ -822,6 +868,22 @@ async function handleBulkImportFinance(req, res, collection) {
 
   for (const record of records) {
     if (!record || !record.id) continue;
+    if (collection === 'bookings' || collection === 'amendments') {
+      const existingRow = await getFinanceRow(collection, record.id);
+      const bookingGroup = collection === 'amendments'
+        && existingRow?.data?.amendment_type === 'DATE_CHANGE'
+        ? await loadBookingGroupByRef(existingRow.data.booking_ref, supabaseRequest)
+        : [];
+      imported.push(await saveVersionedFinanceRecord({
+        collection,
+        record,
+        existingRow,
+        bookingGroup,
+        userId: user.id,
+        request: supabaseRequest,
+      }));
+      continue;
+    }
     const toSave = enforceEachPayment ? { ...enforcePaymentRules(user, record, null).record, id: record.id } : record;
     imported.push(await upsertFinanceRow(collection, toSave, user.id));
   }
@@ -832,6 +894,139 @@ async function handleBulkImportFinance(req, res, collection) {
     risk: imported.length > 50 ? 'medium' : 'low',
   });
   json(res, 200, { records: imported });
+}
+
+async function performFinalizeAmendment(req, res) {
+  const user = await requireFinanceWriter(req, 'bookings');
+  await requireFinanceWriter(req, 'amendments');
+  const body = await readBody(req);
+  const submitted = body?.amendment;
+
+  if (!submitted || typeof submitted !== 'object' || Array.isArray(submitted)) {
+    const error = new Error('Amendment is required.');
+    error.status = 400;
+    throw error;
+  }
+
+  const bookingRef = String(submitted.booking_ref || '').trim();
+  if (!bookingRef) {
+    const error = new Error('Booking reference is required.');
+    error.status = 400;
+    throw error;
+  }
+  if (!['PNR_WIDE', 'SELECTED_PASSENGERS'].includes(submitted.application_scope)) {
+    const error = new Error('Application scope must be PNR-wide or selected passengers.');
+    error.status = 400;
+    throw error;
+  }
+
+  const draft = {
+    ...submitted,
+    id: submitted.id || crypto.randomUUID(),
+    booking_ref: bookingRef,
+  };
+  const repository = {
+    loadBookingGroup: (targetRef) => loadBookingGroupByRef(targetRef, supabaseRequest),
+    loadAmendment: async (id) => {
+      const row = await getFinanceRow('amendments', id);
+      return row ? { ...flattenFinanceRow(row), _version: row.updated_at } : null;
+    },
+    claimFinalization: async (placeholder, version) => {
+      const data = { ...placeholder };
+      const { id } = data;
+      delete data.id;
+      delete data._version;
+      if (!version) {
+        try {
+          const rows = await supabaseRequest('/rest/v1/amendments', {
+            method: 'POST',
+            prefer: 'return=representation',
+            body: { id, data, created_by: user.id },
+          });
+          return rows?.length
+            ? { ...flattenFinanceRow(rows[0]), _version: rows[0].updated_at }
+            : null;
+        } catch (error) {
+          if (isUniqueConstraintConflict(error)) return null;
+          throw error;
+        }
+      }
+      const rows = await supabaseRequest(
+        `/rest/v1/amendments?id=eq.${encodeURIComponent(id)}&updated_at=eq.${encodeURIComponent(version)}`,
+        {
+          method: 'PATCH',
+          prefer: 'return=representation',
+          body: { data },
+        },
+      );
+      return rows?.length
+        ? { ...flattenFinanceRow(rows[0]), _version: rows[0].updated_at }
+        : null;
+    },
+    saveBooking: async (booking, version) => {
+      if (!version) return null;
+      const data = { ...booking };
+      const { id } = data;
+      delete data.id;
+      delete data._version;
+      const rows = await supabaseRequest(
+        `/rest/v1/bookings?id=eq.${encodeURIComponent(id)}&updated_at=eq.${encodeURIComponent(version)}`,
+        {
+          method: 'PATCH',
+          prefer: 'return=representation',
+          body: { data },
+        },
+      );
+      return rows?.length
+        ? { ...flattenFinanceRow(rows[0]), _version: rows[0].updated_at }
+        : null;
+    },
+    completeFinalization: async (amendment, version, fingerprint) => {
+      if (!version) return null;
+      const data = { ...amendment };
+      const { id } = data;
+      delete data.id;
+      delete data._version;
+      const rows = await supabaseRequest(
+        `/rest/v1/amendments?id=eq.${encodeURIComponent(id)}&updated_at=eq.${encodeURIComponent(version)}&data->>status=eq.FINALIZING&data->>finalization_fingerprint=eq.${encodeURIComponent(fingerprint)}`,
+        {
+          method: 'PATCH',
+          prefer: 'return=representation',
+          body: { data },
+        },
+      );
+      return rows?.length ? flattenFinanceRow(rows[0]) : null;
+    },
+  };
+
+  const result = await persistDateChangeFinalization({
+    draft,
+    actor: user,
+    repository,
+    finalizedAt: new Date().toISOString(),
+  });
+
+  await audit(req, user, 'finalize_date_change_amendment', null, {
+    recordType: 'amendment',
+    recordId: result.amendment.id,
+    oldValue: { status: submitted.status || null },
+    newValue: {
+      status: result.amendment.status,
+      booking_ref: result.amendment.booking_ref,
+      finalized_at: result.amendment.finalized_at,
+    },
+    risk: 'medium',
+  });
+
+  json(res, 200, result);
+}
+
+async function handleFinalizeAmendment(req, res) {
+  try {
+    return await performFinalizeAmendment(req, res);
+  } catch (error) {
+    throw finalizationHttpError(error);
+  }
 }
 
 async function handleCreatePaymentProofUpload(req, res, paymentId) {
@@ -1018,6 +1213,7 @@ async function route(req, res) {
   if (req.method === 'POST' && path === '/api/bookings/parse-pnr') return handleParsePnr(req, res);
   if (req.method === 'POST' && path === '/api/bookings/parse-text') return handleParseBookingText(req, res);
   if (req.method === 'GET' && path === '/api/finance/data') return handleFinanceData(req, res);
+  if (req.method === 'GET' && path === '/api/directory/users') return handleUserDirectory(req, res);
 
   const proofUploadMatch = path.match(/^\/api\/payments\/([^/]+)\/proof-upload$/);
   if (proofUploadMatch && req.method === 'POST') return handleCreatePaymentProofUpload(req, res, decodeURIComponent(proofUploadMatch[1]));
@@ -1032,6 +1228,8 @@ async function route(req, res) {
 
   const bulkFinanceMatch = path.match(/^\/api\/finance\/([a-z]+)\/bulk$/);
   if (bulkFinanceMatch && req.method === 'POST') return handleBulkImportFinance(req, res, bulkFinanceMatch[1]);
+
+  if (req.method === 'POST' && path === '/api/amendments/finalize') return handleFinalizeAmendment(req, res);
 
   const financeMatch = path.match(/^\/api\/finance\/([a-z]+)\/([^/]+)$/);
   if (financeMatch && req.method === 'PUT') return handleSaveFinanceRecord(req, res, financeMatch[1], financeMatch[2]);

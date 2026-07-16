@@ -65,13 +65,85 @@ function isSupplierPayment(payment) {
   return payment?.payment_direction === 'SUPPLIER_OUT' || payment?.party_type === 'SUPPLIER';
 }
 
+function addBookingToIndex(map, key, booking) {
+  if (!key) return;
+  if (!map.has(key)) map.set(key, []);
+  const rows = map.get(key);
+  if (!rows.some((row) => row === booking || (booking.id && String(row.id) === String(booking.id)))) {
+    rows.push(booking);
+  }
+}
+
+function financeBookingIndexes(bookings) {
+  const byRef = new Map();
+  const byId = new Map();
+  const byPnr = new Map();
+  const byTicket = new Map();
+
+  bookings.forEach((booking) => {
+    addBookingToIndex(byRef, token(booking.booking_ref || booking.invoice_no), booking);
+    if (booking.id !== undefined && booking.id !== null) byId.set(token(booking.id), booking);
+    tokensFrom(booking.pnr, booking.pnr_history).forEach((pnr) => addBookingToIndex(byPnr, pnr, booking));
+    if (booking.ticket_no) byTicket.set(token(booking.ticket_no), booking);
+  });
+
+  return { byRef, byId, byPnr, byTicket };
+}
+
+function exactBookingForFinanceRecord(record, rows) {
+  const bookingId = token(record.booking_id);
+  if (bookingId) {
+    const byId = rows.find((booking) => token(booking.id) === bookingId);
+    if (byId) return byId;
+  }
+
+  const ticket = token(record.ticket_no || record.ticket_id);
+  if (ticket) {
+    const byTicket = rows.find((booking) => token(booking.ticket_no) === ticket);
+    if (byTicket) return byTicket;
+  }
+
+  const pnr = token(record.pnr);
+  if (!pnr) return null;
+  const currentMatches = rows.filter((booking) => token(booking.pnr) === pnr);
+  if (currentMatches.length === 1) return currentMatches[0];
+  if (currentMatches.length > 1) return null;
+  const historicalMatches = rows.filter((booking) => tokensFrom(booking.pnr_history).includes(pnr));
+  return historicalMatches.length === 1 ? historicalMatches[0] : null;
+}
+
+function bookingsForFinanceRecord(record, indexes) {
+  const stableRef = token(record.booking_ref);
+  if (stableRef) {
+    const stableRows = indexes.byRef.get(stableRef);
+    if (!stableRows?.length) return [];
+    const exact = exactBookingForFinanceRecord(record, stableRows);
+    if (exact) return [exact];
+    return stableRows.length === 1 ? stableRows : [];
+  }
+
+  const byId = indexes.byId.get(token(record.booking_id));
+  if (byId) return [byId];
+
+  const byTicket = indexes.byTicket.get(token(record.ticket_no || record.ticket_id));
+  if (byTicket) return [byTicket];
+
+  const pnrRows = indexes.byPnr.get(token(record.pnr));
+  if (!pnrRows?.length) return [];
+  const exact = exactBookingForFinanceRecord(record, pnrRows);
+  return exact ? [exact] : [];
+}
+
 export function scopedFinanceData(user, { bookings = [], payments = [], refunds = [], amendments = [], cancellations = [], expenses = [], allocations = [] }) {
   if (canSeeAll(user)) return { bookings, payments, refunds, amendments, cancellations, expenses, allocations };
 
   const scopedBookings = filterBookingsForUser(user, bookings);
-  const pnrs = new Set(scopedBookings.map((booking) => token(booking.pnr)).filter(Boolean));
-  const tickets = new Set(scopedBookings.map((booking) => token(booking.ticket_no)).filter(Boolean));
+  const indexes = financeBookingIndexes(bookings);
+  const visibleBookings = new Set(scopedBookings);
   const aliases = userAliases(user);
+
+  const followsBooking = (record) => bookingsForFinanceRecord(record, indexes)
+    .some((booking) => visibleBookings.has(booking));
 
   const scopedPayments = user?.role === 'SUPPLIER'
     ? payments.filter((payment) => (
@@ -82,7 +154,7 @@ export function scopedFinanceData(user, { bookings = [], payments = [], refunds 
       )
     ))
     : payments.filter((payment) => !isSupplierPayment(payment) && (
-      pnrs.has(token(payment.pnr))
+      followsBooking(payment)
       // Agents always see payments they submitted themselves, plus payments
       // recorded against them as the party.
       || aliases.has(token(payment.recorded_by_user_id))
@@ -93,27 +165,18 @@ export function scopedFinanceData(user, { bookings = [], payments = [], refunds 
   // that touch one of their scoped payments, or one of their scoped
   // bookings/PNRs, or that name them as the counterparty.
   const paymentIds = new Set(scopedPayments.map((payment) => token(payment.id)));
-  const bookingIds = new Set(scopedBookings.map((booking) => token(booking.id)));
   const scopedAllocations = allocations.filter((allocation) => (
     paymentIds.has(token(allocation.source_id))
-    || bookingIds.has(token(allocation.booking_id))
-    || pnrs.has(token(allocation.pnr))
-    || tickets.has(token(allocation.ticket_no))
+    || followsBooking(allocation)
     || aliases.has(token(allocation.counterparty_name))
   ));
 
   // Servicing cases follow their booking: visible when the user can see the
   // booking they amend/cancel (by id, PNR, or ticket).
-  const followsBooking = (record) => (
-    bookingIds.has(token(record.booking_id))
-    || pnrs.has(token(record.pnr))
-    || tickets.has(token(record.ticket_no))
-  );
-
   return {
     bookings: scopedBookings,
     payments: scopedPayments,
-    refunds: refunds.filter((refund) => pnrs.has(token(refund.pnr)) || tickets.has(token(refund.ticket_no))),
+    refunds: refunds.filter(followsBooking),
     amendments: amendments.filter(followsBooking),
     cancellations: cancellations.filter(followsBooking),
     expenses: [],

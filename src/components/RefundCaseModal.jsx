@@ -17,6 +17,11 @@ import {
   ticketOpenItemId,
 } from '../helpers/ledger';
 import AffectedItemsPicker, { bookingGroupOptions, selectedItems, readAttachment } from './AffectedItemsPicker';
+import {
+  hasInboundSegments,
+  segmentIdsForTravelDirection,
+} from '../helpers/servicingTravelDirection';
+import ServicingTravelDirectionPicker from './ServicingTravelDirectionPicker';
 
 const LINE_FEE_FIELDS = [
   ['airline_cancellation_fee', 'Airline Fee'],
@@ -67,14 +72,20 @@ export default function RefundCaseModal({ user, booking, group, model, refunds, 
     other_deduction_reason: '',
     supporting_document: null,
   });
-  const [affected, setAffected] = useState({ passengers: [], tickets: [], segments: [] });
+  const [travelDirection, setTravelDirection] = useState(() => (hasInboundSegments(options) ? 'BOTH' : 'OUTBOUND'));
+  const [affected, setAffected] = useState(() => ({
+    passengers: [],
+    tickets: [],
+    segments: segmentIdsForTravelDirection(options, 'BOTH'),
+  }));
   const [lines, setLines] = useState({}); // ticket_no -> { gross_refund_amount, ...fees }
   const [error, setError] = useState('');
 
   const updateHeader = (key, value) => { setHeader((c) => ({ ...c, [key]: value })); setError(''); };
+  const selectedSegmentIds = segmentIdsForTravelDirection(options, travelDirection);
 
   const toggleAffected = (next) => {
-    setAffected(next);
+    setAffected({ ...next, segments: selectedSegmentIds });
     setLines((current) => {
       const kept = {};
       next.tickets.forEach((ticketNo) => {
@@ -94,6 +105,15 @@ export default function RefundCaseModal({ user, booking, group, model, refunds, 
 
   const updateLine = (ticketNo, key, value) => {
     setLines((current) => ({ ...current, [ticketNo]: { ...current[ticketNo], [key]: value } }));
+    setError('');
+  };
+
+  const updateTravelDirection = (direction) => {
+    setTravelDirection(direction);
+    setAffected((current) => ({
+      ...current,
+      segments: segmentIdsForTravelDirection(options, direction),
+    }));
     setError('');
   };
 
@@ -132,8 +152,8 @@ export default function RefundCaseModal({ user, booking, group, model, refunds, 
   };
 
   const validate = () => {
-    if (!affected.passengers.length) return 'Select at least one affected passenger.';
-    if (!selectedTickets.length) return 'Select at least one affected ticket.';
+    if (!affected.passengers.length) return 'Select at least one passenger.';
+    if (!selectedTickets.length) return 'Select at least one ticket.';
     if (!header.remarks.trim()) return 'Remarks are required.';
     for (const { id } of selectedTickets) {
       const line = lines[id] || {};
@@ -179,7 +199,8 @@ export default function RefundCaseModal({ user, booking, group, model, refunds, 
       supporting_document: header.supporting_document,
       affected_passengers: selectedItems(options.passengers, affected.passengers),
       affected_tickets: selectedTickets.map(({ id, label }) => ({ id, label })),
-      affected_segments: selectedItems(options.segments, affected.segments),
+      travel_direction: travelDirection,
+      affected_segments: selectedItems(options.segments, selectedSegmentIds),
       // Per-ticket calculation lines (spec §29): the case holds totals, the
       // lines hold ticket-wise numbers so partial-booking refunds stay exact.
       refund_lines: selectedTickets.map(({ id, label, booking: row }) => {
@@ -270,11 +291,18 @@ export default function RefundCaseModal({ user, booking, group, model, refunds, 
           value={affected}
           onChange={toggleAffected}
           required={{ passengers: true, tickets: true, segments: false }}
+          show={{ segments: false }}
+        />
+
+        <ServicingTravelDirectionPicker
+          value={travelDirection}
+          onChange={updateTravelDirection}
+          options={options}
         />
 
         <h4 className="servicing-section-title">Refund calculation — per ticket (input-driven)</h4>
         {selectedTickets.length === 0 ? (
-          <p className="reconciliation-note">Select at least one affected ticket to enter refund amounts.</p>
+          <p className="reconciliation-note">Select at least one ticket to enter refund amounts.</p>
         ) : (
           <div className="table-scroll">
             <table className="data-table dense-table refund-lines-table">

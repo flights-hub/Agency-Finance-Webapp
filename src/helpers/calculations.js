@@ -9,6 +9,7 @@ import {
   normalizeVerificationStatus,
   postedPayments,
 } from './paymentVerification';
+import { bookingPnrAliases, stableBookingRef } from './bookingIdentity';
 
 export const PAYMENT_MODES = [
   'CASH',
@@ -72,6 +73,97 @@ export function normalizePnr(value = '') {
 
 function token(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function addBookingToIndex(map, key, booking) {
+  if (!key) return;
+  if (!map.has(key)) map.set(key, []);
+  const rows = map.get(key);
+  const duplicate = rows.some((row) => (
+    row === booking
+    || (booking.id !== undefined && booking.id !== null && String(row.id) === String(booking.id))
+  ));
+  if (!duplicate) rows.push(booking);
+}
+
+function customerBookingKey(booking = {}) {
+  const bookingRef = stableBookingRef(booking);
+  if (bookingRef) return `ref:${bookingRef}`;
+  const pnr = bookingPnrAliases(booking)[0];
+  return pnr ? `pnr:${pnr}` : `booking:${booking.id || ''}`;
+}
+
+function customerBookingIndexes(bookings = []) {
+  const byRef = new Map();
+  const byId = new Map();
+  const byPnr = new Map();
+  const byTicket = new Map();
+  const byGroup = new Map();
+
+  bookings.forEach((booking) => {
+    addBookingToIndex(byRef, String(stableBookingRef(booking)), booking);
+    if (booking.id !== undefined && booking.id !== null) byId.set(String(booking.id), booking);
+    bookingPnrAliases(booking).forEach((pnr) => addBookingToIndex(byPnr, pnr, booking));
+    if (booking.ticket_no) byTicket.set(token(booking.ticket_no), booking);
+    addBookingToIndex(byGroup, customerBookingKey(booking), booking);
+  });
+
+  return { byRef, byId, byPnr, byTicket, byGroup };
+}
+
+function exactBookingForFinanceRecord(record = {}, rows = []) {
+  if (record.booking_id !== undefined && record.booking_id !== null) {
+    const byId = rows.find((booking) => String(booking.id) === String(record.booking_id));
+    if (byId) return byId;
+  }
+
+  const ticket = record.ticket_no || record.ticket_id;
+  if (ticket) {
+    const byTicket = rows.find((booking) => token(booking.ticket_no) === token(ticket));
+    if (byTicket) return byTicket;
+  }
+
+  const pnr = normalizePnr(record.pnr);
+  if (!pnr) return null;
+  const currentMatches = rows.filter((booking) => normalizePnr(booking.pnr) === pnr);
+  if (currentMatches.length === 1) return currentMatches[0];
+  if (currentMatches.length > 1) return null;
+  const historicalMatches = rows.filter((booking) => (
+    booking.pnr_history || []
+  ).some((alias) => normalizePnr(alias) === pnr));
+  return historicalMatches.length === 1 ? historicalMatches[0] : null;
+}
+
+function bookingForFinanceRecord(record = {}, indexes) {
+  const stableRef = String(record.booking_ref || '');
+  if (stableRef) {
+    const stableRows = indexes.byRef.get(stableRef);
+    if (!stableRows?.length) return null;
+    const exact = exactBookingForFinanceRecord(record, stableRows);
+    if (exact) return exact;
+    return stableRows.length === 1 ? stableRows[0] : null;
+  }
+
+  if (record.booking_id !== undefined && record.booking_id !== null) {
+    const byId = indexes.byId.get(String(record.booking_id));
+    if (byId) return byId;
+  }
+
+  const ticket = record.ticket_no || record.ticket_id;
+  const byTicket = ticket ? indexes.byTicket.get(token(ticket)) : null;
+  if (byTicket) return byTicket;
+
+  const byPnr = indexes.byPnr.get(normalizePnr(record.pnr));
+  return byPnr?.length ? exactBookingForFinanceRecord(record, byPnr) : null;
+}
+
+function financeRecordKey(record = {}, indexes) {
+  const booking = bookingForFinanceRecord(record, indexes);
+  if (booking) return customerBookingKey(booking);
+  if (record.booking_ref) return `ref:${record.booking_ref}`;
+  const pnr = normalizePnr(record.pnr);
+  if (pnr) return `pnr:${pnr}`;
+  return `record:${record.id || record.payment_reference || ''}`;
 }
 
 function tokensFrom(...values) {
@@ -179,31 +271,33 @@ export function getInvoiceNo(index) {
 }
 
 export function getBookingLedger(bookings = [], payments = []) {
-  const pnrCounts = new Map();
-  const pnrTotals = new Map();
-  const pnrPayments = new Map();
+  const groupCounts = new Map();
+  const groupTotals = new Map();
+  const groupPayments = new Map();
+  const indexes = customerBookingIndexes(bookings);
   const today = new Date().toISOString().split('T')[0];
   const agentPayments = payments.filter(isCustomerLedgerPayment);
   // Only verified + eligible payments reduce outstanding balances.
   const countablePayments = postedPayments(agentPayments);
 
   bookings.forEach((booking) => {
-    const pnr = normalizePnr(booking.pnr);
-    pnrTotals.set(pnr, (pnrTotals.get(pnr) || 0) + numeric(booking.fare_sold));
+    const key = customerBookingKey(booking);
+    groupTotals.set(key, (groupTotals.get(key) || 0) + numeric(booking.fare_sold));
   });
 
   countablePayments.forEach((payment) => {
-    const pnr = normalizePnr(payment.pnr);
-    pnrPayments.set(pnr, (pnrPayments.get(pnr) || 0) + numeric(payment.amount_paid));
+    const key = financeRecordKey(payment, indexes);
+    groupPayments.set(key, (groupPayments.get(key) || 0) + numeric(payment.amount_paid));
   });
 
   return bookings.map((booking, index) => {
     const pnr = normalizePnr(booking.pnr);
-    const pnr_n = (pnrCounts.get(pnr) || 0) + 1;
-    pnrCounts.set(pnr, pnr_n);
+    const groupKey = customerBookingKey(booking);
+    const pnr_n = (groupCounts.get(groupKey) || 0) + 1;
+    groupCounts.set(groupKey, pnr_n);
 
-    const totalFare = pnrTotals.get(pnr) || numeric(booking.fare_sold);
-    const totalPaid = pnrPayments.get(pnr) || numeric(booking.total_paid);
+    const totalFare = groupTotals.get(groupKey) || numeric(booking.fare_sold);
+    const totalPaid = groupPayments.get(groupKey) || numeric(booking.total_paid);
     const balanceDue = Math.max(0, totalFare - totalPaid);
     const daysToDeparture = booking.outbound_date ? daysBetween(today, booking.outbound_date) : '';
     const alert = booking.outbound_date ? getAlertLevel(daysToDeparture, balanceDue) : 'SETTLED';
@@ -222,7 +316,7 @@ export function getBookingLedger(bookings = [], payments = []) {
       total_paid: pnr_n === 1 ? totalPaid : null,
       balance_due: pnr_n === 1 ? balanceDue : null,
       payment_status: pnr_n === 1 ? getPaymentStatus(totalFare, totalPaid) : '',
-      num_instalments: pnr_n === 1 ? countablePayments.filter((payment) => normalizePnr(payment.pnr) === pnr).length : null,
+      num_instalments: pnr_n === 1 ? countablePayments.filter((payment) => financeRecordKey(payment, indexes) === groupKey).length : null,
       ticket_status: booking.ticket_status || (booking.ticket_no ? 'TICKETED' : 'PENDING'),
       days_to_departure: daysToDeparture,
       alert: pnr_n === 1 ? alert : '',
@@ -233,37 +327,40 @@ export function getBookingLedger(bookings = [], payments = []) {
 }
 
 export function getPaymentLedger(bookings = [], payments = []) {
-  const fareByPnr = new Map();
-  const firstPassengerByPnr = new Map();
-  const runningByPnr = new Map();
+  const fareByGroup = new Map();
+  const runningByGroup = new Map();
+  const instalmentsByGroup = new Map();
+  const indexes = customerBookingIndexes(bookings);
   const agentPayments = payments.filter(isCustomerLedgerPayment);
 
   bookings.forEach((booking) => {
-    const pnr = normalizePnr(booking.pnr);
-    fareByPnr.set(pnr, (fareByPnr.get(pnr) || 0) + numeric(booking.fare_sold));
-    if (!firstPassengerByPnr.has(pnr)) firstPassengerByPnr.set(pnr, booking.passenger_name);
+    const key = customerBookingKey(booking);
+    fareByGroup.set(key, (fareByGroup.get(key) || 0) + numeric(booking.fare_sold));
   });
 
   return [...agentPayments]
     .sort((a, b) => String(a.payment_date || '').localeCompare(String(b.payment_date || '')))
     .map((payment, index) => {
       const pnr = normalizePnr(payment.pnr);
+      const relatedBooking = bookingForFinanceRecord(payment, indexes);
+      const groupKey = financeRecordKey(payment, indexes);
       // Pending/ineligible payments stay visible in the ledger but contribute
       // nothing to the running totals until they are verified and posted.
       const posted = isPostedPayment(payment);
-      const previous = runningByPnr.get(pnr) || 0;
+      const previous = runningByGroup.get(groupKey) || 0;
       const cumulativePaid = previous + (posted ? numeric(payment.amount_paid) : 0);
-      runningByPnr.set(pnr, cumulativePaid);
-      const totalFare = fareByPnr.get(pnr) || numeric(payment.total_fare);
+      runningByGroup.set(groupKey, cumulativePaid);
+      const totalFare = fareByGroup.get(groupKey) || numeric(payment.total_fare);
       const remainingBalance = Math.max(0, totalFare - cumulativePaid);
-      const instalmentNo = [...agentPayments.slice(0, index + 1)].filter((item) => normalizePnr(item.pnr) === pnr).length;
+      const instalmentNo = (instalmentsByGroup.get(groupKey) || 0) + 1;
+      instalmentsByGroup.set(groupKey, instalmentNo);
 
       return {
         ...payment,
         payment_direction: payment.payment_direction || 'AGENT_IN',
         sl: index + 1,
         pnr,
-        passenger_name: payment.passenger_name || firstPassengerByPnr.get(pnr) || '',
+        passenger_name: payment.passenger_name || relatedBooking?.passenger_name || '',
         amount_paid: numeric(payment.amount_paid),
         instalment_no: payment.instalment_no || instalmentNo,
         instalment_type: payment.instalment_type || getInstalmentType(instalmentNo, cumulativePaid, totalFare),
@@ -281,30 +378,34 @@ export function getPaymentLedger(bookings = [], payments = []) {
 export function createPaymentEntry(input, bookings = [], payments = []) {
   const { payment_date, pnr, amount_paid, payment_mode, receipt_ref, received_by, remarks, ...rest } = input;
   const normalizedPnr = normalizePnr(pnr);
-  const relatedBookings = bookings.filter((booking) => normalizePnr(booking.pnr) === normalizedPnr);
-  const billedBooking = relatedBookings[0];
-  const billedPartyType = ['AGENT', 'CUSTOMER'].includes(String(billedBooking?.bill_to_type || '').toUpperCase())
-    ? String(billedBooking.bill_to_type).toUpperCase()
+  const indexes = customerBookingIndexes(bookings);
+  const relatedBooking = bookingForFinanceRecord({ ...rest, pnr: normalizedPnr }, indexes);
+  const groupKey = relatedBooking ? customerBookingKey(relatedBooking) : financeRecordKey({ ...rest, pnr: normalizedPnr }, indexes);
+  const relatedBookings = indexes.byGroup.get(groupKey) || (relatedBooking ? [relatedBooking] : []);
+  const billedPartyType = ['AGENT', 'CUSTOMER'].includes(String(relatedBooking?.bill_to_type || '').toUpperCase())
+    ? String(relatedBooking.bill_to_type).toUpperCase()
     : '';
-  const billedPartyName = String(billedBooking?.bill_to_name || '').trim();
+  const billedPartyName = String(relatedBooking?.bill_to_name || '').trim();
   const totalFare = relatedBookings.reduce((sum, booking) => sum + numeric(booking.fare_sold), 0);
   const agentPayments = payments.filter(isCustomerLedgerPayment);
   // Only posted payments count toward the running paid position.
   const existingPaid = postedPayments(agentPayments)
-    .filter((payment) => normalizePnr(payment.pnr) === normalizedPnr)
+    .filter((payment) => financeRecordKey(payment, indexes) === groupKey)
     .reduce((sum, payment) => sum + numeric(payment.amount_paid), 0);
   const amount = numeric(amount_paid);
-  const instalmentNo = agentPayments.filter((payment) => normalizePnr(payment.pnr) === normalizedPnr).length + 1;
+  const instalmentNo = agentPayments.filter((payment) => financeRecordKey(payment, indexes) === groupKey).length + 1;
   const cumulativePaid = existingPaid + amount;
 
   const entry = {
     ...rest,
     payment_date,
     pnr: normalizedPnr,
+    booking_ref: (relatedBooking ? stableBookingRef(relatedBooking) : '') || rest.booking_ref || '',
+    booking_id: relatedBooking?.id || rest.booking_id || '',
     payment_direction: rest.payment_direction || 'RECEIVED',
     party_type: billedPartyType || rest.party_type || 'CUSTOMER',
-    party_name: billedPartyName || rest.party_name || billedBooking?.passenger_name || '',
-    passenger_name: rest.passenger_name || billedBooking?.passenger_name || '',
+    party_name: billedPartyName || rest.party_name || relatedBooking?.passenger_name || '',
+    passenger_name: rest.passenger_name || relatedBooking?.passenger_name || '',
     amount_paid: amount,
     transaction_amount: amount,
     transaction_currency: rest.transaction_currency || 'EUR',

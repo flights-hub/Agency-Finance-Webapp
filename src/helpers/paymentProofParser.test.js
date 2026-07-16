@@ -163,3 +163,34 @@ test('mergePaymentProofDraft replaces the default payment date with extracted pr
   assert.equal(result.amount_paid, '400');
   assert.equal(result.transaction_currency, 'INR');
 });
+
+test('mergePaymentProofDraft preserves fields edited while OCR is running', () => {
+  const form = {
+    party_type: 'SUPPLIER',
+    party_name: 'Current Supplier',
+    supplier_id: 'supplier-1',
+    payment_date: '2026-07-08',
+    payment_method: 'BANK_TRANSFER',
+    transaction_currency: 'EUR',
+    amount_paid: '',
+  };
+  const extracted = {
+    payment_date: '2026-07-07',
+    payment_method: 'UPI',
+    transaction_currency: 'INR',
+    amount_paid: 5000,
+  };
+
+  const merged = mergePaymentProofDraft(form, extracted, {
+    protectedFields: ['payment_method'],
+    overwriteFields: ['payment_date', 'payment_method', 'transaction_currency'],
+  });
+
+  assert.equal(merged.party_type, 'SUPPLIER');
+  assert.equal(merged.party_name, 'Current Supplier');
+  assert.equal(merged.supplier_id, 'supplier-1');
+  assert.equal(merged.payment_date, '2026-07-07');
+  assert.equal(merged.payment_method, 'BANK_TRANSFER');
+  assert.equal(merged.transaction_currency, 'INR');
+  assert.equal(merged.amount_paid, '5000');
+});

@@ -1,7 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../AuthContext';
-import { getBookings, getPayments, saveBooking, getRefunds, getAmendments, getCancellations, getAllocations } from '../helpers/storage';
+import { getBookings, getPayments, saveBooking, getRefunds, getAmendments, getCancellations, getAllocations, loadFinanceData } from '../helpers/storage';
 import { formatCurrency } from '../helpers/format';
 import { numeric } from '../helpers/calculations';
 import {
@@ -14,6 +14,8 @@ import {
   refundCaseStatus,
 } from '../helpers/ledger';
 import { isPostedPayment } from '../helpers/paymentVerification';
+import { groupPnrAliases, recordMatchesBookingGroup } from '../helpers/bookingIdentity';
+import { amendmentTimelineSummary, isDateChangeType } from '../helpers/dateChangeAmendments';
 import PaymentRecordModal from '../components/PaymentRecordModal';
 import AmendmentCaseModal from '../components/AmendmentCaseModal';
 import CancellationCaseModal from '../components/CancellationCaseModal';
@@ -93,10 +95,263 @@ const maskDocument = (value) => {
 
 const createTicketNumber = () => `TKT-${Date.now()}`;
 
+const hasDateChangeAudit = (amendment = {}) => Boolean(
+  isDateChangeType(amendment.amendment_type)
+  && amendment.original_itinerary
+  && amendment.replacement_itinerary
+  && Array.isArray(amendment.passenger_reissues),
+);
+
+const canonicalItineraryValue = (value) => {
+  if (Array.isArray(value)) return value.map(canonicalItineraryValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.keys(value)
+    .filter((key) => key !== 'id')
+    .sort()
+    .reduce((result, key) => ({
+      ...result,
+      [key]: canonicalItineraryValue(value[key]),
+    }), {});
+};
+
+const itinerarySignature = (booking = {}) => JSON.stringify({
+  flight_segments: canonicalItineraryValue(booking.flight_segments || []),
+  sector: booking.flight_segments?.length ? '' : booking.sector || '',
+});
+
+const groupCurrentItineraries = (bookings = []) => {
+  const grouped = new Map();
+  bookings.forEach((booking) => {
+    const signature = itinerarySignature(booking);
+    if (!grouped.has(signature)) grouped.set(signature, []);
+    grouped.get(signature).push(booking);
+  });
+  return [...grouped.entries()].map(([signature, rows]) => ({ signature, rows }));
+};
+
+// Flight duration from parsed departure/arrival date+time, when both are known.
+const getFlightDuration = (connection = {}) => {
+  if (!connection.departure_date || !connection.departure_time || !connection.arrival_date || !connection.arrival_time) return '';
+  const departure = new Date(`${connection.departure_date}T${connection.departure_time}:00`);
+  const arrival = new Date(`${connection.arrival_date}T${connection.arrival_time}:00`);
+  const minutes = Math.round((arrival - departure) / 60000);
+  if (!Number.isFinite(minutes) || minutes <= 0) return '';
+  return `${Math.floor(minutes / 60)}Hr ${minutes % 60}Min`;
+};
+
+
+// Passenger-wise fare breakdown: shows what was charged to the client (fare_sold),
+// the net supplier cost (fare_issued), and the margin per passenger.
+// This is the key reference for amendments and partial refund calculations.
+const PAX_TYPE_LABEL = { ADT: 'Adult', CHD: 'Child', INF: 'Infant' };
+
+function PassengerFareBreakdown({ group, formatCurrency, numeric }) {
+  const [open, setOpen] = useState(true);
+
+  if (!group || group.length === 0) return null;
+
+  const totalSold = group.reduce((s, p) => s + numeric(p.fare_sold || 0), 0);
+  const totalIssued = group.reduce((s, p) => s + numeric(p.fare_issued || 0), 0);
+  const totalMargin = totalSold - totalIssued;
+
+  // Group passengers by pax_type for a tidy display
+  const byType = group.reduce((acc, pax) => {
+    const type = pax.pax_type || 'ADT';
+    if (!acc[type]) acc[type] = [];
+    acc[type].push(pax);
+    return acc;
+  }, {});
+
+  const colStyle = { padding: '5px 6px', fontSize: '11.5px', textAlign: 'right', whiteSpace: 'nowrap' };
+  const colStyleLeft = { ...colStyle, textAlign: 'left', flex: 1 };
+
+  return (
+    <div style={{ marginBottom: '8px', border: '0.5px solid var(--color-border-tertiary)', borderRadius: '6px', overflow: 'hidden' }}>
+      {/* Header toggle */}
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '6px 8px', background: 'var(--color-bg-secondary)', border: 'none',
+          cursor: 'pointer', fontSize: '11.5px', fontWeight: '500', color: 'var(--color-text-primary)',
+          borderBottom: open ? '0.5px solid var(--color-border-tertiary)' : 'none',
+        }}
+        aria-expanded={open}
+        id="pax-fare-breakdown-toggle"
+      >
+        <span>🧾 Passenger-wise fare charged to client</span>
+        <span style={{ color: 'var(--color-text-secondary)', fontSize: '10px' }}>{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div>
+          {/* Column headings */}
+          <div style={{ display: 'flex', alignItems: 'center', padding: '4px 8px', background: 'var(--color-bg-secondary)', borderBottom: '0.5px solid var(--color-border-tertiary)' }}>
+            <span style={{ ...colStyleLeft, fontSize: '10.5px', color: 'var(--color-text-secondary)', fontWeight: '500', padding: '2px 6px' }}>Passenger</span>
+            <span style={{ ...colStyle, fontSize: '10.5px', color: 'var(--color-text-secondary)', fontWeight: '500', minWidth: '80px' }}>Fare sold</span>
+            <span style={{ ...colStyle, fontSize: '10.5px', color: 'var(--color-text-secondary)', fontWeight: '500', minWidth: '80px' }}>Net cost</span>
+            <span style={{ ...colStyle, fontSize: '10.5px', color: 'var(--color-text-secondary)', fontWeight: '500', minWidth: '64px' }}>Margin</span>
+          </div>
+
+          {/* Rows grouped by pax type */}
+          {['ADT', 'CHD', 'INF'].filter(type => byType[type]).map(type => (
+            <div key={type}>
+              {byType[type].length > 1 || Object.keys(byType).length > 1 ? (
+                <div style={{ padding: '3px 8px', fontSize: '10px', fontWeight: '600', color: 'var(--color-text-secondary)', background: 'var(--color-bg-tertiary, var(--color-bg-secondary))', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                  {PAX_TYPE_LABEL[type] || type}
+                </div>
+              ) : null}
+              {byType[type].map((pax, idx) => {
+                const sold = numeric(pax.fare_sold || 0);
+                const issued = numeric(pax.fare_issued || 0);
+                const margin = sold - issued;
+                return (
+                  <div
+                    key={pax.id || idx}
+                    style={{
+                      display: 'flex', alignItems: 'center', padding: '4px 8px',
+                      borderBottom: '0.5px solid var(--color-border-tertiary)',
+                    }}
+                  >
+                    <div style={{ ...colStyleLeft, padding: '2px 6px' }}>
+                      <span style={{ fontWeight: '500' }}>{pax.passenger_name || `Pax ${idx + 1}`}</span>
+                      {pax.ticket_no && (
+                        <span style={{ display: 'block', fontSize: '10.5px', color: 'var(--color-text-tertiary)', fontFamily: 'monospace' }}>{pax.ticket_no}</span>
+                      )}
+                    </div>
+                    <span style={{ ...colStyle, minWidth: '80px', fontWeight: '500', color: '#1E3A5F' }}>
+                      {formatCurrency(sold)}
+                    </span>
+                    <span style={{ ...colStyle, minWidth: '80px', color: 'var(--color-text-secondary)' }}>
+                      {issued > 0 ? formatCurrency(issued) : '—'}
+                    </span>
+                    <span style={{ ...colStyle, minWidth: '64px', color: margin > 0 ? '#3B6D11' : margin < 0 ? '#A32D2D' : 'var(--color-text-secondary)' }}>
+                      {issued > 0 ? (margin >= 0 ? '+' : '') + formatCurrency(margin) : '—'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+
+          {/* Subtotal row */}
+          <div style={{ display: 'flex', alignItems: 'center', padding: '5px 8px', background: 'var(--color-bg-secondary)', borderTop: '0.5px solid var(--color-border-secondary)' }}>
+            <span style={{ ...colStyleLeft, padding: '2px 6px', fontWeight: '600', fontSize: '11.5px' }}>
+              Total · {group.length} passenger{group.length !== 1 ? 's' : ''}
+            </span>
+            <span style={{ ...colStyle, minWidth: '80px', fontWeight: '600', fontSize: '11.5px', color: '#1E3A5F' }}>
+              {formatCurrency(totalSold)}
+            </span>
+            <span style={{ ...colStyle, minWidth: '80px', fontWeight: '600', fontSize: '11.5px', color: 'var(--color-text-secondary)' }}>
+              {totalIssued > 0 ? formatCurrency(totalIssued) : '—'}
+            </span>
+            <span style={{ ...colStyle, minWidth: '64px', fontWeight: '600', fontSize: '11.5px', color: totalMargin > 0 ? '#3B6D11' : totalMargin < 0 ? '#A32D2D' : 'var(--color-text-secondary)' }}>
+              {totalIssued > 0 ? (totalMargin >= 0 ? '+' : '') + formatCurrency(totalMargin) : '—'}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BookingItineraryGroup({ rows, showPassengerContext }) {
+  const current = rows[0] || {};
+  const segments = current.flight_segments || [];
+
+  return (
+    <div className="booking-itinerary-group">
+      {showPassengerContext && (
+        <div className="booking-itinerary-passengers" aria-label="Passengers using this itinerary">
+          {rows.map((passenger, index) => (
+            <div key={passenger.id || index} className="booking-itinerary-passenger">
+              <strong>{passenger.passenger_name || 'Passenger'}</strong>
+              <span>PNR {passenger.pnr || '-'} · Ticket {passenger.ticket_no || '-'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {segments.length > 0 ? (
+        segments.map((segment, segmentIndex) => {
+          const legBaggage = (segment.connections || []).find((connection) => (
+            connection.check_in_baggage || connection.cabin_baggage
+          ));
+          return (
+            <div key={segment.id || segmentIndex}>
+              <p className="booking-itinerary-leg-label">
+                {segment.label || `Leg ${segmentIndex + 1}`}
+              </p>
+              {(segment.connections || []).map((connection, connectionIndex) => {
+                const duration = getFlightDuration(connection);
+                return (
+                  <div key={connection.id || connectionIndex} className="booking-itinerary-connection">
+                    <div className="booking-itinerary-flight">
+                      <span className="booking-airline-logo">
+                        {connection.airline && (
+                          <img
+                            src={LOCAL_AIRLINE_LOGOS[connection.airline] || `https://images.kiwi.com/airlines/64/${connection.airline}.png`}
+                            alt={connection.airline}
+                            onError={(event) => {
+                              event.currentTarget.style.display = 'none';
+                              if (event.currentTarget.nextElementSibling) event.currentTarget.nextElementSibling.style.display = 'flex';
+                            }}
+                          />
+                        )}
+                        <span className={connection.airline ? 'booking-airline-fallback is-hidden' : 'booking-airline-fallback'}>
+                          {connection.airline || '--'}
+                        </span>
+                      </span>
+                      <span>{connection.airline || ''}{connection.flight_number || '-'}</span>
+                      <span>·</span>
+                      <span>{connection.departure_date || '-'}</span>
+                      <span>·</span>
+                      <span>{connection.departure_city || connection.origin || '-'} → {connection.arrival_city || connection.destination || '-'}</span>
+                      <span>·</span>
+                      <span>{connection.departure_time || '--:--'} – {connection.arrival_time || '--:--'}</span>
+                      {duration && (<><span>·</span><span>{duration}</span></>)}
+                    </div>
+                    <span className="booking-segment-status">{connection.segment_status || 'HK'}</span>
+                  </div>
+                );
+              })}
+              {legBaggage && (
+                <p className="booking-itinerary-baggage">
+                  🧳 Check-in {legBaggage.check_in_baggage || '-'} · Cabin {legBaggage.cabin_baggage || '-'}
+                </p>
+              )}
+            </div>
+          );
+        })
+      ) : (
+        <div className="booking-itinerary-empty">{current.sector || 'No flight segments defined'}</div>
+      )}
+    </div>
+  );
+}
+
 export default function BookingDetail() {
   const { invoiceNo } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+
+  // Force-refresh finance data on every visit so payments added from the
+  // Payments page (or any other session) are immediately visible here without
+  // requiring a full browser reload. dataVersion bumps when the load settles,
+  // causing the component to re-read the freshest cache below.
+  const [dataVersion, setDataVersion] = useState(0);
+  useEffect(() => {
+    loadFinanceData({ force: true })
+      .then(() => setDataVersion((v) => v + 1))
+      .catch(() => setDataVersion((v) => v + 1)); // still re-render on error
+  }, [invoiceNo]);
+
+  // Read from cache — after the effect settles dataVersion has bumped and this
+  // snapshot is fresh. The variable is referenced only to satisfy the linter;
+  // the real purpose is to make the reads below execute again post-load.
+  void dataVersion;
+
   const bookings = getBookings();
   const payments = getPayments();
   const refunds = getRefunds();
@@ -105,13 +360,12 @@ export default function BookingDetail() {
   const allocations = getAllocations();
   // invoiceNo from the route is the booking reference. A booking groups every
   // passenger that shares this reference (one PNR, or several across suppliers).
-  const normPnr = (value = '') => value.replace(/[^a-z0-9]/gi, '').toUpperCase();
   const groupBookings = bookings.filter(b => (b.booking_ref || b.invoice_no) === invoiceNo);
   const group = groupBookings.length
     ? groupBookings
     : (bookings.find(b => b.invoice_no === invoiceNo) ? [bookings.find(b => b.invoice_no === invoiceNo)] : []);
   const booking = group[0];
-  const groupPnrs = [...new Set(group.map(b => normPnr(b.pnr)).filter(Boolean))];
+  const groupPnrs = groupPnrAliases(group);
 
   // Modal states
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -144,18 +398,21 @@ export default function BookingDetail() {
 
   // Calculate payment ledger and balance across every passenger/PNR in the booking.
   // Only verified, ledger-eligible payments count toward the paid position.
-  const bookingPayments = payments.filter(p => groupPnrs.includes(normPnr(p.pnr)));
+  // Stable booking references and row ids win; PNR aliases preserve legacy
+  // records created before booking_ref was stored. A single filter keeps each
+  // source payment visible exactly once even when old and current PNRs overlap.
+  const bookingPayments = payments.filter((payment) => recordMatchesBookingGroup(payment, group));
   const total = group.reduce((sum, b) => sum + numeric(b.fare_sold || 0), 0);
   const paid = bookingPayments.filter(isPostedPayment).reduce((sum, p) => sum + numeric(p.amount_paid), 0);
   const balance = total - paid;
+  const currentItineraries = groupCurrentItineraries(group);
 
   // Every refund case, amendment case, and cancellation case tied to this
   // booking's PNR(s) or rows - a booking can go through more than one of each,
   // so these are lists, not single records.
-  const groupIds = group.map(b => String(b.id));
-  const bookingRefunds = refunds.filter(r => groupPnrs.includes(normPnr(r.pnr)) || groupIds.includes(String(r.booking_id)));
-  const bookingAmendments = amendments.filter(a => groupPnrs.includes(normPnr(a.pnr)) || groupIds.includes(String(a.booking_id)));
-  const bookingCancellations = cancellations.filter(c => groupPnrs.includes(normPnr(c.pnr)) || groupIds.includes(String(c.booking_id)));
+  const bookingRefunds = refunds.filter((refund) => recordMatchesBookingGroup(refund, group));
+  const bookingAmendments = amendments.filter((amendment) => recordMatchesBookingGroup(amendment, group));
+  const bookingCancellations = cancellations.filter((cancellation) => recordMatchesBookingGroup(cancellation, group));
   // Older bookings stored a single amendment directly on the record before the
   // dedicated amendments collection existed - still surface it in the timeline.
   const legacyAmendment = booking.amendment_request && !bookingAmendments.some(a => a.id === booking.amendment_request.id)
@@ -271,13 +528,23 @@ export default function BookingDetail() {
     [...bookingAmendments, ...(legacyAmendment ? [legacyAmendment] : [])].forEach((a) => {
       const isCase = Boolean(a.amendment_number);
       const total = amendmentTotalImpact(a);
+      const completedDateChange = hasDateChangeAudit(a)
+        && a.status === 'COMPLETED'
+        && Boolean(a.finalized_at);
+      const completedFinancialState = total === 0
+        ? 'No financial charge or credit posted'
+        : `${total > 0 ? 'Charge' : 'Credit'} ${formatCurrency(Math.abs(total))} posted`;
       items.push({
-        date: a.confirmed_at?.split('T')[0] || a.executed_date || a.request_date || a.created_at?.split('T')[0],
+        date: completedDateChange
+          ? a.finalized_at
+          : a.confirmed_at?.split('T')[0] || a.executed_date || a.request_date || a.created_at?.split('T')[0],
         type: 'AMENDMENT',
         label: isCase
           ? `Amendment ${a.amendment_number} ${String(a.status || 'draft').toLowerCase()}`
           : `Amendment ${(a.status || 'requested').toLowerCase()}`,
-        detail: isCase
+        detail: completedDateChange
+          ? [amendmentTimelineSummary(a), completedFinancialState, a.remarks].filter(Boolean).join(' · ')
+          : isCase
           ? [
             a.amendment_type?.replace(/_/g, ' '),
             (a.affected_tickets || []).map((t) => t.id).join(', '),
@@ -288,7 +555,7 @@ export default function BookingDetail() {
             .filter(([, value]) => value)
             .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${value}`)
             .join(' · '),
-        actor: a.created_by || a.requested_by,
+        actor: completedDateChange ? a.finalized_by : a.created_by || a.requested_by,
       });
     });
 
@@ -298,18 +565,6 @@ export default function BookingDetail() {
   };
 
   const timeline = buildTimeline();
-
-
-  // Flight duration from parsed departure/arrival date+time, when both are known.
-  const getFlightDuration = (conn) => {
-    if (!conn.departure_date || !conn.departure_time || !conn.arrival_date || !conn.arrival_time) return '';
-    const departure = new Date(`${conn.departure_date}T${conn.departure_time}:00`);
-    const arrival = new Date(`${conn.arrival_date}T${conn.arrival_time}:00`);
-    const minutes = Math.round((arrival - departure) / 60000);
-    if (!Number.isFinite(minutes) || minutes <= 0) return '';
-    return `${Math.floor(minutes / 60)}Hr ${minutes % 60}Min`;
-  };
-
 
   const handleHoldBooking = () => {
     saveBooking({
@@ -526,93 +781,13 @@ export default function BookingDetail() {
             <h3 style={{ margin: '0 0 9px', fontSize: '13px', fontWeight: '500', display: 'flex', alignItems: 'center', gap: '5px' }}>
               ✈️ Itinerary
             </h3>
-            {booking.flight_segments && booking.flight_segments.length > 0 ? (
-              booking.flight_segments.map((segment, segIdx) => {
-                const legBaggage = (segment.connections || []).find(c => c.check_in_baggage || c.cabin_baggage);
-                return (
-                  <div key={segIdx}>
-                    <p style={{ margin: '8px 0 4px', fontSize: '11px', fontWeight: '500', color: 'var(--color-text-secondary)' }}>
-                      {segment.label || `Leg ${segIdx + 1}`}
-                    </p>
-                    {segment.connections && segment.connections.map((conn, connIdx) => {
-                      const duration = getFlightDuration(conn);
-                      return (
-                        <div key={connIdx} style={{
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          gap: '8px',
-                          padding: '6px 0',
-                          borderTop: connIdx === 0 ? '0.5px solid var(--color-border-tertiary)' : 'none',
-                        }}>
-                          <div style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '5px',
-                            minWidth: 0,
-                            fontSize: '12.5px',
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                          }}>
-                            <span style={{ position: 'relative', width: '32px', height: '18px', flexShrink: 0 }}>
-                              {conn.airline && (
-                                <img
-                                  src={LOCAL_AIRLINE_LOGOS[conn.airline] || `https://images.kiwi.com/airlines/64/${conn.airline}.png`}
-                                  alt={conn.airline}
-                                  style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                                  // Local logos are verified-current; the CDN fallback covers codes we
-                                  // haven't sourced a local logo for yet, and itself falls back to a
-                                  // generic airplane icon for codes it doesn't recognise. This onError
-                                  // only fires if the CDN is unreachable entirely.
-                                  onError={(e) => {
-                                    e.currentTarget.style.display = 'none';
-                                    e.currentTarget.nextElementSibling.style.display = 'flex';
-                                  }}
-                                />
-                              )}
-                              <span style={{
-                                display: conn.airline ? 'none' : 'flex',
-                                position: 'absolute',
-                                inset: 0,
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                borderRadius: '5px',
-                                background: 'var(--color-background-secondary)',
-                                fontSize: '8.5px',
-                                fontWeight: 600,
-                              }}>
-                                {conn.airline || '--'}
-                              </span>
-                            </span>
-                            <span>{conn.airline || ''}{conn.flight_number || '-'}</span>
-                            <span>·</span>
-                            <span>{conn.departure_date || '-'}</span>
-                            <span>·</span>
-                            <span>{conn.departure_city || conn.origin || '-'} → {conn.arrival_city || conn.destination || '-'}</span>
-                            <span>·</span>
-                            <span>{conn.departure_time || '--:--'} – {conn.arrival_time || '--:--'}</span>
-                            {duration && (<><span>·</span><span>{duration}</span></>)}
-                          </div>
-                          <span style={{ fontSize: '11px', padding: '1px 7px', borderRadius: '9px', background: '#E1F5EE', color: '#085041', flexShrink: 0 }}>
-                            {conn.segment_status || 'HK'}
-                          </span>
-                        </div>
-                      );
-                    })}
-                    {legBaggage && (
-                      <p style={{ margin: '4px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
-                        🧳 Check-in {legBaggage.check_in_baggage || '-'} · Cabin {legBaggage.cabin_baggage || '-'}
-                      </p>
-                    )}
-                  </div>
-                );
-              })
-            ) : (
-              <div style={{ padding: '8px 0', fontSize: '12px', color: 'var(--color-text-secondary)' }}>
-                {booking.sector || 'No flight segments defined'}
-              </div>
-            )}
+            {currentItineraries.map(({ signature, rows }) => (
+              <BookingItineraryGroup
+                key={signature}
+                rows={rows}
+                showPassengerContext={currentItineraries.length > 1}
+              />
+            ))}
           </div>
 
           {/* Passengers & Baggage */}
@@ -659,6 +834,10 @@ export default function BookingDetail() {
           {/* Fare & Ledger */}
           <div className="card">
             <h3 style={{ margin: '0 0 9px', fontSize: '13px', fontWeight: '500' }}>📋 Fare & ledger</h3>
+
+            {/* Passenger-wise fare breakdown */}
+            <PassengerFareBreakdown group={group} formatCurrency={formatCurrency} numeric={numeric} />
+
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderTop: '0.5px solid var(--color-border-tertiary)', fontSize: '12.5px' }}>
               <span>Ticket issue · charge</span>
               <span style={{ color: '#A32D2D' }}>+{formatCurrency(total)}</span>
@@ -736,11 +915,16 @@ export default function BookingDetail() {
                   const total = amendmentTotalImpact(a);
                   return (
                     <div key={a.id} className="servicing-case-row">
-                      <span>
-                        ✏️ {a.amendment_number} · {String(a.amendment_type || '').replace(/_/g, ' ')}
-                        {total !== 0 && <span style={{ color: 'var(--color-text-secondary)' }}> · {total > 0 ? '+' : '−'}{formatCurrency(Math.abs(total))}</span>}
-                      </span>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                      <div className="servicing-case-main">
+                        <span>
+                          ✏️ {a.amendment_number} · {String(a.amendment_type || '').replace(/_/g, ' ')}
+                          {total !== 0 && <span style={{ color: 'var(--color-text-secondary)' }}> · {total > 0 ? '+' : '−'}{formatCurrency(Math.abs(total))}</span>}
+                        </span>
+                        {hasDateChangeAudit(a) && (
+                          <span className="servicing-case-summary">{amendmentTimelineSummary(a)}</span>
+                        )}
+                      </div>
+                      <span className="servicing-case-actions">
                         {caseBadge(a.status)}
                         <button className="btn btn-secondary btn-sm" type="button" onClick={() => setAmendModal({ existing: a })}>Manage</button>
                       </span>
@@ -815,14 +999,14 @@ export default function BookingDetail() {
 
                     {/* Content */}
                     <div style={{ flex: 1, paddingBottom: isLast ? 0 : '12px' }}>
-                      <p style={{ margin: 0, fontSize: '12px', color: item.tone === 'negative' ? '#991B1B' : 'inherit', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <p className="booking-timeline-heading" style={{ color: item.tone === 'negative' ? '#991B1B' : 'inherit' }}>
                         <span style={{ color: 'var(--color-text-tertiary)' }}>{item.date}</span>
                         {' · '}
                         {item.label}
                         {item.actor && <span style={{ color: 'var(--color-text-tertiary)' }}>{' · '}{item.actor}</span>}
                       </p>
                       {item.detail && (
-                        <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--color-text-secondary)' }}>{item.detail}</p>
+                        <p className="booking-timeline-detail">{item.detail}</p>
                       )}
                     </div>
                   </div>
@@ -841,6 +1025,7 @@ export default function BookingDetail() {
           bookings={bookings}
           payments={payments}
           lockedPnr={booking.pnr}
+          lockedBookingRef={invoiceNo}
           onClose={() => setShowPaymentModal(false)}
           onSaved={() => {
             setShowPaymentModal(false);
