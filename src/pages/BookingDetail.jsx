@@ -1,7 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../AuthContext';
-import { getBookings, getPayments, saveBooking, getRefunds, getAmendments, getCancellations, getAllocations } from '../helpers/storage';
+import { getBookings, getPayments, saveBooking, getRefunds, getAmendments, getCancellations, getAllocations, loadFinanceData } from '../helpers/storage';
 import { formatCurrency } from '../helpers/format';
 import { numeric } from '../helpers/calculations';
 import {
@@ -139,6 +139,123 @@ const getFlightDuration = (connection = {}) => {
   return `${Math.floor(minutes / 60)}Hr ${minutes % 60}Min`;
 };
 
+
+// Passenger-wise fare breakdown: shows what was charged to the client (fare_sold),
+// the net supplier cost (fare_issued), and the margin per passenger.
+// This is the key reference for amendments and partial refund calculations.
+const PAX_TYPE_LABEL = { ADT: 'Adult', CHD: 'Child', INF: 'Infant' };
+
+function PassengerFareBreakdown({ group, formatCurrency, numeric }) {
+  const [open, setOpen] = useState(true);
+
+  if (!group || group.length === 0) return null;
+
+  const totalSold = group.reduce((s, p) => s + numeric(p.fare_sold || 0), 0);
+  const totalIssued = group.reduce((s, p) => s + numeric(p.fare_issued || 0), 0);
+  const totalMargin = totalSold - totalIssued;
+
+  // Group passengers by pax_type for a tidy display
+  const byType = group.reduce((acc, pax) => {
+    const type = pax.pax_type || 'ADT';
+    if (!acc[type]) acc[type] = [];
+    acc[type].push(pax);
+    return acc;
+  }, {});
+
+  const colStyle = { padding: '5px 6px', fontSize: '11.5px', textAlign: 'right', whiteSpace: 'nowrap' };
+  const colStyleLeft = { ...colStyle, textAlign: 'left', flex: 1 };
+
+  return (
+    <div style={{ marginBottom: '8px', border: '0.5px solid var(--color-border-tertiary)', borderRadius: '6px', overflow: 'hidden' }}>
+      {/* Header toggle */}
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '6px 8px', background: 'var(--color-bg-secondary)', border: 'none',
+          cursor: 'pointer', fontSize: '11.5px', fontWeight: '500', color: 'var(--color-text-primary)',
+          borderBottom: open ? '0.5px solid var(--color-border-tertiary)' : 'none',
+        }}
+        aria-expanded={open}
+        id="pax-fare-breakdown-toggle"
+      >
+        <span>🧾 Passenger-wise fare charged to client</span>
+        <span style={{ color: 'var(--color-text-secondary)', fontSize: '10px' }}>{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div>
+          {/* Column headings */}
+          <div style={{ display: 'flex', alignItems: 'center', padding: '4px 8px', background: 'var(--color-bg-secondary)', borderBottom: '0.5px solid var(--color-border-tertiary)' }}>
+            <span style={{ ...colStyleLeft, fontSize: '10.5px', color: 'var(--color-text-secondary)', fontWeight: '500', padding: '2px 6px' }}>Passenger</span>
+            <span style={{ ...colStyle, fontSize: '10.5px', color: 'var(--color-text-secondary)', fontWeight: '500', minWidth: '80px' }}>Fare sold</span>
+            <span style={{ ...colStyle, fontSize: '10.5px', color: 'var(--color-text-secondary)', fontWeight: '500', minWidth: '80px' }}>Net cost</span>
+            <span style={{ ...colStyle, fontSize: '10.5px', color: 'var(--color-text-secondary)', fontWeight: '500', minWidth: '64px' }}>Margin</span>
+          </div>
+
+          {/* Rows grouped by pax type */}
+          {['ADT', 'CHD', 'INF'].filter(type => byType[type]).map(type => (
+            <div key={type}>
+              {byType[type].length > 1 || Object.keys(byType).length > 1 ? (
+                <div style={{ padding: '3px 8px', fontSize: '10px', fontWeight: '600', color: 'var(--color-text-secondary)', background: 'var(--color-bg-tertiary, var(--color-bg-secondary))', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                  {PAX_TYPE_LABEL[type] || type}
+                </div>
+              ) : null}
+              {byType[type].map((pax, idx) => {
+                const sold = numeric(pax.fare_sold || 0);
+                const issued = numeric(pax.fare_issued || 0);
+                const margin = sold - issued;
+                return (
+                  <div
+                    key={pax.id || idx}
+                    style={{
+                      display: 'flex', alignItems: 'center', padding: '4px 8px',
+                      borderBottom: '0.5px solid var(--color-border-tertiary)',
+                    }}
+                  >
+                    <div style={{ ...colStyleLeft, padding: '2px 6px' }}>
+                      <span style={{ fontWeight: '500' }}>{pax.passenger_name || `Pax ${idx + 1}`}</span>
+                      {pax.ticket_no && (
+                        <span style={{ display: 'block', fontSize: '10.5px', color: 'var(--color-text-tertiary)', fontFamily: 'monospace' }}>{pax.ticket_no}</span>
+                      )}
+                    </div>
+                    <span style={{ ...colStyle, minWidth: '80px', fontWeight: '500', color: '#1E3A5F' }}>
+                      {formatCurrency(sold)}
+                    </span>
+                    <span style={{ ...colStyle, minWidth: '80px', color: 'var(--color-text-secondary)' }}>
+                      {issued > 0 ? formatCurrency(issued) : '—'}
+                    </span>
+                    <span style={{ ...colStyle, minWidth: '64px', color: margin > 0 ? '#3B6D11' : margin < 0 ? '#A32D2D' : 'var(--color-text-secondary)' }}>
+                      {issued > 0 ? (margin >= 0 ? '+' : '') + formatCurrency(margin) : '—'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+
+          {/* Subtotal row */}
+          <div style={{ display: 'flex', alignItems: 'center', padding: '5px 8px', background: 'var(--color-bg-secondary)', borderTop: '0.5px solid var(--color-border-secondary)' }}>
+            <span style={{ ...colStyleLeft, padding: '2px 6px', fontWeight: '600', fontSize: '11.5px' }}>
+              Total · {group.length} passenger{group.length !== 1 ? 's' : ''}
+            </span>
+            <span style={{ ...colStyle, minWidth: '80px', fontWeight: '600', fontSize: '11.5px', color: '#1E3A5F' }}>
+              {formatCurrency(totalSold)}
+            </span>
+            <span style={{ ...colStyle, minWidth: '80px', fontWeight: '600', fontSize: '11.5px', color: 'var(--color-text-secondary)' }}>
+              {totalIssued > 0 ? formatCurrency(totalIssued) : '—'}
+            </span>
+            <span style={{ ...colStyle, minWidth: '64px', fontWeight: '600', fontSize: '11.5px', color: totalMargin > 0 ? '#3B6D11' : totalMargin < 0 ? '#A32D2D' : 'var(--color-text-secondary)' }}>
+              {totalIssued > 0 ? (totalMargin >= 0 ? '+' : '') + formatCurrency(totalMargin) : '—'}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BookingItineraryGroup({ rows, showPassengerContext }) {
   const current = rows[0] || {};
   const segments = current.flight_segments || [];
@@ -218,6 +335,23 @@ export default function BookingDetail() {
   const { invoiceNo } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+
+  // Force-refresh finance data on every visit so payments added from the
+  // Payments page (or any other session) are immediately visible here without
+  // requiring a full browser reload. dataVersion bumps when the load settles,
+  // causing the component to re-read the freshest cache below.
+  const [dataVersion, setDataVersion] = useState(0);
+  useEffect(() => {
+    loadFinanceData({ force: true })
+      .then(() => setDataVersion((v) => v + 1))
+      .catch(() => setDataVersion((v) => v + 1)); // still re-render on error
+  }, [invoiceNo]);
+
+  // Read from cache — after the effect settles dataVersion has bumped and this
+  // snapshot is fresh. The variable is referenced only to satisfy the linter;
+  // the real purpose is to make the reads below execute again post-load.
+  void dataVersion;
+
   const bookings = getBookings();
   const payments = getPayments();
   const refunds = getRefunds();
@@ -700,6 +834,10 @@ export default function BookingDetail() {
           {/* Fare & Ledger */}
           <div className="card">
             <h3 style={{ margin: '0 0 9px', fontSize: '13px', fontWeight: '500' }}>📋 Fare & ledger</h3>
+
+            {/* Passenger-wise fare breakdown */}
+            <PassengerFareBreakdown group={group} formatCurrency={formatCurrency} numeric={numeric} />
+
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderTop: '0.5px solid var(--color-border-tertiary)', fontSize: '12.5px' }}>
               <span>Ticket issue · charge</span>
               <span style={{ color: '#A32D2D' }}>+{formatCurrency(total)}</span>
@@ -887,6 +1025,7 @@ export default function BookingDetail() {
           bookings={bookings}
           payments={payments}
           lockedPnr={booking.pnr}
+          lockedBookingRef={invoiceNo}
           onClose={() => setShowPaymentModal(false)}
           onSaved={() => {
             setShowPaymentModal(false);

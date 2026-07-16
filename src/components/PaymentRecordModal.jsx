@@ -95,7 +95,7 @@ function MethodFieldInput({ field, record, onChange }) {
 // - editingPayment: existing record to edit, or null to create
 // - lockedPnr: preset the form to a customer payment for this PNR
 // - onClose(), onSaved(record)
-export default function PaymentRecordModal({ user, bookings = [], payments = [], editingPayment = null, lockedPnr = '', onClose, onSaved }) {
+export default function PaymentRecordModal({ user, bookings = [], payments = [], editingPayment = null, lockedPnr = '', lockedBookingRef = '', onClose, onSaved }) {
   const canVerify = canVerifyPayments(user);
 
   const [form, setForm] = useState(() => {
@@ -369,7 +369,10 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
       return createPaymentEntry({
         ...shared,
         pnr: form.pnr,
-        booking_ref: stableBookingRef(relatedBooking) || sharedBookingRef,
+        // lockedBookingRef is authoritative when provided (e.g. from the booking
+        // detail page) — it ensures multi-PNR group payments always carry the
+        // correct invoice reference regardless of which passenger PNR was used.
+        booking_ref: lockedBookingRef || stableBookingRef(relatedBooking) || sharedBookingRef,
         booking_id: relatedBooking?.id || '',
         amount_paid: amount,
       }, bookings, payments);
@@ -481,7 +484,7 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
       background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
     }}>
       <div className="card modal-card modal-card-wide" style={{ maxHeight: '92vh', overflowY: 'auto' }}>
-        <h3>{editingPayment ? 'Edit Payment' : lockedPnr ? `Record Payment · ${lockedPnr}` : 'Record Payment'}</h3>
+        <h3>{editingPayment ? 'Edit Payment' : lockedPnr ? `Record Payment · ${lockedPnr}` : lockedBookingRef ? `Record Payment · ${lockedBookingRef}` : 'Record Payment'}</h3>
 
         <div className="payment-proof-layout">
           <aside className="payment-proof-panel">
