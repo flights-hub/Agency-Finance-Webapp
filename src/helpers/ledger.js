@@ -121,7 +121,7 @@ export const CANCELLATION_SCOPES = [
   ['ENTIRE_BOOKING', 'Entire booking'],
   ['SELECTED_PASSENGERS', 'Select passengers'],
   ['SELECTED_TICKETS', 'Select tickets'],
-  ['SELECTED_SEGMENTS', 'Select flight segments'],
+  ['SELECTED_SEGMENTS', 'Select travel direction'],
 ];
 
 export const CANCELLATION_CATEGORIES = [

@@ -29,6 +29,10 @@ import {
 } from '../helpers/ledger';
 import AffectedItemsPicker, { bookingGroupOptions, selectedItems, readAttachment } from './AffectedItemsPicker';
 import DateChangeItineraryEditor from './DateChangeItineraryEditor';
+import {
+  nameChangeMapFromRecord,
+  passengerNameChangeRows,
+} from '../helpers/passengerNameChanges';
 
 const FINANCIAL_FIELDS = [
   ['fare_difference', 'Fare Difference (±)'],
@@ -158,6 +162,9 @@ const affectedSegmentIds = (itinerary, direction) => {
   return ids;
 };
 
+const isNameAmendmentType = (type) => ['NAME_CORRECTION', 'NAME_CHANGE'].includes(type);
+const isRouteAmendmentType = (type) => type === 'ROUTE_CHANGE';
+
 const serverErrorMessage = (error) => {
   const details = Array.isArray(error?.details)
     ? error.details
@@ -193,6 +200,10 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
     new_outbound_date: existing.requested_changes?.new_outbound_date || '',
     new_inbound_date: existing.requested_changes?.new_inbound_date || '',
     new_passenger_name: existing.requested_changes?.new_passenger_name || '',
+    passenger_name_changes: nameChangeMapFromRecord(
+      existing.requested_changes || {},
+      existingAffected(existing).passengers,
+    ),
     remarks: existing.remarks || '',
     fare_difference: existing.fare_difference ?? '',
     supplier_change_fee: existing.supplier_change_fee ?? '',
@@ -209,6 +220,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
     new_outbound_date: '',
     new_inbound_date: '',
     new_passenger_name: '',
+    passenger_name_changes: {},
     remarks: '',
     fare_difference: '',
     supplier_change_fee: '',
@@ -240,6 +252,9 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
   const party = bookingCounterparty(booking);
   const actor = user?.name || user?.email || '';
   const dateChange = isDateChangeType(form.amendment_type);
+  const routeChange = isRouteAmendmentType(form.amendment_type);
+  const itineraryChange = dateChange || routeChange;
+  const nameAmendment = isNameAmendmentType(form.amendment_type);
   const finalizing = existing?.status === 'FINALIZING';
   const financialsLocked = posted || closed || legacyDateChange;
   const editingLocked = financialsLocked || finalizing;
@@ -250,10 +265,23 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
     tickets: activeKey === 'tickets',
     segments: activeKey === 'segments',
   };
+  const nameChangeRows = passengerNameChangeRows(options.passengers, affected.passengers, form.passenger_name_changes);
 
   const setAmendmentType = (type) => {
     update('amendment_type', type);
     setAffected(affectedForType(type, existing));
+  };
+
+  const updatePassengerNameChange = (passengerId, value) => {
+    setForm((current) => ({
+      ...current,
+      passenger_name_changes: {
+        ...(current.passenger_name_changes || {}),
+        [String(passengerId)]: value,
+      },
+      new_passenger_name: value,
+    }));
+    setError('');
   };
 
   const setDateChangeSelection = (ids) => {
@@ -330,10 +358,12 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
 
   const validate = (needsFinancials) => {
     if (!form.amendment_type) return 'Amendment type is required.';
-    if (dateChange && !form.selected_passenger_ids.length) return 'Select at least one affected passenger.';
-    if (!dateChange && activeKey === 'passengers' && !affected.passengers.length) return 'Select at least one affected passenger.';
-    if (!dateChange && activeKey === 'tickets' && !affected.tickets.length) return 'Select at least one affected ticket.';
-    if (!dateChange && activeKey === 'segments' && !affected.segments.length) return 'Select at least one affected segment.';
+    if (dateChange && !form.selected_passenger_ids.length) return 'Select at least one passenger.';
+    if (routeChange && !form.selected_passenger_ids.length) return 'Select at least one passenger.';
+    if (!dateChange && activeKey === 'passengers' && !affected.passengers.length) return 'Select at least one passenger.';
+    if (!dateChange && activeKey === 'tickets' && !affected.tickets.length) return 'Select at least one ticket.';
+    if (!itineraryChange && activeKey === 'segments' && !affected.segments.length) return 'Select at least one segment.';
+    if (nameAmendment && nameChangeRows.some((row) => !row.new_name.trim())) return 'Enter a new passenger name for each selected passenger.';
     if (!form.remarks.trim()) return 'Amendment remarks are required.';
     if (needsFinancials) {
       const fees = ['supplier_change_fee', 'flyforsure_service_fee', 'agent_markup', 'tax_difference', 'other_charges'];
@@ -344,19 +374,19 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
 
   const buildRecord = (status) => {
     const now = new Date().toISOString();
-    const selectedDateRows = dateChange
+    const selectedItineraryRows = itineraryChange
       ? group.filter((row) => form.selected_passenger_ids.includes(rowId(row)))
       : [];
-    const dateAffectedPassengers = dateChange
+    const itineraryAffectedPassengers = itineraryChange
       ? selectedItems(options.passengers, form.selected_passenger_ids)
       : [];
-    const dateAffectedTickets = selectedDateRows
+    const itineraryAffectedTickets = selectedItineraryRows
       .filter((row) => row.ticket_no)
       .map((row) => ({
         id: String(row.ticket_no),
         label: `${row.ticket_no} · ${row.passenger_name || ''}`.trim(),
       }));
-    const dateAffectedSegments = dateChange
+    const itineraryAffectedSegments = itineraryChange
       ? selectedItems(
         options.segments,
         affectedSegmentIds(form.original_itinerary, form.travel_direction),
@@ -369,26 +399,26 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
       booking_id: existing?.booking_id || booking.id,
       booking_ref: existing?.booking_ref || stableBookingRef(group[0] || booking),
       pnr: existing?.pnr || booking.pnr,
-      ticket_no: dateAffectedTickets[0]?.id
+      ticket_no: itineraryAffectedTickets[0]?.id
         || selectedItems(options.tickets, affected.tickets)[0]?.id
         || existing?.ticket_no
         || booking.ticket_no
         || '',
-      passenger_name: dateAffectedPassengers[0]?.label
+      passenger_name: itineraryAffectedPassengers[0]?.label
         || selectedItems(options.passengers, affected.passengers)[0]?.label
         || booking.passenger_name
         || '',
       counterparty_type: party.type,
       counterparty_name: party.name,
       amendment_type: dateChange ? 'DATE_CHANGE' : form.amendment_type,
-      ...(dateChange ? {
+      ...(itineraryChange ? {
         application_scope: form.application_scope,
         travel_direction: form.travel_direction,
         original_itinerary: clone(form.original_itinerary),
         replacement_itinerary: clone(form.replacement_itinerary),
         selected_passenger_ids: [...form.selected_passenger_ids],
-        passenger_reissues: clone(form.passenger_reissues),
       } : {}),
+      ...(dateChange ? { passenger_reissues: clone(form.passenger_reissues) } : {}),
       currency: 'EUR',
       fare_difference: numeric(form.fare_difference),
       supplier_change_fee: numeric(form.supplier_change_fee),
@@ -407,17 +437,22 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
         new_outbound_date: form.new_outbound_date,
         current_inbound_date: booking.inbound_date || '',
         new_inbound_date: form.new_inbound_date,
-        current_passenger_name: booking.passenger_name || '',
-        new_passenger_name: form.new_passenger_name,
+        current_passenger_name: nameChangeRows[0]?.current_name || booking.passenger_name || '',
+        new_passenger_name: nameChangeRows[0]?.new_name || form.new_passenger_name,
+        passenger_name_changes: nameChangeRows.map((row) => ({
+          id: row.id,
+          current_name: row.current_name,
+          new_name: row.new_name,
+        })),
       },
-      affected_passengers: dateChange
-        ? dateAffectedPassengers
+      affected_passengers: itineraryChange
+        ? itineraryAffectedPassengers
         : selectedItems(options.passengers, affected.passengers),
-      affected_tickets: dateChange
-        ? dateAffectedTickets
+      affected_tickets: itineraryChange
+        ? itineraryAffectedTickets
         : selectedItems(options.tickets, affected.tickets).map(({ id, label }) => ({ id, label })),
-      affected_segments: dateChange
-        ? dateAffectedSegments
+      affected_segments: itineraryChange
+        ? itineraryAffectedSegments
         : selectedItems(options.segments, affected.segments),
       status,
       created_by: existing?.created_by || actor,
@@ -527,7 +562,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
               {SELECTABLE_AMENDMENT_TYPES.map((type) => <option key={type} value={type}>{type.replace(/_/g, ' ')}</option>)}
             </select>
           </label>
-          {dateChange && !legacyDateChange && (
+          {itineraryChange && !legacyDateChange && (
             <>
               <label>
                 <span>Application Scope *</span>
@@ -559,7 +594,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
           <div className="allocation-warning">
             Legacy date-change record (read-only). No itinerary snapshots were stored, so the dates below are the original recorded request. To use modern finalization, create a new date-change case and enter the replacement itinerary and passenger reissue details.
           </div>
-        ) : dateChange ? (
+        ) : itineraryChange ? (
           <AffectedItemsPicker
             options={options}
             value={{ passengers: form.selected_passenger_ids, tickets: [], segments: [] }}
@@ -598,7 +633,7 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
               <input value={existing?.requested_changes?.new_inbound_date || '-'} readOnly disabled />
             </label>
           </div>
-        ) : dateChange ? (
+        ) : itineraryChange ? (
           <>
             <DateChangeItineraryEditor
               original={form.original_itinerary}
@@ -608,47 +643,72 @@ export default function AmendmentCaseModal({ user, booking, group, amendments, e
               onChange={(replacement) => update('replacement_itinerary', replacement)}
             />
 
-            <h4 className="servicing-section-title">Passenger reissues</h4>
-            {form.passenger_reissues.length ? form.passenger_reissues.map((mapping) => (
-              <div key={mapping.booking_id}>
-                <h5>{mapping.passenger_name || 'Passenger'}</h5>
-                <div className="modal-form-grid">
+            {dateChange && (
+              <>
+                <h4 className="servicing-section-title">Passenger reissues</h4>
+                {form.passenger_reissues.length ? form.passenger_reissues.map((mapping) => (
+                  <div key={mapping.booking_id}>
+                    <h5>{mapping.passenger_name || 'Passenger'}</h5>
+                    <div className="modal-form-grid">
+                      <label>
+                        <span>Original PNR</span>
+                        <input value={mapping.old_pnr || '-'} readOnly disabled />
+                      </label>
+                      <label>
+                        <span>New PNR</span>
+                        <input
+                          value={mapping.new_pnr || ''}
+                          disabled={editingLocked || saving}
+                          onChange={(event) => updatePassengerReissue(mapping.booking_id, 'new_pnr', event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <span>Original Ticket</span>
+                        <input value={mapping.old_ticket_no || '-'} readOnly disabled />
+                      </label>
+                      <label>
+                        <span>New Ticket</span>
+                        <input
+                          value={mapping.new_ticket_no || ''}
+                          disabled={editingLocked || saving}
+                          onChange={(event) => updatePassengerReissue(mapping.booking_id, 'new_ticket_no', event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <span>Reissue Reference</span>
+                        <input
+                          value={mapping.reissue_reference || ''}
+                          disabled={editingLocked || saving}
+                          onChange={(event) => updatePassengerReissue(mapping.booking_id, 'reissue_reference', event.target.value)}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                )) : <p className="affected-picker-empty">Select at least one passenger to map the reissue.</p>}
+              </>
+            )}
+          </>
+        ) : nameAmendment ? (
+          nameChangeRows.length ? (
+            <div className="name-change-list">
+              {nameChangeRows.map((row) => (
+                <div className="modal-form-grid" key={row.id}>
                   <label>
-                    <span>Original PNR</span>
-                    <input value={mapping.old_pnr || '-'} readOnly disabled />
+                    <span>Current Passenger Name</span>
+                    <input value={row.current_name || '-'} readOnly disabled />
                   </label>
                   <label>
-                    <span>New PNR</span>
+                    <span>New Passenger Name</span>
                     <input
-                      value={mapping.new_pnr || ''}
-                      disabled={editingLocked || saving}
-                      onChange={(event) => updatePassengerReissue(mapping.booking_id, 'new_pnr', event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Original Ticket</span>
-                    <input value={mapping.old_ticket_no || '-'} readOnly disabled />
-                  </label>
-                  <label>
-                    <span>New Ticket</span>
-                    <input
-                      value={mapping.new_ticket_no || ''}
-                      disabled={editingLocked || saving}
-                      onChange={(event) => updatePassengerReissue(mapping.booking_id, 'new_ticket_no', event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Reissue Reference</span>
-                    <input
-                      value={mapping.reissue_reference || ''}
-                      disabled={editingLocked || saving}
-                      onChange={(event) => updatePassengerReissue(mapping.booking_id, 'reissue_reference', event.target.value)}
+                      value={row.new_name}
+                      disabled={editingLocked}
+                      onChange={(e) => updatePassengerNameChange(row.id, e.target.value)}
                     />
                   </label>
                 </div>
-              </div>
-            )) : <p className="affected-picker-empty">Select at least one passenger to map the reissue.</p>}
-          </>
+              ))}
+            </div>
+          ) : <p className="affected-picker-empty">Select at least one passenger to enter name changes.</p>
         ) : (
           <div className="modal-form-grid">
             <label>

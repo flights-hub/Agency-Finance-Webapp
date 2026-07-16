@@ -18,6 +18,11 @@ import {
   numeric,
 } from '../helpers/ledger';
 import AffectedItemsPicker, { bookingGroupOptions, selectedItems, readAttachment } from './AffectedItemsPicker';
+import {
+  directionFromSegmentIds,
+  segmentIdsForTravelDirection,
+} from '../helpers/servicingTravelDirection';
+import ServicingTravelDirectionPicker from './ServicingTravelDirectionPicker';
 
 const ESTIMATE_FIELDS = [
   ['estimated_gross_refund', 'Gross Refundable Amount'],
@@ -69,6 +74,7 @@ export default function CancellationCaseModal({
 
   const [form, setForm] = useState(() => ({
     cancellation_scope: initialCancellationScope,
+    travel_direction: directionFromSegmentIds(options, existingAffected(existing).segments),
     cancellation_category: existing?.cancellation_category || 'VOLUNTARY',
     cancellation_reason: existing?.cancellation_reason || '',
     supplier_reference: existing?.supplier_reference || '',
@@ -96,12 +102,22 @@ export default function CancellationCaseModal({
   const pickerRequired = {
     passengers: form.cancellation_scope === 'SELECTED_PASSENGERS',
     tickets: form.cancellation_scope === 'SELECTED_TICKETS',
-    segments: form.cancellation_scope === 'SELECTED_SEGMENTS',
   };
+  const selectedSegmentIds = form.cancellation_scope === 'SELECTED_SEGMENTS'
+    ? segmentIdsForTravelDirection(options, form.travel_direction)
+    : affected.segments;
 
   const setScope = (scope) => {
     update('cancellation_scope', scope);
     setAffected(affectedForScope(scope, options, existing));
+  };
+
+  const updateTravelDirection = (direction) => {
+    update('travel_direction', direction);
+    setAffected((current) => ({
+      ...current,
+      segments: segmentIdsForTravelDirection(options, direction),
+    }));
   };
 
   const validate = () => {
@@ -109,13 +125,13 @@ export default function CancellationCaseModal({
     if (!form.cancellation_category) return 'Cancellation category is required.';
     if (!form.cancellation_reason.trim()) return 'Cancellation reason is required.';
     if (form.cancellation_scope === 'SELECTED_PASSENGERS' && !affected.passengers.length) {
-      return 'Select at least one affected passenger.';
+      return 'Select at least one passenger.';
     }
     if (form.cancellation_scope === 'SELECTED_TICKETS' && !affected.tickets.length) {
-      return 'Select at least one affected ticket.';
+      return 'Select at least one ticket.';
     }
-    if (form.cancellation_scope === 'SELECTED_SEGMENTS' && !affected.segments.length) {
-      return 'Select at least one affected segment.';
+    if (form.cancellation_scope === 'SELECTED_SEGMENTS' && !selectedSegmentIds.length) {
+      return 'Select a travel direction.';
     }
     if (ESTIMATE_FIELDS.some(([key]) => numeric(form[key]) < 0)) return 'Estimate values cannot be negative.';
     return '';
@@ -150,7 +166,8 @@ export default function CancellationCaseModal({
       estimated_refund_credit: estimate.expectedRefundCredit,
       affected_passengers: selectedItems(options.passengers, affected.passengers),
       affected_tickets: selectedItems(options.tickets, affected.tickets).map(({ id, label }) => ({ id, label })),
-      affected_segments: selectedItems(options.segments, affected.segments),
+      travel_direction: form.travel_direction,
+      affected_segments: selectedItems(options.segments, selectedSegmentIds),
       status,
       created_by: existing?.created_by || actor,
       created_at: existing?.created_at || now,
@@ -267,7 +284,18 @@ export default function CancellationCaseModal({
           onChange={(next) => { setAffected(next); setError(''); }}
           disabled={pickerDisabled}
           required={pickerRequired}
+          show={{ segments: false }}
         />
+
+        {form.cancellation_scope === 'SELECTED_SEGMENTS' && (
+          <ServicingTravelDirectionPicker
+            value={form.travel_direction}
+            onChange={updateTravelDirection}
+            options={options}
+            disabled={locked}
+            required
+          />
+        )}
 
         <h4 className="servicing-section-title">Cancellation details</h4>
         <div className="modal-form-grid">

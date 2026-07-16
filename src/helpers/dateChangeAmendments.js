@@ -367,14 +367,14 @@ export function validateDateChangeFinalization(amendment = {}, group = [], {
   if (affected.length > 1) {
     const compatibility = selectCompatibleItinerary(affected, affected.map((row) => row.id));
     if (!compatibility.compatible && !allowPartialRecovery) {
-      errors.push('Affected passengers do not share one compatible itinerary cohort; finalize them passenger-wise.');
+      errors.push('Selected passengers do not share one compatible itinerary cohort; finalize them passenger-wise.');
     }
   }
 
   if (scope !== 'PNR_WIDE' && scope !== 'SELECTED_PASSENGERS') {
     errors.push('Application scope must be PNR-wide or selected passengers.');
   } else if (scope === 'PNR_WIDE' && !eligible.length) {
-    errors.push('PNR-wide scope must resolve at least one affected booking row.');
+    errors.push('PNR-wide scope must resolve at least one booking row.');
   } else if (scope === 'SELECTED_PASSENGERS' && !selectedIds.length) {
     errors.push('Select at least one selected passenger.');
   }
@@ -382,7 +382,7 @@ export function validateDateChangeFinalization(amendment = {}, group = [], {
   if (scope === 'SELECTED_PASSENGERS') {
     selectedIds.forEach((bookingId) => {
       if (!eligibleIds.has(bookingId)) {
-        errors.push(`Selected passenger ${bookingId} is not an affected booking under this Booking ID.`);
+        errors.push(`Selected passenger ${bookingId} is not under this Booking ID.`);
       }
     });
   }
@@ -410,7 +410,7 @@ export function validateDateChangeFinalization(amendment = {}, group = [], {
     if (seenMappings.has(bookingId)) errors.push(`Passenger ${bookingId} has a duplicate reissue mapping.`);
     seenMappings.add(bookingId);
     if (!affectedIds.has(bookingId)) {
-      errors.push(`Reissue mapping ${bookingId || '(missing ID)'} does not correspond to an affected booking row.`);
+      errors.push(`Reissue mapping ${bookingId || '(missing ID)'} does not correspond to a selected booking row.`);
     }
   });
 
@@ -419,21 +419,21 @@ export function validateDateChangeFinalization(amendment = {}, group = [], {
     const bookingId = idKey(row.id);
     const mapping = mappingsById.get(bookingId);
     if (!mapping) {
-      errors.push(`Affected passenger ${bookingId} requires a passenger reissue mapping and new ticket number.`);
+      errors.push(`Passenger ${bookingId} requires a passenger reissue mapping and new ticket number.`);
       return;
     }
 
     const newTicket = ticketKey(mapping.new_ticket_no);
     if (!newTicket) {
-      errors.push(`Affected passenger ${bookingId} requires a new ticket number.`);
+      errors.push(`Passenger ${bookingId} requires a new ticket number.`);
     } else {
       if (newTicket === ticketKey(mapping.old_ticket_no)) {
-        errors.push(`Affected passenger ${bookingId}'s new ticket number must differ from the old ticket number.`);
+        errors.push(`Passenger ${bookingId}'s new ticket number must differ from the old ticket number.`);
       }
       if (seenTickets.has(newTicket)) errors.push(`New ticket number ${text(mapping.new_ticket_no)} is duplicate.`);
       if (unaffectedTickets.has(newTicket)) {
         errors.push(
-          `New ticket number ${text(mapping.new_ticket_no)} is already used by unaffected booking row ${unaffectedTickets.get(newTicket)}.`,
+          `New ticket number ${text(mapping.new_ticket_no)} is already used by booking row ${unaffectedTickets.get(newTicket)}.`,
         );
       }
       seenTickets.add(newTicket);

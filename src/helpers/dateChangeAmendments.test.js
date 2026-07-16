@@ -455,7 +455,7 @@ test('validation checks scope, required fields, booking membership, and stale ro
 
   const errors = validateDateChangeFinalization(invalid, group);
   assert.ok(errors.some((error) => error.includes('selected passenger')));
-  assert.ok(errors.some((error) => error.includes('affected booking')));
+  assert.ok(errors.some((error) => error.includes('selected booking')));
   assert.ok(errors.some((error) => error.includes('Airline')));
 
   const staleGroup = clone(group);
@@ -520,12 +520,12 @@ test('application throws all validation errors without mutating the booking grou
   });
 });
 
-test("validation rejects a new ticket already held by an unaffected booking row", () => {
+test("validation rejects a new ticket already held by another booking row", () => {
   const collision = clone(amendment);
   collision.passenger_reissues[0].new_ticket_no = group[1].ticket_no;
 
   const errors = validateDateChangeFinalization(collision, group);
-  assert.ok(errors.some((error) => error.includes('unaffected booking row p2')), errors.join('\n'));
+  assert.ok(errors.some((error) => error.includes('booking row p2')), errors.join('\n'));
 });
 
 test('application persists an inferred stable booking reference on the completed amendment', () => {
