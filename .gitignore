@@ -27,3 +27,11 @@ dist-ssr
 # Agent tool artifacts
 .codex/
 .playwright-mcp/
+
+# Dev server / debug logs
+*.err
+
+# Ad-hoc dev screenshots (repo root)
+/groups-roundtrip-*.png
+/results-*.png
+/verify-*.png
