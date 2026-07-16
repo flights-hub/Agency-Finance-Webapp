@@ -1,12 +1,22 @@
 {
-  "enabled": false,
+  "enabled": true,
   "engine": "PP-OCRv5 ONNX",
+  "worker": "/ocr/ppocrv5/worker.js",
   "ortScript": "/ocr/onnxruntime-web/ort.min.js",
-  "runner": "/ocr/ppocrv5/runner.js",
+  "wasmPaths": "/ocr/onnxruntime-web/",
   "models": {
     "det": "/ocr/ppocrv5/det.onnx",
     "rec": "/ocr/ppocrv5/rec.onnx",
     "cls": "/ocr/ppocrv5/cls.onnx",
-    "dict": "/ocr/ppocrv5/ppocr_keys_v1.txt"
-  }
+    "dict": "/ocr/ppocrv5/ppocrv5_dict.txt"
+  },
+  "clsEnabled": true,
+  "detLimitSideLen": 960,
+  "detThresh": 0.3,
+  "detBoxThresh": 0.5,
+  "detUnclipRatio": 1.6,
+  "recImageHeight": 48,
+  "recMaxWidth": 1600,
+  "clsThresh": 0.9,
+  "useSpaceChar": true
 }

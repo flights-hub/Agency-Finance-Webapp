@@ -673,6 +673,10 @@ const FINANCE_COLLECTIONS = {
   // Recording or refund staff can allocate; agents and suppliers cannot
   // (requireFinanceWriter blocks their roles for this collection).
   allocations: { view: 'view_payments', write: ['record_payments', 'process_refunds', 'edit_financials'] },
+  // Configurable internal bank accounts shown in the payment modal dropdowns.
+  // Always readable (config data needed to render/label the dropdown); only
+  // settings managers / finance admins may add or remove them.
+  bank_accounts: { view: 'view_payments', write: ['configure_settings', 'edit_financials'] },
 };
 
 function hasAnyPermission(user, keys) {
@@ -774,7 +778,14 @@ async function handleFinanceData(req, res) {
     )),
   );
 
-  json(res, 200, scopedFinanceData(user, { bookings, payments, refunds, amendments, cancellations, expenses, allocations }));
+  // Bank accounts are non-sensitive config shared with every user so the
+  // payment modal can render and label its account dropdowns.
+  const bank_accounts = await listFinanceRows('bank_accounts').catch(() => []);
+
+  json(res, 200, {
+    ...scopedFinanceData(user, { bookings, payments, refunds, amendments, cancellations, expenses, allocations }),
+    bank_accounts,
+  });
 }
 
 async function requireFinanceWriter(req, collection) {
@@ -854,6 +865,23 @@ async function handleSaveFinanceRecord(req, res, collection, id) {
     }
   }
   json(res, 200, { record });
+}
+
+async function handleDeleteFinanceRecord(req, res, collection, id) {
+  const user = await requireFinanceWriter(req, collection);
+  // Only config-style collections support hard deletion through this route.
+  // Deleting transactional records (payments, bookings, ...) would orphan
+  // ledgers, so those are intentionally excluded.
+  if (collection !== 'bank_accounts') {
+    const error = new Error(`Deleting ${collection} records is not supported.`);
+    error.status = 405;
+    throw error;
+  }
+  await supabaseRequest(`/rest/v1/${collection}?id=eq.${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    prefer: 'return=minimal',
+  });
+  json(res, 200, { deleted: id });
 }
 
 async function handleBulkImportFinance(req, res, collection) {
@@ -1231,8 +1259,9 @@ async function route(req, res) {
 
   if (req.method === 'POST' && path === '/api/amendments/finalize') return handleFinalizeAmendment(req, res);
 
-  const financeMatch = path.match(/^\/api\/finance\/([a-z]+)\/([^/]+)$/);
+  const financeMatch = path.match(/^\/api\/finance\/([a-z_]+)\/([^/]+)$/);
   if (financeMatch && req.method === 'PUT') return handleSaveFinanceRecord(req, res, financeMatch[1], financeMatch[2]);
+  if (financeMatch && req.method === 'DELETE') return handleDeleteFinanceRecord(req, res, financeMatch[1], decodeURIComponent(financeMatch[2]));
 
   if (req.method === 'POST' && path === '/api/admin/users') return handleCreateUser(req, res);
   if (req.method === 'GET' && path === '/api/admin/users') return handleListUsers(req, res);

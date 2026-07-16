@@ -43,6 +43,9 @@ export const api = {
     method: 'PUT',
     body: record,
   }),
+  deleteFinanceRecord: (collection, id) => request(`/api/finance/${collection}/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  }),
   finalizeAmendment: (record) => request('/api/amendments/finalize', {
     method: 'POST',
     body: { amendment: record },

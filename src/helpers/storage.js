@@ -19,6 +19,7 @@ const STORAGE_KEYS = {
   ALLOCATIONS: 'ffs_allocations',
   ALERTS: 'ffs_alerts',
   USERS: 'ffs_users',
+  BANK_ACCOUNTS: 'ffs_bank_accounts',
 };
 
 // Collections persisted to the database. Alerts are computed and legacy
@@ -31,6 +32,7 @@ const SERVER_COLLECTIONS = {
   [STORAGE_KEYS.CANCELLATIONS]: 'cancellations',
   [STORAGE_KEYS.EXPENSES]: 'expenses',
   [STORAGE_KEYS.ALLOCATIONS]: 'allocations',
+  [STORAGE_KEYS.BANK_ACCOUNTS]: 'bank_accounts',
 };
 
 const cache = new Map();
@@ -84,8 +86,14 @@ export function loadFinanceData({ force = false } = {}) {
 
 async function fetchFinanceData() {
   const data = await api.financeData();
-  const serverEmpty = Object.values(SERVER_COLLECTIONS).every((name) => !(data[name] || []).length);
+  // Config collections (seeded server-side) never count as "the app has no
+  // data yet" — only transactional records drive the one-time local import.
+  const CONFIG_COLLECTIONS = new Set(['bank_accounts']);
+  const serverEmpty = Object.values(SERVER_COLLECTIONS)
+    .filter((name) => !CONFIG_COLLECTIONS.has(name))
+    .every((name) => !(data[name] || []).length);
   const localCounts = Object.entries(SERVER_COLLECTIONS)
+    .filter(([, name]) => !CONFIG_COLLECTIONS.has(name))
     .map(([key, name]) => [key, name, readLocal(key)])
     .filter(([, , records]) => records.length);
 
@@ -185,6 +193,20 @@ export function saveAlert(alert) { return save(STORAGE_KEYS.ALERTS, alert); }
 // Users
 export function getUsers() { return readData(STORAGE_KEYS.USERS); }
 export function saveUser(user) { return save(STORAGE_KEYS.USERS, user); }
+
+// Bank accounts (configurable internal accounts for the payment dropdowns)
+export function getBankAccounts() { return readData(STORAGE_KEYS.BANK_ACCOUNTS); }
+export function saveBankAccount(account) { return save(STORAGE_KEYS.BANK_ACCOUNTS, account); }
+export async function deleteBankAccount(id) {
+  const remaining = readData(STORAGE_KEYS.BANK_ACCOUNTS).filter((account) => account.id !== id);
+  writeData(STORAGE_KEYS.BANK_ACCOUNTS, remaining);
+  try {
+    await api.deleteFinanceRecord('bank_accounts', id);
+  } catch (error) {
+    syncError = error;
+    throw error;
+  }
+}
 
 // General function to clear all data
 export function clearAllData() {

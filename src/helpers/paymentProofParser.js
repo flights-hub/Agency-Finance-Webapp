@@ -58,7 +58,10 @@ function parseDate(text) {
   if (match) {
     const first = Number(match[1]);
     const second = Number(match[2]);
-    return isoDate(Number(match[3]), first > 12 ? second : first, first > 12 ? first : second);
+    // Italian and Indian receipts are day-first (DD/MM/YYYY). Only fall back to
+    // month-first when the second field cannot be a month (e.g. 07/25/2026).
+    const dayFirst = second <= 12;
+    return isoDate(Number(match[3]), dayFirst ? second : first, dayFirst ? first : second);
   }
 
   const months = {
@@ -118,7 +121,78 @@ function moneyMatchToAmount(match, context) {
   };
 }
 
+function round2(value) {
+  return Math.round(value * 100) / 100;
+}
+
+// Every currency-adjacent amount on the receipt, with its line for context.
+function collectCurrencyAmounts(rawText) {
+  const pattern = new RegExp(
+    `(?:(${STRICT_CURRENCY_PATTERN})\\s*([-+]?\\d[\\d.,]*)|([-+]?\\d[\\d.,]*)\\s*(${STRICT_CURRENCY_PATTERN}))`,
+    'gi',
+  );
+  const found = [];
+  for (const line of receiptLines(rawText)) {
+    let match;
+    pattern.lastIndex = 0;
+    while ((match = pattern.exec(line)) !== null) {
+      const amount = moneyNumber(match[2] || match[3]);
+      if (amount === null || amount <= 0) continue;
+      found.push({ amount: Math.abs(amount), currency: currencyCode(match[1] || match[4], line), line });
+    }
+  }
+  return found;
+}
+
+// Business rule: we never record the bank/service commission — only the net
+// transfer amount. So on a receipt that shows a "bonifico" transfer line, that
+// is the amount; otherwise strip any "Commissioni" from the total. Returns null
+// for receipts that carry neither signal, leaving them to the normal logic.
+function commissionAwareAmount(rawText) {
+  const entries = collectCurrencyAmounts(rawText);
+  if (!entries.length) return null;
+  const isCommission = (line) => /commiss/i.test(line);
+  const currency = (entry) => entry?.currency || currencyFromText(rawText);
+
+  const transfers = entries.filter((entry) => /bonific/i.test(entry.line) && !isCommission(entry.line));
+  if (transfers.length) {
+    const best = transfers.reduce((a, b) => (b.amount > a.amount ? b : a));
+    return { amount_paid: best.amount, transaction_currency: currency(best) };
+  }
+
+  if (entries.some((entry) => isCommission(entry.line))) {
+    const total = entries.reduce((a, b) => (b.amount > a.amount ? b : a));
+    const commission = round2(entries
+      .filter((entry) => isCommission(entry.line))
+      .reduce((sum, entry) => sum + entry.amount, 0));
+    if (commission > 0 && commission < total.amount) {
+      const net = round2(total.amount - commission);
+      const match = entries.find((entry) => !isCommission(entry.line) && Math.abs(entry.amount - net) < 0.01);
+      return { amount_paid: net, transaction_currency: currency(match || total) };
+    }
+  }
+  return null;
+}
+
+// Fallback for noisy OCR where amount labels are unreadable ("IMPORTO TOT."
+// misread as "RTO TOT."). A currency symbol glued to a number is a strong,
+// label-independent signal, so we take the largest such amount (the total on a
+// receipt without a separate commission line).
+function strongCurrencyAmount(rawText) {
+  const found = collectCurrencyAmounts(rawText);
+  if (!found.length) return null;
+  const best = found.reduce((a, b) => (b.amount > a.amount ? b : a));
+  return {
+    amount_paid: best.amount,
+    transaction_currency: best.currency || currencyFromText(rawText),
+  };
+}
+
 function extractAmountAndCurrency(rawText, text) {
+  // Net-of-commission transfer amount takes priority on receipts that show one.
+  const commissionAware = commissionAwareAmount(rawText);
+  if (commissionAware?.amount_paid) return commissionAware;
+
   const lines = receiptLines(rawText);
   const joined = lines.join(' ');
   const labelledCurrencyThenAmount = new RegExp(`(${CURRENCY_PATTERN})\\s*([-+]?\\d[\\d.,]*)\\s*(${STRICT_CURRENCY_PATTERN})?`, 'i');
@@ -163,6 +237,11 @@ function extractAmountAndCurrency(rawText, text) {
       }
     }
   }
+
+  // Before falling back to grabbing arbitrary numbers, trust currency-adjacent
+  // amounts (survives garbled labels far better).
+  const strong = strongCurrencyAmount(rawText);
+  if (strong?.amount_paid) return strong;
 
   const amountWindow = text.match(/\b(?:amount|paid|successfully|total|totale|importo|settled|received)\b(.{0,100})/i)?.[1] || text;
   const labelled = amountWindow.match(labelledAmountThenCurrency)
@@ -310,6 +389,9 @@ function extractSenderName(rawText, text) {
 function extractReference(rawText, text) {
   const lineText = receiptLines(rawText).join(' ');
   const value = firstMatch(lineText, [
+    // Mooney / bank "TRN" is the transfer reference; prefer it over a TID
+    // (terminal id) that may sit lower on the same receipt.
+    /\bTRN\s*[:#.-]?\s*(\d{12,}[A-Z0-9]*)/i,
     /\bNumero\s+prenotazione\s+(\d{5,})\b/i,
     /\bID\s*[:#-]\s*([A-Z0-9][A-Z0-9 /-]{3,}?)(?=\s+\b(?:BENEF|BENEFICIARIO|TIPO|DATA|CAUSALE|IMPORTO|DIVISA|BANCA|DELIVERY|HTTPS)\b|\s+\(\*\)|$)/i,
     /\bTRN\s+Data\s+regolamento\s+beneficiario\s+([A-Z0-9][A-Z0-9/-]{6,})\s+\d{1,2}[-/.]\d{1,2}[-/.]20\d{2}\b/i,
@@ -326,16 +408,24 @@ function extractReference(rawText, text) {
   return /\d/.test(reference) ? reference : '';
 }
 
-function extractBankName(rawText, text) {
+function extractSenderBankName(rawText, text) {
   const lineText = receiptLines(rawText).join(' ');
-  return cleanFreeText(firstMatch(lineText || text, [
-    /\bdenominazione\s+della\s+banca\s*[:#-]?\s*(.{2,90}?)(?=\s+\b(?:intestazione|paese|beneficiario|dati|codice|data|importo|commissioni|totale|comunicazioni|saluti)\b|$)/i,
-    /\bbanca\s+beneficiario\s*[:#-]?\s*(.{2,90}?)(?=\s+\b(?:filiale|note|data|causale|beneficiario|iban|codice)\b|$)/i,
-    /\bbanca\s*[:#-]?\s*(BPER\s+BANCA\s+S\.?P\.?A\.?|BANCA\s+POPOLARE\s+DI\s+SONDRIO|BANCO\s+BPM|UNICREDIT|INTESA\s+SANPAOLO|ICICI\s+Bank(?:\s+Limited)?)\b/i,
-    /\b(?:bank name|beneficiary bank|sender bank)\s*[:#-]?\s*(.{2,90}?)(?=\s+\b(?:account|iban|date|amount|total|transaction|reference|remarks|narrative)\b|$)/i,
-    /\bBank\s+(ICICI\s+Bank)\b/i,
+  const source = lineText || text;
+
+  // The sender's bank is what debited the payment. On PostePay confirmations the
+  // sender debits a Postepay card, so the sender bank is PostePay — not the
+  // beneficiary's "denominazione della banca" (our receiving bank) named lower down.
+  if (/\bcarta\s+postepay\s+di\s+addebito\b/i.test(source) || /\bpostepay\b/i.test(source)) {
+    return 'PostePay';
+  }
+
+  return cleanFreeText(firstMatch(source, [
+    // Explicit sender-bank labels take priority over any beneficiary bank on the receipt.
+    /\b(?:banca\s+ordinante|banca\s+mittente|sender bank|from bank)\s*[:#-]?\s*(.{2,90}?)(?=\s+\b(?:account|iban|date|amount|total|transaction|reference|remarks|narrative|beneficiario|filiale)\b|$)/i,
+    // Indian sender receipts name the debiting account's own bank.
     /\b(ICICI\s+Bank\s+Limited)\b/i,
-    /\b(HDFC\s+Bank|Axis\s+Bank|State\s+Bank\s+of\s+India|SBI)\b/i,
+    /\b(HDFC\s+Bank|Axis\s+Bank|State\s+Bank\s+of\s+India|Kotak\s+Mahindra\s+Bank|SBI)\b/i,
+    /\bBank\s+(ICICI\s+Bank)\b/i,
     /\b(ICICI\s+Bank)\b/i,
   ]));
 }
@@ -359,7 +449,7 @@ export function parsePaymentProofText(rawText) {
   const transactionRef = extractReference(rawText, text);
   const payer = extractSenderName(rawText, text);
   const account = extractSenderAccount(rawText, text);
-  const bankName = extractBankName(rawText, text);
+  const bankName = extractSenderBankName(rawText, text);
   const bankDescription = extractNarrative(rawText, text);
 
   const extracted = {

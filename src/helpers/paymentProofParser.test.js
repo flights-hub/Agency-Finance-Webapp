@@ -67,7 +67,7 @@ test('parsePaymentProofText extracts PostePay SEPA receipt fields', () => {
   assert.equal(result.extracted.bank_transaction_reference, 'CCTX00000355835215');
   assert.equal(result.extracted.bank_party_name, 'AMIT KUMAR DHAKA');
   assert.equal(result.extracted.external_account_reference, 'IT42U3608105138278587078603');
-  assert.equal(result.extracted.bank_name, 'BPER BANCA S.P.A');
+  assert.equal(result.extracted.bank_name, 'PostePay');
   assert.equal(result.extracted.bank_description, 'BIGLIETTO AEREO');
   assert.deepEqual(result.warnings, []);
   assert.equal(result.confidence, 100);
@@ -149,6 +149,64 @@ test('parsePaymentProofText extracts Mooney receipt fields', () => {
   assert.equal(result.extracted.transaction_currency, 'EUR');
   assert.equal(result.extracted.payment_date, '2026-07-07');
   assert.equal(result.extracted.bank_transaction_reference, '0009703008036');
+});
+
+test('parsePaymentProofText reads a Mooney tabacchi bonifico receipt (day-first date, TRN over TID)', () => {
+  const result = parsePaymentProofText(`
+    mooney T-BONIFICO
+    RICEVUTA DI PAGAMENTO
+    TRN: 26070519561174014803200
+    Beneficiario: GHAI TRAVELS S R L
+    IBAN: IT76F0538703248000049403789
+    IMPORTO TOT.: € 385,90
+    Importo bonifico: € 380,00
+    Commissioni: € 5,90
+    TID: 000007032568657
+    PE8807I Data: 05/07/2026 19:56:44
+  `);
+
+  assert.equal(result.extracted.payment_method, 'BANK_TRANSFER');
+  // Record the net "Importo bonifico" (380,00), not the 385,90 total that
+  // bundles the 5,90 commission we never track.
+  assert.equal(result.extracted.amount_paid, 380);
+  assert.equal(result.extracted.transaction_currency, 'EUR');
+  // 05/07/2026 is 5 July, not 7 May.
+  assert.equal(result.extracted.payment_date, '2026-07-05');
+  // Prefer the transfer TRN, not the terminal TID.
+  assert.equal(result.extracted.bank_transaction_reference, '26070519561174014803200');
+});
+
+test('parsePaymentProofText records the net transfer, excluding commission, on garbled OCR', () => {
+  // Real Tesseract output for a photographed Mooney receipt: labels are
+  // mangled ("IMPORTO TOT." -> "RTO TOT.") and stray numbers (address "20",
+  // phone) would otherwise be mistaken for the amount. We record the net
+  // bonifico (380,00), never the 385,90 total that includes the 5,90 fee.
+  const result = parsePaymentProofText(`
+    money T-BONIEICO
+    CAPUA (CE) VIA DUOMO 20, 81043
+    TRN : 260705195611
+    Beneficiarig, : jie 3533938799
+    RTO TOT. : € 385,90
+    Importe bonifico: € 380,00
+    Commissioni: € 5,90
+    PEBEOTL Data: 05/07/202619:56:44
+  `);
+
+  assert.equal(result.extracted.amount_paid, 380);
+  assert.equal(result.extracted.transaction_currency, 'EUR');
+  assert.equal(result.extracted.payment_date, '2026-07-05');
+});
+
+test('parsePaymentProofText nets out commission even when the bonifico label is unreadable', () => {
+  // If only the total and "Commissioni" survive OCR, subtract the fee.
+  const result = parsePaymentProofText(`
+    RTO TOT. : € 385,90
+    xxxxx: € 5,90
+    Commissioni € 5,90
+  `);
+
+  assert.equal(result.extracted.amount_paid, 380);
+  assert.equal(result.extracted.transaction_currency, 'EUR');
 });
 
 test('mergePaymentProofDraft replaces the default payment date with extracted proof date', () => {

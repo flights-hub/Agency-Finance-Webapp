@@ -35,3 +35,7 @@ dist-ssr
 /groups-roundtrip-*.png
 /results-*.png
 /verify-*.png
+
+# OCR model + runtime binaries (provisioned via scripts/fetch-ocr-models.mjs)
+/public/ocr/ppocrv5/*.onnx
+/public/ocr/onnxruntime-web/

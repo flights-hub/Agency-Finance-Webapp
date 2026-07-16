@@ -17,15 +17,24 @@ export async function extractTextFromFile(file, options = {}) {
   return extractTextFromPDF(file, options);
 }
 
+// Photos of receipts (angled, glare, low contrast) are the hardest OCR case,
+// so we don't trust a single engine: take PP-OCRv5's read, but if it comes back
+// thin (a common failure on noisy photos) also run Tesseract and keep whichever
+// recovered more text. Clean screenshots/PDFs still short-circuit on the first.
+const MIN_CONFIDENT_TEXT = 24;
+
 async function extractTextFromImage(file, options = {}) {
   try {
-    const ppOcr = await extractTextWithPpOcr(file, options).catch(() => null);
-    if (ppOcr?.text?.trim()) return ppOcr.text;
+    const ppText = (await extractTextWithPpOcr(file, options).catch(() => null))?.text?.trim() || '';
+    if (ppText.length >= MIN_CONFIDENT_TEXT) return ppText;
 
     const result = await Tesseract.recognize(file, 'eng', {
       logger: (message) => console.log(message),
-    });
-    return result.data.text;
+    }).catch(() => null);
+    const tessText = result?.data?.text?.trim() || '';
+
+    // Keep the richer of the two reads.
+    return tessText.length > ppText.length ? tessText : ppText;
   } catch (error) {
     console.error('Error parsing image:', error);
     throw new Error(error?.message || 'Failed to extract text from image', { cause: error });

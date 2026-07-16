@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { rememberPayment, savePayment } from '../helpers/storage';
+import { getBankAccounts, rememberPayment, savePayment } from '../helpers/storage';
 import { api } from '../helpers/api';
 import { createPaymentEntry, createSupplierPaymentEntry, getBookingLedger, numeric, PAYMENT_MODES } from '../helpers/calculations';
 import { extractPaymentProof, validatePaymentProofFile } from '../helpers/paymentProofs';
-import { mergePaymentProofDraft } from '../helpers/paymentProofParser';
+import { mergePaymentProofDraft, parsePaymentProofText } from '../helpers/paymentProofParser';
 import {
+  bankAccountOptions,
   displayDirection,
   fieldLabel,
   fieldRequired,
@@ -18,6 +19,7 @@ import {
   PARTY_TYPES,
   PAYMENT_CURRENCIES,
   PAYMENT_DIRECTIONS,
+  withFieldOptions,
   withRecordedBy,
   withVerification,
 } from '../helpers/paymentVerification';
@@ -117,12 +119,20 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
   const [proofFile, setProofFile] = useState(null);
   const [proofOcr, setProofOcr] = useState(editingPayment?.payment_proof_ocr || null);
   const [proofStatus, setProofStatus] = useState('');
+  // Raw text the OCR engine read, shown so the verifier can see exactly what
+  // was recognised and correct it before re-extracting the form fields.
+  const [ocrText, setOcrText] = useState(editingPayment?.payment_proof_ocr?.raw_text || '');
+  const [showOcrText, setShowOcrText] = useState(false);
   const [proofPreviewUrl, setProofPreviewUrl] = useState(editingPayment?.attachment?.data_url || '');
   const [proofZoom, setProofZoom] = useState(1);
   const [proofRotation, setProofRotation] = useState(0);
   const [saving, setSaving] = useState(false);
   const [registeredUsers, setRegisteredUsers] = useState([]);
   const editedFields = useRef(new Set());
+  // Form keys the most recent OCR extraction populated. Tracking them lets us
+  // wipe stale detections when the proof is replaced or removed, without
+  // clobbering values the user typed by hand.
+  const ocrFields = useRef(new Set());
 
   useEffect(() => {
     if (!proofFile) return undefined;
@@ -181,7 +191,12 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     };
   }, [registeredUsers]);
 
-  const methodFields = methodFieldsFor(form.payment_method);
+  // Bank account dropdowns are driven by the configurable list from Settings.
+  const bankOptions = useMemo(() => bankAccountOptions(getBankAccounts()), []);
+  const methodFields = useMemo(
+    () => withFieldOptions(methodFieldsFor(form.payment_method), { BANK_ACCOUNTS: bankOptions }),
+    [form.payment_method, bankOptions],
+  );
   const hasGrossAmount = methodFields.some((field) => field.key === 'gross_amount');
   const grossAmount = numeric(form.gross_amount) || numeric(form.amount_paid);
   const netSettlement = grossAmount - numeric(form.processing_fee);
@@ -212,6 +227,17 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
   const updateForm = (key, value) => {
     editedFields.current.add(key);
     setForm((current) => ({ ...current, [key]: value }));
+  };
+
+  // Reset the given form keys to their defaults, leaving user-edited fields
+  // untouched. Used to wipe a previous receipt's auto-filled values.
+  const clearFields = (current, keys) => {
+    const cleared = { ...current };
+    keys.forEach((key) => {
+      if (editedFields.current.has(key)) return;
+      cleared[key] = key in EMPTY_FORM ? EMPTY_FORM[key] : '';
+    });
+    return cleared;
   };
 
   const updatePartyType = (partyType) => {
@@ -269,6 +295,12 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     }
     setProofFile(file);
     setProofOcr(null);
+    setOcrText('');
+    // Wipe fields the previous receipt's OCR populated so stale details never
+    // linger while the new proof is read (or if the new read fails).
+    const staleOcr = ocrFields.current;
+    ocrFields.current = new Set();
+    setForm((current) => clearFields(current, staleOcr));
     updateForm('attachment', {
       name: file.name,
       type: file.type,
@@ -280,10 +312,8 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     try {
       const ocr = await extractPaymentProof(file);
       setProofOcr(ocr);
-      setForm((current) => mergePaymentProofDraft(current, ocr.extracted, {
-        protectedFields: editedFields.current,
-        overwriteFields: editingPayment ? [] : ['payment_date', 'payment_method', 'transaction_currency'],
-      }));
+      setOcrText(ocr.raw_text || '');
+      applyExtraction(ocr.extracted);
       setProofStatus(ocr.warnings?.length
         ? `OCR finished with ${ocr.warnings.length} field warning${ocr.warnings.length === 1 ? '' : 's'}`
         : 'OCR fields detected');
@@ -291,6 +321,33 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
       console.error('Payment proof OCR failed:', error);
       setProofStatus('Proof selected; OCR could not read enough text');
     }
+  };
+
+  // Merge an extraction into the form: wipe the previous OCR fill, apply the new
+  // values (never clobbering hand-edited fields), and remember what was filled.
+  const applyExtraction = (extracted = {}) => {
+    const staleOcr = ocrFields.current;
+    ocrFields.current = new Set();
+    setForm((current) => mergePaymentProofDraft(clearFields(current, staleOcr), extracted, {
+      protectedFields: editedFields.current,
+      overwriteFields: editingPayment ? [] : ['payment_date', 'payment_method', 'transaction_currency'],
+    }));
+    ocrFields.current = new Set(
+      Object.entries(extracted)
+        .filter(([key, value]) => value !== undefined && value !== null && value !== ''
+          && !editedFields.current.has(key))
+        .map(([key]) => key),
+    );
+  };
+
+  // Re-run the parser on the (possibly corrected) OCR text and re-fill fields.
+  const reparseFromText = () => {
+    const parsed = parsePaymentProofText(ocrText);
+    setProofOcr((current) => ({ ...(current || {}), ...parsed }));
+    applyExtraction(parsed.extracted);
+    setProofStatus(parsed.warnings?.length
+      ? `Re-read with ${parsed.warnings.length} field warning${parsed.warnings.length === 1 ? '' : 's'}`
+      : 'Fields re-read from text');
   };
 
   // Assembles the stored payment record from the form. Method-specific fields
@@ -596,14 +653,56 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
               </div>
             )}
 
+            {(ocrText || proofOcr) && (
+              <div className="payment-proof-ocrtext">
+                <button
+                  type="button"
+                  className="btn btn-link btn-sm"
+                  onClick={() => setShowOcrText((value) => !value)}
+                >
+                  {showOcrText ? 'Hide OCR text' : 'Show OCR text'}
+                  {Number.isFinite(proofConfidenceValue) ? ` · ${proofConfidenceLabel} confidence` : ''}
+                </button>
+                {showOcrText && (
+                  <>
+                    <p className="payment-proof-ocrtext-hint">
+                      This is exactly what the reader recognised. Correct any mistakes below, then
+                      re-read to refill the fields. Anything you already edited by hand is kept.
+                    </p>
+                    <textarea
+                      className="payment-proof-ocrtext-area"
+                      rows={8}
+                      value={ocrText}
+                      onChange={(event) => setOcrText(event.target.value)}
+                      placeholder="No text was recognised from this proof."
+                      spellCheck={false}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={reparseFromText}
+                      disabled={!ocrText.trim()}
+                    >
+                      Re-read fields from text
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
             {form.attachment && (
               <button
                 className="btn btn-secondary btn-sm payment-proof-remove"
                 type="button"
                 onClick={() => {
+                  const staleOcr = ocrFields.current;
+                  ocrFields.current = new Set();
+                  setForm((current) => clearFields(current, staleOcr));
                   setProofFile(null);
                   setProofOcr(null);
                   setProofStatus('');
+                  setOcrText('');
+                  setShowOcrText(false);
                   setProofZoom(1);
                   setProofRotation(0);
                   setProofPreviewUrl('');

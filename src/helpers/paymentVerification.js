@@ -59,9 +59,9 @@ export const METHOD_FIELDS = {
   BANK_TRANSFER: [
     { key: 'bank_transaction_reference', label: 'Bank Transaction Reference / TRN / UTR', type: 'text', required: true },
     { key: 'bank_party_name', label: (r) => (r.payment_direction === 'PAID' ? 'Beneficiary Name' : 'Sender Name'), type: 'text', required: true },
-    { key: 'internal_bank_account_id', label: (r) => (r.payment_direction === 'PAID' ? 'Paid From (Bank Account)' : 'Received Into (Bank Account)'), type: 'select', options: BANK_ACCOUNTS, required: true },
-    { key: 'external_account_reference', label: 'Sender / Beneficiary IBAN or Account Number', type: 'text' },
-    { key: 'bank_name', label: 'Bank Name', type: 'text' },
+    { key: 'internal_bank_account_id', label: (r) => (r.payment_direction === 'PAID' ? 'Paid From (Bank Account)' : 'Received Into (Bank Account)'), type: 'select', options: BANK_ACCOUNTS, optionsSource: 'BANK_ACCOUNTS', required: true },
+    { key: 'external_account_reference', label: 'Sender IBAN / Account Number', type: 'text' },
+    { key: 'bank_name', label: 'Sender Bank Name', type: 'text' },
     { key: 'bank_transaction_date', label: 'Transaction Date', type: 'date', required: true },
     { key: 'value_date', label: 'Value Date', type: 'date' },
     { key: 'bank_description', label: 'Bank Description / Transfer Narrative', type: 'text' },
@@ -93,7 +93,7 @@ export const METHOD_FIELDS = {
     { key: 'cheque_drawer_name', label: 'Drawer / Account Holder Name', type: 'text', required: true },
     { key: 'cheque_bank_name', label: 'Bank Name', type: 'text', required: true },
     { key: 'cheque_bank_branch', label: 'Branch Name', type: 'text' },
-    { key: 'deposit_account_id', label: 'Deposit Account', type: 'select', options: BANK_ACCOUNTS },
+    { key: 'deposit_account_id', label: 'Deposit Account', type: 'select', options: BANK_ACCOUNTS, optionsSource: 'BANK_ACCOUNTS' },
     { key: 'deposit_date', label: 'Deposit Date', type: 'date' },
     { key: 'cheque_status', label: 'Cheque Status', type: 'select', options: ['RECEIVED', 'DEPOSITED', 'CLEARED', 'BOUNCED', 'CANCELLED'], required: true },
     { key: 'cheque_cleared_date', label: 'Cleared Date', type: 'date', required: (r) => r.cheque_status === 'CLEARED' },
@@ -134,6 +134,31 @@ METHOD_FIELDS.DEBIT_CARD = METHOD_FIELDS.CREDIT_CARD;
 
 export function methodFieldsFor(method) {
   return METHOD_FIELDS[method] || [];
+}
+
+// Overrides the static `options` of any field that draws from a live source
+// (e.g. the configurable bank accounts) with the provided [value, label] list.
+// Falls back to the field's built-in options when no live options exist, so
+// the form still works before the dynamic list has loaded.
+export function withFieldOptions(fields, sources = {}) {
+  return fields.map((field) => {
+    if (!field.optionsSource) return field;
+    const dynamic = sources[field.optionsSource];
+    if (!dynamic || !dynamic.length) return field;
+    return { ...field, options: dynamic };
+  });
+}
+
+// Turns stored bank-account records into [value, label] option pairs for the
+// payment dropdowns. Active accounts only; the id is the stored value so the
+// payment keeps referencing the same account after the list changes.
+export function bankAccountOptions(bankAccounts = []) {
+  return bankAccounts
+    .filter((account) => account && account.id && account.active !== false)
+    .map((account) => {
+      const label = account.currency ? `${account.label} (${account.currency})` : account.label;
+      return [account.id, label || account.id];
+    });
 }
 
 export function fieldLabel(field, record = {}) {
