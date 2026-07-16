@@ -282,6 +282,11 @@ export function createPaymentEntry(input, bookings = [], payments = []) {
   const { payment_date, pnr, amount_paid, payment_mode, receipt_ref, received_by, remarks, ...rest } = input;
   const normalizedPnr = normalizePnr(pnr);
   const relatedBookings = bookings.filter((booking) => normalizePnr(booking.pnr) === normalizedPnr);
+  const billedBooking = relatedBookings[0];
+  const billedPartyType = ['AGENT', 'CUSTOMER'].includes(String(billedBooking?.bill_to_type || '').toUpperCase())
+    ? String(billedBooking.bill_to_type).toUpperCase()
+    : '';
+  const billedPartyName = String(billedBooking?.bill_to_name || '').trim();
   const totalFare = relatedBookings.reduce((sum, booking) => sum + numeric(booking.fare_sold), 0);
   const agentPayments = payments.filter(isCustomerLedgerPayment);
   // Only posted payments count toward the running paid position.
@@ -297,9 +302,9 @@ export function createPaymentEntry(input, bookings = [], payments = []) {
     payment_date,
     pnr: normalizedPnr,
     payment_direction: rest.payment_direction || 'RECEIVED',
-    party_type: rest.party_type || 'CUSTOMER',
-    party_name: rest.party_name || relatedBookings[0]?.bill_to_name || relatedBookings[0]?.passenger_name || '',
-    passenger_name: rest.passenger_name || relatedBookings[0]?.passenger_name || '',
+    party_type: billedPartyType || rest.party_type || 'CUSTOMER',
+    party_name: billedPartyName || rest.party_name || billedBooking?.passenger_name || '',
+    passenger_name: rest.passenger_name || billedBooking?.passenger_name || '',
     amount_paid: amount,
     transaction_amount: amount,
     transaction_currency: rest.transaction_currency || 'EUR',

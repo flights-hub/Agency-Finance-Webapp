@@ -182,7 +182,10 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
   const hasProofPreview = Boolean(proofPreviewUrl);
   const hasExistingProof = Boolean(proofMeta || proofAttachment);
   const proofConfidence = proofOcr?.confidence;
-  const proofConfidenceLabel = Number.isFinite(Number(proofConfidence)) ? `${Number(proofConfidence).toFixed(1)}%` : '';
+  const proofConfidenceValue = Number(proofConfidence);
+  const proofConfidenceLabel = Number.isFinite(proofConfidenceValue)
+    ? `${(proofConfidenceValue <= 1 ? proofConfidenceValue * 100 : proofConfidenceValue).toFixed(1)}%`
+    : '';
   const extractedReference = proofOcr?.extracted?.bank_transaction_reference
     || proofOcr?.extracted?.upi_transaction_id
     || proofOcr?.extracted?.pos_transaction_reference

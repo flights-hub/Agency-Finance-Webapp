@@ -9,7 +9,6 @@ import {
 import {
   displayDirection,
   getLedgerPostingStatus,
-  isSupplierPayment,
   normalizeVerificationStatus,
   PARTY_TYPES,
   transactionReference,
@@ -137,11 +136,12 @@ export default function Payments() {
       .map((row) => {
         const original = payments.find((payment) => payment.id === row.id) || row;
         const allocation = paymentAllocationSummary(original, model);
+        const counterparty = paymentCounterparty(original, model.bookingsByPnr);
         return {
           ...row,
           direction_display: displayDirection(row),
-          party_type_display: row.party_type || (isSupplierPayment(row) ? 'SUPPLIER' : 'CUSTOMER'),
-          party_display: row.party_name || row.supplier_name || row.passenger_name || '',
+          party_type_display: counterparty.type,
+          party_display: counterparty.name,
           transaction_ref: transactionReference(row),
           verification_status_display: VERIFICATION_LABELS[row.verification_status] || row.verification_status,
           ledger_posting_status_display: String(row.ledger_posting_status || '').replace(/_/g, ' '),

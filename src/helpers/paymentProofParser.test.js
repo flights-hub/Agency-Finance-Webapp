@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePaymentProofText } from './paymentProofParser.js';
+import { mergePaymentProofDraft, parsePaymentProofText } from './paymentProofParser.js';
 
 test('parsePaymentProofText extracts bank transfer proof fields', () => {
   const result = parsePaymentProofText(`
@@ -23,7 +23,7 @@ test('parsePaymentProofText extracts bank transfer proof fields', () => {
 test('parsePaymentProofText extracts UPI proof fields', () => {
   const result = parsePaymentProofText(`
     UPI payment received
-    Total ₹ 5000.00
+    Total \u20b9 5000.00
     UTR: 627181928372
     Payer Name RAHUL SHARMA
   `);
@@ -33,4 +33,133 @@ test('parsePaymentProofText extracts UPI proof fields', () => {
   assert.equal(result.extracted.transaction_currency, 'INR');
   assert.equal(result.extracted.upi_transaction_id, '627181928372');
   assert.equal(result.extracted.upi_party_name, 'RAHUL SHARMA');
+});
+
+test('parsePaymentProofText extracts PostePay SEPA receipt fields', () => {
+  const result = parsePaymentProofText(`
+    CONFERMA BONIFICO SEPA ISTANTANEO
+    Gentile AMIT KUMAR DHAKA,
+    di seguito le riportiamo gli estremi del Bonifico SEPA Istantaneo da lei effettuato il giorno 05/07/2026 alle ore 16:52:50
+    ORDINANTE
+    IBAN Carta Postepay di addebito: IT42U3608105138278587078603
+    Intestazione: AMIT KUMAR DHAKA
+    BENEFICIARIO
+    IBAN: IT76F0538703248000049403789
+    Intestazione: GHAI TRAVELS S.R.L.
+    BIC banca destinataria: BPMOIT22XXX
+    Denominazione della banca: BPER BANCA S.P.A.
+    Paese di residenza: IT
+    DATI BONIFICO SEPA ISTANTANEO
+    Codice riferimento: CCTX00000355835215
+    Data valuta addebito: 2026-07-05T14:52:24.783Z
+    Importo bonifico: e 400.00
+    Commissioni: e 1,00
+    Totale: e 401,00
+    Comunicazioni al Beneficiario: BIGLIETTO AEREO
+  `);
+
+  assert.equal(result.extracted.payment_method, 'BANK_TRANSFER');
+  assert.equal(result.extracted.amount_paid, 400);
+  assert.equal(result.extracted.transaction_currency, 'EUR');
+  assert.equal(result.extracted.payment_date, '2026-07-05');
+  assert.equal(result.extracted.bank_transaction_date, '2026-07-05');
+  assert.equal(result.extracted.value_date, '2026-07-05');
+  assert.equal(result.extracted.bank_transaction_reference, 'CCTX00000355835215');
+  assert.equal(result.extracted.bank_party_name, 'AMIT KUMAR DHAKA');
+  assert.equal(result.extracted.external_account_reference, 'IT42U3608105138278587078603');
+  assert.equal(result.extracted.bank_name, 'BPER BANCA S.P.A');
+  assert.equal(result.extracted.bank_description, 'BIGLIETTO AEREO');
+  assert.deepEqual(result.warnings, []);
+  assert.equal(result.confidence, 100);
+});
+
+test('parsePaymentProofText extracts ICICI image receipt fields', () => {
+  const result = parsePaymentProofText(`
+    ICICI Bank
+    Paid successfully!
+    \u20b9 20,000.00
+    To Bipasha Aviation Services P
+    ICICI Bank Limited
+    1511 0500 0344
+    From Jaspreet Kaur
+    ICICI Bank \u2022\u2022\u2022\u2022 3848 Savings a/c
+    Paid at 01:05 PM, 01 Jul '26 IST
+    Tr. ID: FG17381651
+  `);
+
+  assert.equal(result.extracted.payment_method, 'BANK_TRANSFER');
+  assert.equal(result.extracted.amount_paid, 20000);
+  assert.equal(result.extracted.transaction_currency, 'INR');
+  assert.equal(result.extracted.payment_date, '2026-07-01');
+  assert.equal(result.extracted.bank_transaction_date, '2026-07-01');
+  assert.equal(result.extracted.value_date, '2026-07-01');
+  assert.equal(result.extracted.bank_transaction_reference, 'FG17381651');
+  assert.equal(result.extracted.bank_party_name, 'Jaspreet Kaur');
+  assert.equal(result.extracted.external_account_reference, '3848');
+  assert.equal(result.extracted.bank_name, 'ICICI Bank Limited');
+  assert.equal(result.extracted.bank_description, 'Bipasha Aviation Services P');
+  assert.deepEqual(result.warnings, []);
+  assert.equal(result.confidence, 100);
+});
+
+test('parsePaymentProofText extracts Indian UPI screenshot fields', () => {
+  const result = parsePaymentProofText(`
+    Payment successful
+    \u20b9 15,000.00
+    Paid to BIPASHA AVIATION SERVICES PRIVATE LIMITED
+    Banking name BIPASHA AVIATION SERVICES
+    UPI transaction ID 520418987654
+    Paid at 12:14 PM, 01 Jul '26 IST
+  `);
+
+  assert.equal(result.extracted.payment_method, 'UPI');
+  assert.equal(result.extracted.amount_paid, 15000);
+  assert.equal(result.extracted.transaction_currency, 'INR');
+  assert.equal(result.extracted.payment_date, '2026-07-01');
+  assert.equal(result.extracted.upi_transaction_id, '520418987654');
+  assert.equal(result.extracted.bank_description, '');
+});
+
+test('parsePaymentProofText extracts Italian mobile bonifico screenshot fields', () => {
+  const result = parsePaymentProofText(`
+    Bonifico eseguito
+    L'importo di 235,00 € per GHAI TRAVELS S.R.L. è stato eseguito da BANCA FINECO.
+    CRO/TRN: 1301261839274877
+    01 luglio 2026
+  `);
+
+  assert.equal(result.extracted.payment_method, 'BANK_TRANSFER');
+  assert.equal(result.extracted.amount_paid, 235);
+  assert.equal(result.extracted.transaction_currency, 'EUR');
+  assert.equal(result.extracted.payment_date, '2026-07-01');
+  assert.equal(result.extracted.bank_transaction_reference, '1301261839274877');
+});
+
+test('parsePaymentProofText extracts Mooney receipt fields', () => {
+  const result = parsePaymentProofText(`
+    mooney RICEVUTA
+    BONIFICO
+    IMPORTO TOT. 400,00 EUR
+    TID 0009703008036
+    Data 07 luglio 2026
+  `);
+
+  assert.equal(result.extracted.payment_method, 'BANK_TRANSFER');
+  assert.equal(result.extracted.amount_paid, 400);
+  assert.equal(result.extracted.transaction_currency, 'EUR');
+  assert.equal(result.extracted.payment_date, '2026-07-07');
+  assert.equal(result.extracted.bank_transaction_reference, '0009703008036');
+});
+
+test('mergePaymentProofDraft replaces the default payment date with extracted proof date', () => {
+  const today = new Date().toISOString().split('T')[0];
+  const result = mergePaymentProofDraft(
+    { payment_date: today, amount_paid: '', payment_method: 'BANK_TRANSFER', transaction_currency: 'EUR' },
+    { payment_date: '2026-07-05', amount_paid: 400, transaction_currency: 'INR', bank_transaction_date: '2026-07-05' },
+  );
+
+  assert.equal(result.payment_date, '2026-07-05');
+  assert.equal(result.bank_transaction_date, '2026-07-05');
+  assert.equal(result.amount_paid, '400');
+  assert.equal(result.transaction_currency, 'INR');
 });

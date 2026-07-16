@@ -38,6 +38,12 @@ function isToday(isoDateTime) {
   return String(isoDateTime || '').slice(0, 10) === new Date().toISOString().slice(0, 10);
 }
 
+function formatOcrConfidence(value) {
+  const confidence = Number(value);
+  if (!Number.isFinite(confidence)) return '-';
+  return `${(confidence <= 1 ? confidence * 100 : confidence).toFixed(1)}%`;
+}
+
 export default function PaymentVerification() {
   const { user } = useAuth();
   const [payments, setPayments] = useState(() => getPayments());
@@ -285,7 +291,7 @@ export default function PaymentVerification() {
                 {viewTarget.payment_proof_ocr?.extracted && (
                   <div className="auto-preview-list compact-preview" style={{ marginTop: '10px' }}>
                     <div><span>OCR Engine</span><strong>{viewTarget.payment_proof_ocr.engine || '-'}</strong></div>
-                    <div><span>OCR Confidence</span><strong>{viewTarget.payment_proof_ocr.confidence ?? '-'}</strong></div>
+                    <div><span>OCR Confidence</span><strong>{formatOcrConfidence(viewTarget.payment_proof_ocr.confidence)}</strong></div>
                     <div>
                       <span>OCR Reference</span>
                       <strong>
