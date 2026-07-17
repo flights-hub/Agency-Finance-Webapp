@@ -3,6 +3,9 @@
 // client can never verify a payment or keep a verified status through a
 // financial edit without the verify_payments permission.
 
+// Mirrors TERMINAL_VERIFICATION_STATUSES in src/helpers/paymentVerification.js.
+export const TERMINAL_VERIFICATION_STATUSES = ['UPLOAD_FAILED'];
+
 export const FINANCIAL_FIELDS = [
   'payment_date',
   'payment_direction',
@@ -50,6 +53,8 @@ export function getLedgerPostingStatus(payment = {}) {
   if (method === 'CHEQUE' && ['BOUNCED', 'CANCELLED'].includes(payment.cheque_status)) return 'NOT_ELIGIBLE';
 
   const verification = payment.verification_status || 'VERIFIED';
+  // Proof upload never landed: terminal, never awaiting verification.
+  if (TERMINAL_VERIFICATION_STATUSES.includes(verification)) return 'NOT_ELIGIBLE';
   if (verification !== 'VERIFIED') return 'PENDING_VERIFICATION';
 
   if (method === 'CHEQUE' && payment.cheque_status !== 'CLEARED') return 'READY_TO_POST';

@@ -464,15 +464,24 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
       },
     });
 
+    // Read the bytes once so the hash and the upload are guaranteed to cover
+    // the same content, then let the server confirm integrity on completion.
+    const fileBytes = await proofFile.arrayBuffer();
+    const digest = await crypto.subtle.digest('SHA-256', fileBytes);
+    const sha256 = Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+
     const response = await fetch(upload.uploadUrl, {
       method: 'PUT',
       headers: { 'Content-Type': proofFile.type },
-      body: proofFile,
+      body: fileBytes,
     });
     if (!response.ok) throw new Error(`R2 upload failed (${response.status})`);
 
     const completed = await api.completePaymentProofUpload(paymentId, {
       proofId: upload.proof.id,
+      sha256,
       record: {
         ...record,
         id: paymentId,

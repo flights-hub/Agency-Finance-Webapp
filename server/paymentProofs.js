@@ -84,8 +84,57 @@ export async function createProofUpload({ paymentId, fileName, contentType, size
   };
 }
 
-export async function completeProofUpload({ paymentId, proofId, ocr, user }) {
+function normalizeSha256(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const hex = String(value).trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(hex)) {
+    const error = new Error('Payment proof sha256 must be a 64-character hex digest.');
+    error.status = 400;
+    throw error;
+  }
+  return hex;
+}
+
+// Confirm the client's PUT actually landed in R2 before we trust the row as
+// UPLOADED. Without this a failed/partial upload could still be marked complete
+// and later verified against evidence that isn't really there.
+async function assertR2ObjectLanded({ key, expectedBytes }) {
+  const headUrl = presignR2Url({ method: 'HEAD', key, expiresSeconds: 120 });
+  let res;
+  try {
+    res = await fetch(headUrl, { method: 'HEAD' });
+  } catch (cause) {
+    const error = new Error('Could not reach payment proof storage to confirm the upload.');
+    error.status = 502;
+    error.cause = cause;
+    throw error;
+  }
+
+  if (res.status === 404) {
+    const error = new Error('Payment proof upload did not reach storage. Please retry.');
+    error.status = 409;
+    throw error;
+  }
+  if (res.status !== 200) {
+    const error = new Error(`Payment proof storage returned an unexpected status (${res.status}).`);
+    error.status = 502;
+    throw error;
+  }
+
+  const contentLength = Number(res.headers.get('content-length'));
+  const expected = Number(expectedBytes);
+  if (!Number.isFinite(contentLength) || contentLength !== expected) {
+    const error = new Error(
+      `Payment proof upload is incomplete (stored ${res.headers.get('content-length')} of ${expected} bytes). Please retry.`,
+    );
+    error.status = 409;
+    throw error;
+  }
+}
+
+export async function completeProofUpload({ paymentId, proofId, sha256, ocr, user }) {
   const uploadedAt = new Date().toISOString();
+  const sha256Hex = normalizeSha256(sha256);
   const rows = await supabaseRequest(
     `/rest/v1/payment_proofs?id=eq.${encodeURIComponent(proofId)}&payment_id=eq.${encodeURIComponent(paymentId)}&select=*`,
   );
@@ -96,12 +145,18 @@ export async function completeProofUpload({ paymentId, proofId, ocr, user }) {
     throw error;
   }
 
+  // Gate: never flip to UPLOADED unless the object is actually in R2 at the
+  // expected size. On failure the row stays PENDING_UPLOAD and the reconciliation
+  // job (Step 4) will later resolve or orphan it.
+  await assertR2ObjectLanded({ key: proofRow.r2_key, expectedBytes: proofRow.size_bytes });
+
   await supabaseRequest(`/rest/v1/payment_proofs?id=eq.${encodeURIComponent(proofId)}`, {
     method: 'PATCH',
     prefer: 'return=minimal',
     body: {
       status: 'UPLOADED',
       uploaded_at: uploadedAt,
+      ...(sha256Hex ? { sha256: sha256Hex } : {}),
     },
   });
 
@@ -135,6 +190,7 @@ export async function completeProofUpload({ paymentId, proofId, ocr, user }) {
       file_name: proofRow.original_filename,
       content_type: proofRow.content_type,
       size_bytes: Number(proofRow.size_bytes || 0),
+      sha256: sha256Hex || proofRow.sha256 || null,
       upload_status: 'UPLOADED',
       uploaded_at: uploadedAt,
       created_by_user_id: proofRow.created_by,

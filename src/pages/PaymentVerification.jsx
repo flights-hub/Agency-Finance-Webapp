@@ -181,6 +181,7 @@ export default function PaymentVerification() {
             <span>Verification Status</span>
             <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
               <option value="PENDING_UPLOAD">Pending Upload</option>
+              <option value="UPLOAD_FAILED">Upload Failed</option>
               <option value="TO_BE_VERIFIED">To Be Verified</option>
               <option value="VERIFIED">Verified</option>
               <option value="">All</option>

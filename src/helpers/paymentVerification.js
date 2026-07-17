@@ -6,13 +6,18 @@
 // Records created before this workflow have no verification_status; they are
 // grandfathered as VERIFIED so historical ledgers do not change.
 
-export const VERIFICATION_STATUSES = ['PENDING_UPLOAD', 'TO_BE_VERIFIED', 'VERIFIED'];
+export const VERIFICATION_STATUSES = ['PENDING_UPLOAD', 'UPLOAD_FAILED', 'TO_BE_VERIFIED', 'VERIFIED'];
 
 export const VERIFICATION_LABELS = {
   PENDING_UPLOAD: 'Pending Upload',
+  UPLOAD_FAILED: 'Upload Failed',
   TO_BE_VERIFIED: 'To Be Verified',
   VERIFIED: 'Verified',
 };
+
+// Terminal: the proof evidence never reached storage, so the payment can never
+// be verified as recorded. Set by the proof reconciliation sweep, not by hand.
+export const TERMINAL_VERIFICATION_STATUSES = ['UPLOAD_FAILED'];
 
 export const PAYMENT_DIRECTIONS = ['RECEIVED', 'PAID'];
 
@@ -216,6 +221,9 @@ export function getLedgerPostingStatus(payment = {}) {
   if (payment.settlement_status === 'FAILED') return 'NOT_ELIGIBLE';
   if (['FAILED', 'EXPIRED', 'REFUNDED'].includes(payment.payment_status)) return 'NOT_ELIGIBLE';
   if (method === 'CHEQUE' && ['BOUNCED', 'CANCELLED'].includes(payment.cheque_status)) return 'NOT_ELIGIBLE';
+
+  // Proof upload never landed: terminal, never awaiting verification.
+  if (TERMINAL_VERIFICATION_STATUSES.includes(normalizeVerificationStatus(payment))) return 'NOT_ELIGIBLE';
 
   if (normalizeVerificationStatus(payment) !== 'VERIFIED') return 'PENDING_VERIFICATION';
 

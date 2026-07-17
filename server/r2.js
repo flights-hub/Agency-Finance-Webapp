@@ -67,8 +67,8 @@ function signingKey(secretAccessKey, stamp) {
 
 export function presignR2Url({ method, key, expiresSeconds = 300, now = new Date() }) {
   const verb = String(method || '').toUpperCase();
-  if (!['GET', 'PUT', 'HEAD'].includes(verb)) {
-    const error = new Error('R2 presigned URLs only support GET, PUT, or HEAD.');
+  if (!['GET', 'PUT', 'HEAD', 'DELETE'].includes(verb)) {
+    const error = new Error('R2 presigned URLs only support GET, PUT, HEAD, or DELETE.');
     error.status = 400;
     throw error;
   }

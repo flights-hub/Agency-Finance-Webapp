@@ -11,6 +11,7 @@ import { scopedFinanceData } from './financeAccess.js';
 import { saveVersionedFinanceRecord } from './financeRecordInvariants.js';
 import { canVerifyPayments, enforcePaymentRules } from './paymentRules.js';
 import { completeProofUpload, createProofUpload, signedProofViewUrl } from './paymentProofs.js';
+import { reconcileProofUploads } from './proofReconciliation.js';
 import { loadEnvFile } from './env.js';
 import { signJwt, verifyJwt } from './jwt.js';
 import {
@@ -285,6 +286,7 @@ const ACTION_MODULES = {
   bulk_import_finance: 'finance',
   create_payment_proof: 'finance',
   upload_payment_proof: 'finance',
+  reconcile_payment_proofs: 'finance',
   verify_payment: 'finance',
   unverify_payment: 'finance',
   finalize_date_change_amendment: 'finance',
@@ -1113,6 +1115,7 @@ async function handleCompletePaymentProofUpload(req, res, paymentId) {
   const completed = await completeProofUpload({
     paymentId,
     proofId,
+    sha256: body.sha256 || null,
     ocr: body.ocr || null,
     user,
   });
@@ -1149,6 +1152,32 @@ async function handleCompletePaymentProofUpload(req, res, paymentId) {
   });
 
   json(res, 200, { record: saved });
+}
+
+async function handleReconcileProofUploads(req, res) {
+  const user = await requireAdmin(req);
+  const body = await readBody(req).catch(() => ({}));
+
+  const summary = await reconcileProofUploads({
+    ...(body.olderThanHours !== undefined ? { olderThanHours: Number(body.olderThanHours) } : {}),
+    ...(body.limit !== undefined ? { limit: Number(body.limit) } : {}),
+  });
+
+  await audit(req, user, 'reconcile_payment_proofs', null, {
+    recordType: 'payment_proof',
+    recordId: 'reconciliation_sweep',
+    newValue: {
+      scanned: summary.scanned,
+      recovered: summary.recovered.length,
+      orphaned: summary.orphaned.length,
+      payments_failed: summary.paymentsFailed.length,
+      failed: summary.failed.length,
+      cutoff: summary.cutoff,
+    },
+    risk: summary.orphaned.length ? 'medium' : 'low',
+  });
+
+  json(res, 200, summary);
 }
 
 async function handlePaymentProofViewUrl(req, res, paymentId, proofId) {
@@ -1242,6 +1271,8 @@ async function route(req, res) {
   if (req.method === 'POST' && path === '/api/bookings/parse-text') return handleParseBookingText(req, res);
   if (req.method === 'GET' && path === '/api/finance/data') return handleFinanceData(req, res);
   if (req.method === 'GET' && path === '/api/directory/users') return handleUserDirectory(req, res);
+
+  if (req.method === 'POST' && path === '/api/admin/payment-proofs/reconcile') return handleReconcileProofUploads(req, res);
 
   const proofUploadMatch = path.match(/^\/api\/payments\/([^/]+)\/proof-upload$/);
   if (proofUploadMatch && req.method === 'POST') return handleCreatePaymentProofUpload(req, res, decodeURIComponent(proofUploadMatch[1]));
