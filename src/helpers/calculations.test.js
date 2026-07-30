@@ -23,6 +23,11 @@ const bookings = [
   },
 ];
 
+test('invoice numbers use a daily three digit sequence', () => {
+  assert.equal(calculations.getInvoiceNo(0, '2026-07-29'), 'INV290726001');
+  assert.equal(calculations.getInvoiceNo(9, '2026-07-29'), 'INV290726010');
+});
+
 function entry(overrides) {
   return calculations.createPaymentEntry({
     payment_date: '2026-07-04',

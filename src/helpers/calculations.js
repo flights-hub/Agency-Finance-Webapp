@@ -10,6 +10,7 @@ import {
   postedPayments,
 } from './paymentVerification';
 import { bookingPnrAliases, stableBookingRef } from './bookingIdentity';
+import { formatReferenceNumber } from './referenceNumbers.js';
 
 export const PAYMENT_MODES = [
   'CASH',
@@ -266,8 +267,8 @@ export function monthLabel(dateStr) {
   return date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' }).replace(' ', '-');
 }
 
-export function getInvoiceNo(index) {
-  return `INV-${String(index + 1).padStart(5, '0')}`;
+export function getInvoiceNo(index, date = new Date()) {
+  return formatReferenceNumber('INV', date, index + 1);
 }
 
 export function getBookingLedger(bookings = [], payments = []) {
@@ -305,7 +306,7 @@ export function getBookingLedger(bookings = [], payments = []) {
     return {
       ...booking,
       sl: index + 1,
-      invoice_no: booking.invoice_no || getInvoiceNo(index),
+      invoice_no: booking.invoice_no || getInvoiceNo(index, booking.booking_date),
       booking_date: booking.booking_date || booking.created_at?.slice(0, 10) || '',
       pnr,
       pax_type: booking.pax_type || 'ADT',
@@ -411,7 +412,7 @@ export function createPaymentEntry(input, bookings = [], payments = []) {
     transaction_currency: rest.transaction_currency || 'EUR',
     payment_mode,
     payment_method: payment_mode,
-    payment_reference: rest.payment_reference || nextPaymentReference(payments, rest.payment_direction || 'RECEIVED'),
+    payment_reference: rest.payment_reference || nextPaymentReference(payments, rest.payment_direction || 'RECEIVED', rest.payment_date),
     receipt_ref,
     instalment_no: instalmentNo,
     instalment_type: getInstalmentType(instalmentNo, cumulativePaid, totalFare),
@@ -562,7 +563,7 @@ export function getSupplierPayableLedger(bookings = [], payments = [], supplierO
     return {
       ...booking,
       sl: index + 1,
-      invoice_no: booking.invoice_no || getInvoiceNo(index),
+      invoice_no: booking.invoice_no || getInvoiceNo(index, booking.booking_date),
       booking_date: booking.booking_date || booking.created_at?.slice(0, 10) || '',
       pnr,
       fare_sold: numeric(booking.fare_sold),

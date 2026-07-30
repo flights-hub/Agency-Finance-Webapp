@@ -19,7 +19,7 @@ import ChangePassword from './pages/ChangePassword';
 import { useAuth } from './AuthContext';
 import { hasPermission } from './helpers/permissions';
 import { getBookings, loadFinanceData } from './helpers/storage';
-import brandLogo from '../Fly for Sure Logo no background no tagline.png';
+const brandLogo = '/Fly for Sure Logo no background no tagline.png';
 
 const normalizeLookup = (value = '') => String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
 

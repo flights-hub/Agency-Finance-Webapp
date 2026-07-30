@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Navigate, useSearchParams } from 'react-router-dom';
 import { LockKeyhole, LogIn } from 'lucide-react';
 import { useAuth } from '../AuthContext';
-import brandLogo from '../../Fly for Sure Logo no background no tagline.png';
+const brandLogo = '/Fly for Sure Logo no background no tagline.png';
 
 export default function Login() {
   const [params] = useSearchParams();

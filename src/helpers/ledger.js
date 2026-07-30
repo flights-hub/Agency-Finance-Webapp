@@ -28,6 +28,7 @@ import {
   getLedgerPostingStatus,
 } from './paymentVerification.js';
 import { bookingPnrAliases, stableBookingRef } from './bookingIdentity.js';
+import { formatReferenceNumber, nextReferenceNumber, referenceSeriesNumber } from './referenceNumbers.js';
 
 export function numeric(value) {
   const parsed = Number(value);
@@ -299,36 +300,20 @@ export function cancellationEstimate(cancellation = {}) {
   };
 }
 
-export function nextRefundNumber(refunds = []) {
-  const highest = refunds.reduce((max, refund) => {
-    const match = String(refund.refund_number || '').match(/^REF-(\d+)$/);
-    return match ? Math.max(max, Number(match[1])) : max;
-  }, 0);
-  return `REF-${String(highest + 1).padStart(6, '0')}`;
+export function nextRefundNumber(refunds = [], date = new Date()) {
+  return nextReferenceNumber('REF', refunds, 'refund_number', date);
 }
 
-export function nextAllocationNumber(allocations = []) {
-  const highest = allocations.reduce((max, allocation) => {
-    const match = String(allocation.allocation_number || '').match(/^ALC-(\d+)$/);
-    return match ? Math.max(max, Number(match[1])) : max;
-  }, 0);
-  return `ALC-${String(highest + 1).padStart(6, '0')}`;
+export function nextAllocationNumber(allocations = [], date = new Date()) {
+  return nextReferenceNumber('ALC', allocations, 'allocation_number', date);
 }
 
-export function nextAmendmentNumber(amendments = []) {
-  const highest = amendments.reduce((max, amendment) => {
-    const match = String(amendment.amendment_number || '').match(/^AMD-(\d+)$/);
-    return match ? Math.max(max, Number(match[1])) : max;
-  }, 0);
-  return `AMD-${String(highest + 1).padStart(6, '0')}`;
+export function nextAmendmentNumber(amendments = [], date = new Date()) {
+  return nextReferenceNumber('AMD', amendments, 'amendment_number', date);
 }
 
-export function nextCancellationNumber(cancellations = []) {
-  const highest = cancellations.reduce((max, cancellation) => {
-    const match = String(cancellation.cancellation_number || '').match(/^CAN-(\d+)$/);
-    return match ? Math.max(max, Number(match[1])) : max;
-  }, 0);
-  return `CAN-${String(highest + 1).padStart(6, '0')}`;
+export function nextCancellationNumber(cancellations = [], date = new Date()) {
+  return nextReferenceNumber('CAN', cancellations, 'cancellation_number', date);
 }
 
 // ---------------------------------------------------------------------------
@@ -889,11 +874,16 @@ export function getAccountLedger(account) {
 
   const sorted = entries.sort((a, b) => entrySortKey(a).localeCompare(entrySortKey(b), undefined, { numeric: true }));
   let balance = 0;
-  return sorted.map((entry, index) => {
+  const sequenceByDate = new Map();
+  return sorted.map((entry) => {
     balance = round2(balance + numeric(entry.debit) - numeric(entry.credit));
+    const entryDate = entry.date || entry.payment_date || new Date();
+    const dateCode = String(entryDate).slice(0, 10);
+    const sequence = (sequenceByDate.get(dateCode) || 0) + 1;
+    sequenceByDate.set(dateCode, sequence);
     return {
       ...entry,
-      entry_no: `LED-${String(index + 1).padStart(5, '0')}`,
+      entry_no: formatReferenceNumber('LED', entryDate, sequence),
       running_balance: balance,
     };
   });
@@ -1161,10 +1151,11 @@ export function buildAutoAllocation(available, openItems = [], mode = 'OLDEST_FI
 // Constructs the allocation records to persist. Pure — caller saves them.
 export function buildAllocationRecords({ source, sourceType, account, lines, allocations = [], user = null, allocationType = null }) {
   let counter = 0;
-  const startNumber = Number(nextAllocationNumber(allocations).slice(4));
+  const allocatedAt = new Date();
+  const startNumber = referenceSeriesNumber('ALC', allocations, 'allocation_number', allocatedAt);
   return lines.map(({ open_item: item, amount }) => ({
     id: crypto.randomUUID(),
-    allocation_number: `ALC-${String(startNumber + counter++).padStart(6, '0')}`,
+    allocation_number: formatReferenceNumber('ALC', allocatedAt, startNumber + counter++),
     source_type: sourceType,
     source_id: source.id,
     source_reference: sourceType === 'PAYMENT'
@@ -1188,24 +1179,21 @@ export function buildAllocationRecords({ source, sourceType, account, lines, all
     status: 'ACTIVE',
     allocated_by: user?.name || user?.email || '',
     allocated_by_user_id: user?.id || null,
-    allocated_at: new Date().toISOString(),
+    allocated_at: allocatedAt.toISOString(),
   }));
 }
 
 // Builds the outgoing refund payout payment document. It enters the normal
 // payment verification queue; the ledger only moves once an admin verifies it.
 export function buildRefundPayoutPayment({ refund, preview, amount, method = 'BANK_TRANSFER', user = null, payments = [] }) {
-  const highest = payments.reduce((max, payment) => {
-    const match = String(payment.payment_reference || '').match(/^PAY-(\d+)$/);
-    return match ? Math.max(max, Number(match[1])) : max;
-  }, 0);
+  const paymentDate = new Date().toISOString().slice(0, 10);
   const partyType = preview.party_type;
   const partyName = preview.booking
     ? bookingCounterparty(preview.booking).name
     : (refund.passenger_name || '');
   return {
     id: crypto.randomUUID(),
-    payment_date: new Date().toISOString().slice(0, 10),
+    payment_date: paymentDate,
     payment_direction: 'PAID',
     payment_type: 'REFUND_PAYOUT',
     refund_id: refund.id,
@@ -1220,7 +1208,7 @@ export function buildRefundPayoutPayment({ refund, preview, amount, method = 'BA
     transaction_currency: 'EUR',
     payment_mode: method,
     payment_method: method,
-    payment_reference: `PAY-${String(highest + 1).padStart(6, '0')}`,
+    payment_reference: nextReferenceNumber('PAY', payments, 'payment_reference', paymentDate),
     verification_status: 'TO_BE_VERIFIED',
     ledger_posting_status: 'PENDING_VERIFICATION',
     received_by: user?.name || user?.email || '',

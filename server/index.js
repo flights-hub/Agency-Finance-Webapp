@@ -7,6 +7,7 @@ import {
   persistDateChangeFinalization,
 } from './amendmentFinalization.js';
 import { parseBookingText } from './bookingParser.js';
+import { formatScheduleResponse, lookupFlightSchedules } from './flightSchedules.js';
 import { scopedFinanceData } from './financeAccess.js';
 import { saveVersionedFinanceRecord } from './financeRecordInvariants.js';
 import { canVerifyPayments, enforcePaymentRules } from './paymentRules.js';
@@ -196,6 +197,21 @@ async function handleParseBookingText(req, res) {
     drafts: result.drafts || [],
     warnings: result.warnings || [],
   });
+}
+
+async function handleScheduleLookup(req, res, url) {
+  await currentUser(req);
+  const rows = await lookupFlightSchedules({
+    flightNumber: url.searchParams.get('flight_number'),
+    origin: url.searchParams.get('origin') || url.searchParams.get('origin_iata') || '',
+    destination: url.searchParams.get('destination') || url.searchParams.get('destination_iata') || '',
+  });
+
+  if (!rows.length) {
+    return json(res, 404, { success: false, error: 'Flight schedule not found.' });
+  }
+
+  return json(res, 200, formatScheduleResponse(rows));
 }
 
 function normalizeRole(role) {
@@ -870,7 +886,7 @@ async function handleSaveFinanceRecord(req, res, collection, id) {
 }
 
 async function handleDeleteFinanceRecord(req, res, collection, id) {
-  const user = await requireFinanceWriter(req, collection);
+  await requireFinanceWriter(req, collection);
   // Only config-style collections support hard deletion through this route.
   // Deleting transactional records (payments, bookings, ...) would orphan
   // ledgers, so those are intentionally excluded.
@@ -1269,6 +1285,7 @@ async function route(req, res) {
   if (req.method === 'POST' && path === '/api/auth/change-password') return handleChangePassword(req, res);
   if (req.method === 'POST' && path === '/api/bookings/parse-pnr') return handleParsePnr(req, res);
   if (req.method === 'POST' && path === '/api/bookings/parse-text') return handleParseBookingText(req, res);
+  if (req.method === 'GET' && path === '/api/v1/schedules/lookup') return handleScheduleLookup(req, res, url);
   if (req.method === 'GET' && path === '/api/finance/data') return handleFinanceData(req, res);
   if (req.method === 'GET' && path === '/api/directory/users') return handleUserDirectory(req, res);
 

@@ -10,6 +10,10 @@ import {
   buildAutoAllocation,
   buildAllocationRecords,
   buildFinanceModel,
+  nextAllocationNumber,
+  nextAmendmentNumber,
+  nextCancellationNumber,
+  nextRefundNumber,
   groupBookingsByPnr,
   netRefundCredit,
   paymentAllocationSummary,
@@ -70,6 +74,21 @@ test('booking counterparty uses bill-to customer instead of internal operator', 
 
   assert.equal(party.type, 'CUSTOMER');
   assert.equal(party.name, 'RATTU BALBIR');
+});
+
+test('case references use a daily three digit sequence', () => {
+  const date = '2026-07-29';
+
+  assert.equal(nextRefundNumber([], date), 'REF290726001');
+  assert.equal(nextRefundNumber([
+    { refund_number: 'REF290726001' },
+    { refund_number: 'REF290726002' },
+    { refund_number: 'REF280726099' },
+    { refund_number: 'REF-000250' },
+  ], date), 'REF290726003');
+  assert.equal(nextAllocationNumber([{ allocation_number: 'ALC290726009' }], date), 'ALC290726010');
+  assert.equal(nextAmendmentNumber([{ amendment_number: 'AMD290726001' }], date), 'AMD290726002');
+  assert.equal(nextCancellationNumber([{ cancellation_number: 'CAN290726001' }], date), 'CAN290726002');
 });
 
 test('booking counterparty uses bill-to agent instead of staff booked_by', () => {

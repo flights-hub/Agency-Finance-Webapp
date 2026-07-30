@@ -2491,6 +2491,12 @@ textarea:focus {
   padding: 8px 10px;
 }
 
+.field-hint {
+  color: var(--ink-500);
+  font-size: var(--t-11);
+  line-height: 1.3;
+}
+
 .airport-autocomplete-field {
   position: relative;
 }
@@ -2802,6 +2808,17 @@ textarea:focus {
 
 .modal-card-wide {
   width: min(1120px, 100%);
+}
+
+.payment-record-backdrop {
+  align-items: flex-start !important;
+  padding-top: max(20px, calc(45dvh - min(43dvh, 390px)));
+  padding-bottom: 20px;
+}
+
+.payment-record-modal {
+  max-height: min(86dvh, 780px);
+  overflow-y: auto;
 }
 
 .payment-proof-layout {
@@ -4323,6 +4340,14 @@ textarea:focus {
   .modal-backdrop,
   .allocation-backdrop {
     padding: 10px;
+  }
+
+  .payment-record-backdrop {
+    padding-top: 10px;
+  }
+
+  .payment-record-modal {
+    max-height: calc(100dvh - 20px);
   }
 
   .payment-proof-layout {

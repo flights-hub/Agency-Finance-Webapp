@@ -27,6 +27,8 @@ dist-ssr
 # Agent tool artifacts
 .codex/
 .playwright-mcp/
+.python-packages/
+output/flight-schedules-cache/
 
 # Dev server / debug logs
 *.err

@@ -71,6 +71,12 @@ export const api = {
     method: 'POST',
     body: { text, source, provider },
   }),
+  lookupFlightSchedule: (flightNumber, params = {}) => {
+    const search = new URLSearchParams({ flight_number: flightNumber });
+    if (params.origin) search.set('origin', params.origin);
+    if (params.destination) search.set('destination', params.destination);
+    return request(`/api/v1/schedules/lookup?${search}`);
+  },
   securityOverview: () => request('/api/security/overview'),
   securityLoginHistory: (params = {}) => request(`/api/security/login-history?${new URLSearchParams(params)}`),
   securityAuditTrail: (params = {}) => request(`/api/security/audit-trail?${new URLSearchParams(params)}`),

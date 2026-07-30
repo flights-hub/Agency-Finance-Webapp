@@ -133,7 +133,8 @@ async function handleSessions(req, res, url, deps) {
   deps.json(res, 200, {
     sessions: (sessions || []).map((session) => {
       // Never expose the session hash itself to the client.
-      const { session_id_hash: _hash, ...safe } = session;
+      const { session_id_hash, ...safe } = session;
+      void session_id_hash;
       const profile = profileMap.get(session.user_id);
       return { ...safe, email: profile?.email || null, name: profile?.name || null, role: profile?.role || null };
     }),

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { getBankAccounts, rememberPayment, savePayment } from '../helpers/storage';
 import { api } from '../helpers/api';
 import { createPaymentEntry, createSupplierPaymentEntry, getBookingLedger, numeric, PAYMENT_MODES } from '../helpers/calculations';
@@ -412,7 +413,7 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
         amount_paid: amount,
         transaction_amount: amount,
         payment_direction: 'SUPPLIER_OUT',
-        payment_reference: nextPaymentReference(payments, 'PAID'),
+        payment_reference: nextPaymentReference(payments, 'PAID', form.payment_date),
       };
     }
 
@@ -445,7 +446,7 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
       amount_paid: amount,
       transaction_amount: amount,
       passenger_name: form.party_name,
-      payment_reference: nextPaymentReference(payments, form.payment_direction),
+      payment_reference: nextPaymentReference(payments, form.payment_direction, form.payment_date),
       verification_status: 'TO_BE_VERIFIED',
     };
   };
@@ -547,12 +548,12 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
     }
   };
 
-  return (
-    <div className="modal-backdrop" style={{
+  return createPortal((
+    <div className="modal-backdrop payment-record-backdrop" style={{
       position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100,
       background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
     }}>
-      <div className="card modal-card modal-card-wide" style={{ maxHeight: '92vh', overflowY: 'auto' }}>
+      <div className="card modal-card modal-card-wide payment-record-modal">
         <h3>{editingPayment ? 'Edit Payment' : lockedPnr ? `Record Payment · ${lockedPnr}` : lockedBookingRef ? `Record Payment · ${lockedBookingRef}` : 'Record Payment'}</h3>
 
         <div className="payment-proof-layout">
@@ -843,7 +844,7 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
         </div>
 
         <div className="auto-preview-list compact-preview">
-          <div><span>Payment Ref</span><strong>{editingPayment ? (form.payment_reference || '-') : nextPaymentReference(payments, form.party_type === 'SUPPLIER' ? 'PAID' : form.payment_direction)}</strong></div>
+          <div><span>Payment Ref</span><strong>{editingPayment ? (form.payment_reference || '-') : nextPaymentReference(payments, form.party_type === 'SUPPLIER' ? 'PAID' : form.payment_direction, form.payment_date)}</strong></div>
           {selectedPreview && (
             <>
               <div><span>Instalment Type</span><strong>{selectedPreview.instalment_type || '-'}</strong></div>
@@ -863,5 +864,5 @@ export default function PaymentRecordModal({ user, bookings = [], payments = [],
         </div>
       </div>
     </div>
-  );
+  ), document.body);
 }

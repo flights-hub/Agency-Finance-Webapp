@@ -1,4 +1,7 @@
-import { connectionDuration } from '../helpers/dateChangeAmendments';
+import {
+  connectionDuration,
+  normalizeConnectionChronology,
+} from '../helpers/dateChangeAmendments';
 
 const DIRECTION_KEYS = {
   OUTBOUND: ['outbound'],
@@ -231,6 +234,7 @@ export default function DateChangeItineraryEditor({
     if (!connection) return;
 
     connection[key] = value;
+    Object.assign(connection, normalizeConnectionChronology(connection));
     connection.duration = connectionDuration(connection);
     onChange(next);
   };

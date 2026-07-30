@@ -251,16 +251,22 @@ test('createPassengerReissues scopes mappings and preserves existing reissue inp
   }]);
 });
 
-test('connectionDuration derives a local elapsed duration and rejects impossible times', () => {
+test('connectionDuration derives a local elapsed duration and returns empty for invalid times', () => {
   assert.equal(connectionDuration(connection('duration', {
     departure_date: '2026-08-01',
     departure_time: '10:15',
     arrival_date: '2026-08-01',
     arrival_time: '12:45',
   })), '2h 30m');
+  assert.equal(connectionDuration(connection('overnight-duration', {
+    departure_date: '2026-08-06',
+    departure_time: '15:55',
+    arrival_date: '2026-08-06',
+    arrival_time: '02:55',
+  })), '11h 0m');
   assert.equal(connectionDuration(connection('invalid-duration', {
     departure_time: '12:45',
-    arrival_time: '10:15',
+    arrival_time: '10:15x',
   })), '');
   assert.equal(connectionDuration({}), '');
 });
@@ -411,7 +417,7 @@ test('both-direction finalization replaces any number of connections', () => {
   assert.equal(result.bookings[0].inbound_date, '2026-08-20');
 });
 
-test('validation rejects discontinuous routes, impossible chronology, and duplicate tickets', () => {
+test('validation rejects discontinuous routes and duplicate tickets', () => {
   const invalidAmendment = {
     ...clone(amendment),
     application_scope: 'PNR_WIDE',
@@ -434,7 +440,6 @@ test('validation rejects discontinuous routes, impossible chronology, and duplic
 
   const errors = validateDateChangeFinalization(invalidAmendment, group);
   assert.ok(errors.some((error) => error.includes('does not connect')));
-  assert.ok(errors.some((error) => error.includes('after departure')));
   assert.ok(errors.some((error) => error.includes('duplicate')));
 });
 
@@ -635,6 +640,20 @@ test('route continuity compares airport values case-insensitively', () => {
   mixedCase.replacement_itinerary.outbound[0].connections[1].departure_city = 'IST';
 
   assert.deepEqual(validateDateChangeFinalization(mixedCase, group), []);
+});
+
+test('overnight connections are normalized to the next day instead of failing chronology validation', () => {
+  const overnight = clone(amendment);
+  overnight.replacement_itinerary.outbound[0].connections[1].arrival_date = '2026-07-25';
+  overnight.replacement_itinerary.outbound[0].connections[1].arrival_time = '02:55';
+  overnight.replacement_itinerary.outbound[0].connections[1].departure_time = '15:55';
+
+  const errors = validateDateChangeFinalization(overnight, group);
+  assert.equal(errors.some((error) => error.includes('arrival must be after departure')), false, errors.join('\n'));
+
+  const result = applyDateChangeAmendment(overnight, group, context);
+  assert.equal(result.bookings[0].flight_segments[0].connections[1].arrival_date, '2026-07-26');
+  assert.equal(result.bookings[0].flight_segments[0].connections[1].duration, '11h 0m');
 });
 
 test('timeline summary includes scope, direction, passenger, PNR split, and ticket reissue', () => {

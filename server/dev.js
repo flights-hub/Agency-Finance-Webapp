@@ -1,8 +1,18 @@
 import { spawn } from 'node:child_process';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const children = [
-  spawn(process.execPath, ['server/index.js'], { stdio: 'inherit' }),
-  spawn(process.execPath, ['node_modules/vite/bin/vite.js'], { stdio: 'inherit' }),
+  spawn(process.execPath, [resolve(projectRoot, 'server/index.js')], {
+    cwd: projectRoot,
+    stdio: 'inherit',
+  }),
+  spawn(process.execPath, [resolve(projectRoot, 'node_modules/vite/bin/vite.js')], {
+    cwd: projectRoot,
+    stdio: 'inherit',
+  }),
 ];
 
 let shuttingDown = false;

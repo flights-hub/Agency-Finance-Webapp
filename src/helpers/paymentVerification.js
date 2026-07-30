@@ -1,3 +1,5 @@
+import { nextReferenceNumber } from './referenceNumbers.js';
+
 // Payment verification workflow: statuses, per-method field definitions, and
 // the ledger posting rule. A payment record existing is not the same as a
 // payment being confirmed — only VERIFIED payments whose method status is
@@ -243,15 +245,11 @@ export function postedPayments(payments = []) {
   return payments.filter(isPostedPayment);
 }
 
-// Auto-generated payment reference: RCPT-000001 for money in, PAY-000001 for
-// money out, continuing from the highest existing number.
-export function nextPaymentReference(payments = [], direction = 'RECEIVED') {
+// Auto-generated payment reference: RCPTddmmyy001 for money in, PAYddmmyy001 for
+// money out, resetting the sequence for each date.
+export function nextPaymentReference(payments = [], direction = 'RECEIVED', date = new Date()) {
   const prefix = direction === 'PAID' || direction === 'SUPPLIER_OUT' ? 'PAY' : 'RCPT';
-  const highest = payments.reduce((max, payment) => {
-    const match = String(payment.payment_reference || '').match(/^(RCPT|PAY)-(\d+)$/);
-    return match && match[1] === prefix ? Math.max(max, Number(match[2])) : max;
-  }, 0);
-  return `${prefix}-${String(highest + 1).padStart(6, '0')}`;
+  return nextReferenceNumber(prefix, payments, 'payment_reference', date);
 }
 
 // Changing any of these on a VERIFIED payment reverses its ledger effect and

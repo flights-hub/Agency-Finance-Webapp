@@ -67,6 +67,23 @@ function timeParts(time) {
   return { hour, minute, second };
 }
 
+function addDateParts(date, days) {
+  const next = new Date(Date.UTC(date.year, date.month - 1, date.day + days));
+  return {
+    year: next.getUTCFullYear(),
+    month: next.getUTCMonth() + 1,
+    day: next.getUTCDate(),
+  };
+}
+
+function formatDateParts(date) {
+  return [
+    String(date.year).padStart(4, '0'),
+    String(date.month).padStart(2, '0'),
+    String(date.day).padStart(2, '0'),
+  ].join('-');
+}
+
 export function isDateChangeType(type) {
   return type === 'DATE_CHANGE' || Boolean(LEGACY_DIRECTIONS[type]);
 }
@@ -120,13 +137,60 @@ function dateTimeValue(date, time) {
   return value;
 }
 
+function connectionTiming(connection = {}) {
+  const departureDate = dateParts(connection.departure_date);
+  const arrivalDate = dateParts(connection.arrival_date);
+  const departureTime = timeParts(connection.departure_time);
+  const arrivalTime = timeParts(connection.arrival_time);
+  if (!departureDate || !arrivalDate || !departureTime || !arrivalTime) {
+    return {
+      departure: null,
+      arrival: null,
+      arrivalDate: text(connection.arrival_date),
+    };
+  }
+
+  const departure = dateTimeValue(formatDateParts(departureDate), connection.departure_time);
+  let normalizedArrivalDate = arrivalDate;
+  let arrival = dateTimeValue(formatDateParts(normalizedArrivalDate), connection.arrival_time);
+
+  while (departure !== null && arrival !== null && arrival <= departure) {
+    normalizedArrivalDate = addDateParts(normalizedArrivalDate, 1);
+    arrival = dateTimeValue(formatDateParts(normalizedArrivalDate), connection.arrival_time);
+  }
+
+  return {
+    departure,
+    arrival,
+    arrivalDate: formatDateParts(normalizedArrivalDate),
+  };
+}
+
 export function connectionDuration(connection = {}) {
-  const departure = dateTimeValue(connection.departure_date, connection.departure_time);
-  const arrival = dateTimeValue(connection.arrival_date, connection.arrival_time);
+  const { departure, arrival } = connectionTiming(connection);
   if (departure === null || arrival === null || arrival <= departure) return '';
 
   const totalMinutes = Math.round((arrival - departure) / 60000);
   return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
+}
+
+export function normalizeConnectionChronology(connection = {}) {
+  const timing = connectionTiming(connection);
+  if (timing.departure === null || timing.arrival === null || !timing.arrivalDate) {
+    return {
+      ...connection,
+      duration: connectionDuration(connection),
+    };
+  }
+
+  return {
+    ...connection,
+    arrival_date: timing.arrivalDate,
+    duration: connectionDuration({
+      ...connection,
+      arrival_date: timing.arrivalDate,
+    }),
+  };
 }
 
 function directionKeys(amendment = {}) {
@@ -141,10 +205,7 @@ function flattenConnections(segments = []) {
 function withCalculatedDurations(segments = []) {
   return clone(segments).map((segment) => ({
     ...segment,
-    connections: (segment.connections || []).map((connection) => ({
-      ...connection,
-      duration: connectionDuration(connection),
-    })),
+    connections: (segment.connections || []).map((connection) => normalizeConnectionChronology(connection)),
   }));
 }
 
@@ -274,7 +335,8 @@ function validateConnectionSequence(directionKey, segments, errors) {
     });
 
     const departure = dateTimeValue(connection.departure_date, connection.departure_time);
-    const arrival = dateTimeValue(connection.arrival_date, connection.arrival_time);
+    const normalizedConnection = normalizeConnectionChronology(connection);
+    const arrival = dateTimeValue(normalizedConnection.arrival_date, normalizedConnection.arrival_time);
     if (departure !== null && arrival !== null && arrival <= departure) {
       errors.push(`${directionLabel} connection ${index + 1}: arrival must be after departure.`);
     }

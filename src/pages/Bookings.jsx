@@ -11,6 +11,8 @@ import {
 } from '../helpers/calculations';
 import { extractTextFromFile } from '../helpers/pdfParser';
 import { isPostedPayment, withRecordedBy, withVerification } from '../helpers/paymentVerification';
+import { formatReferenceNumber, nextReferenceNumber } from '../helpers/referenceNumbers';
+import { scheduleLocalTime, scheduleLookupFlightNumber } from '../helpers/flightScheduleForm';
 import { canVerifyPayments } from '../helpers/access';
 import { useAuth } from '../AuthContext';
 import { api } from '../helpers/api';
@@ -168,6 +170,7 @@ const EMPTY_FORM = {
           departure_terminal: '',
           arrival_terminal: '',
           duration: '',
+          aircraft_type: '',
           check_in_baggage: '',
           cabin_baggage: '',
         },
@@ -210,6 +213,7 @@ const createConnection = (segmentId, index = 0) => ({
   departure_terminal: '',
   arrival_terminal: '',
   duration: '',
+  aircraft_type: '',
   check_in_baggage: '',
   cabin_baggage: '',
 });
@@ -547,21 +551,19 @@ function withAutoDuration(connection) {
   };
 }
 
-function invoiceNumber(index) {
-  return `INV-${String(index + 1).padStart(5, '0')}`;
+function invoiceNumber(index, date = new Date()) {
+  return formatReferenceNumber('INV', date, index + 1);
 }
 
 // One booking event (manual save, cryptic batch, PDF batch) shares a single
-// booking reference. The reference IS the invoice number. Derived from the
-// highest existing numeric suffix so it survives gaps in the sequence.
-function nextBookingRef(bookings) {
-  let max = 0;
-  bookings.forEach((booking) => {
-    const ref = booking.booking_ref || booking.invoice_no || '';
-    const match = /(\d+)\s*$/.exec(ref);
-    if (match) max = Math.max(max, Number(match[1]));
-  });
-  return `INV-${String(max + 1).padStart(5, '0')}`;
+// booking reference. The reference IS the invoice number. New references reset
+// their sequence for each booking date.
+function nextBookingRef(bookings, date = new Date()) {
+  const refs = bookings.flatMap((booking) => [
+    { reference: booking.booking_ref },
+    { reference: booking.invoice_no },
+  ]);
+  return nextReferenceNumber('INV', refs, 'reference', date);
 }
 
 function normalizePnr(value = '') {
@@ -739,8 +741,8 @@ function deriveBooking(rawBooking, index, payments) {
   return {
     ...rawBooking,
     sl: index + 1,
-    invoice_no: rawBooking.invoice_no || invoiceNumber(index),
-    booking_ref: rawBooking.booking_ref || rawBooking.invoice_no || invoiceNumber(index),
+    invoice_no: rawBooking.invoice_no || invoiceNumber(index, rawBooking.booking_date),
+    booking_ref: rawBooking.booking_ref || rawBooking.invoice_no || invoiceNumber(index, rawBooking.booking_date),
     booking_date: rawBooking.booking_date || rawBooking.created_at?.slice(0, 10) || '',
     pax_type: rawBooking.pax_type || 'ADT',
     ow_rt: rawBooking.inbound_date ? 'RT' : 'OW',
@@ -791,6 +793,41 @@ function makeBookingPayload(formValues, bookingRef) {
   };
 }
 
+function airportLabelFromSchedule(airport) {
+  if (!airport?.iata) return '';
+  return `${airport.iata} - ${airport.city || airport.name || airport.iata}`;
+}
+
+function airlineLabelFromSchedule(schedule) {
+  const carrierCode = schedule?.carrier_code || '';
+  const match = getAirlineMatches(carrierCode, 1)[0];
+  if (match?.code === carrierCode) return match.label;
+  return schedule?.airline_name && schedule.airline_name !== carrierCode
+    ? `${carrierCode} - ${schedule.airline_name}`
+    : carrierCode;
+}
+
+function primaryScheduleOption(data) {
+  return Array.isArray(data) ? data[0] : data;
+}
+
+function scheduleLookupKey(segmentIndex, connectionIndex) {
+  return `${segmentIndex}:${connectionIndex}`;
+}
+
+function withoutScheduleAutofill(connection, flightNumber) {
+  return {
+    ...connection,
+    flight_number: flightNumber,
+    departure_city: '',
+    arrival_city: '',
+    departure_time: '',
+    arrival_time: '',
+    duration: '',
+    aircraft_type: '',
+  };
+}
+
 export default function Bookings() {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -816,6 +853,9 @@ export default function Bookings() {
   const [crypticWarnings, setCrypticWarnings] = useState([]);
   const [crypticMeta, setCrypticMeta] = useState(null);
   const [crypticDrafts, setCrypticDrafts] = useState([]);
+  const [scheduleLookupStatus, setScheduleLookupStatus] = useState({});
+  const [scheduleLookupMessage, setScheduleLookupMessage] = useState({});
+  const [scheduleLookupTimers, setScheduleLookupTimers] = useState(() => new Map());
 
   const normalizedBookings = useMemo(
     () => getBookingLedger(bookings, payments),
@@ -927,7 +967,7 @@ export default function Bookings() {
     return meta;
   }, [filteredBookings]);
 
-  const draftPreview = deriveBooking(makeBookingPayload(formValues, nextBookingRef(bookings)), bookings.length, []);
+  const draftPreview = deriveBooking(makeBookingPayload(formValues, nextBookingRef(bookings, formValues.booking_date)), bookings.length, []);
 
   const refreshBookings = () => {
     setBookings(getBookings());
@@ -1023,6 +1063,121 @@ export default function Bookings() {
         }
       )),
     }));
+  };
+
+  const setScheduleStatus = (segmentIndex, connectionIndex, status) => {
+    const statusKey = scheduleLookupKey(segmentIndex, connectionIndex);
+    setScheduleLookupStatus((current) => ({ ...current, [statusKey]: status }));
+  };
+
+  const setScheduleMessage = (segmentIndex, connectionIndex, message) => {
+    const statusKey = scheduleLookupKey(segmentIndex, connectionIndex);
+    setScheduleLookupMessage((current) => ({ ...current, [statusKey]: message }));
+  };
+
+  const applyScheduleToConnection = (segmentIndex, connectionIndex, schedule) => {
+    const hasReliableTime = schedule.schedule?.time_reliable !== false;
+    setFormValues((current) => ({
+      ...current,
+      departure_city: segmentIndex === 0 ? airportLabelFromSchedule(schedule.origin) || current.departure_city : current.departure_city,
+      arrival_city: segmentIndex === current.flight_segments.length - 1 ? airportLabelFromSchedule(schedule.destination) || current.arrival_city : current.arrival_city,
+      flight_segments: current.flight_segments.map((segment, index) => (
+        index !== segmentIndex ? segment : {
+          ...segment,
+          connections: segment.connections.map((connection, cIndex) => {
+            if (cIndex !== connectionIndex) return connection;
+            return {
+              ...connection,
+              airline: airlineLabelFromSchedule(schedule) || connection.airline,
+              flight_number: schedule.flight_number || connection.flight_number,
+              departure_city: airportLabelFromSchedule(schedule.origin) || connection.departure_city,
+              arrival_city: airportLabelFromSchedule(schedule.destination) || connection.arrival_city,
+              departure_time: hasReliableTime ? scheduleLocalTime(schedule.schedule?.std_utc, schedule.origin?.timezone) : connection.departure_time,
+              arrival_time: hasReliableTime ? scheduleLocalTime(schedule.schedule?.sta_utc, schedule.destination?.timezone) : connection.arrival_time,
+              duration: hasReliableTime && schedule.schedule?.duration_minutes
+                ? `${Math.floor(schedule.schedule.duration_minutes / 60)}h ${schedule.schedule.duration_minutes % 60}m`
+                : connection.duration,
+              departure_terminal: schedule.departure_terminal || connection.departure_terminal,
+              arrival_terminal: schedule.arrival_terminal || connection.arrival_terminal,
+              aircraft_type: schedule.aircraft_type || connection.aircraft_type,
+            };
+          }),
+        }
+      )),
+    }));
+  };
+
+  const lookupScheduleForConnection = (segmentIndex, connectionIndex, connection) => {
+    const statusKey = scheduleLookupKey(segmentIndex, connectionIndex);
+    const flightNumber = scheduleLookupFlightNumber(connection, getAirlineMatches);
+    const timer = scheduleLookupTimers.get(statusKey);
+    if (timer) window.clearTimeout(timer);
+
+    if (flightNumber.length < 3 || /^\d+$/.test(flightNumber)) {
+      setScheduleStatus(segmentIndex, connectionIndex, 'idle');
+      setScheduleMessage(segmentIndex, connectionIndex, '');
+      return;
+    }
+
+    const nextTimer = window.setTimeout(async () => {
+      setScheduleStatus(segmentIndex, connectionIndex, 'loading');
+      setScheduleMessage(segmentIndex, connectionIndex, '');
+      try {
+        const result = await api.lookupFlightSchedule(flightNumber, {
+          origin: connection.departure_city,
+          destination: connection.arrival_city,
+        });
+        const schedule = primaryScheduleOption(result.data);
+        if (schedule) {
+          applyScheduleToConnection(segmentIndex, connectionIndex, schedule);
+          setScheduleStatus(segmentIndex, connectionIndex, 'found');
+          setScheduleMessage(
+            segmentIndex,
+            connectionIndex,
+            schedule.schedule?.time_reliable === false
+              ? 'Route found from open data. Times need verification.'
+              : '',
+          );
+        } else {
+          setScheduleStatus(segmentIndex, connectionIndex, 'not_found');
+        }
+      } catch (error) {
+        setScheduleStatus(segmentIndex, connectionIndex, 'not_found');
+        setScheduleMessage(segmentIndex, connectionIndex, error.message || 'No schedule found.');
+      }
+    }, 300);
+
+    setScheduleLookupTimers((current) => {
+      const next = new Map(current);
+      next.set(statusKey, nextTimer);
+      return next;
+    });
+  };
+
+  const updateFlightNumber = (segmentIndex, connectionIndex, value) => {
+    const connection = formValues.flight_segments[segmentIndex]?.connections[connectionIndex] || {};
+    lookupScheduleForConnection(segmentIndex, connectionIndex, { ...connection, flight_number: value });
+    setFormValues((current) => {
+      return {
+        ...current,
+        departure_city: segmentIndex === 0 ? '' : current.departure_city,
+        arrival_city: segmentIndex === current.flight_segments.length - 1 ? '' : current.arrival_city,
+        flight_segments: current.flight_segments.map((segment, index) => (
+          index !== segmentIndex ? segment : {
+            ...segment,
+            connections: segment.connections.map((existing, cIndex) => (
+              cIndex === connectionIndex ? withoutScheduleAutofill(existing, value) : existing
+            )),
+          }
+        )),
+      };
+    });
+  };
+
+  const updateConnectionAirline = (segmentIndex, connectionIndex, value) => {
+    const connection = formValues.flight_segments[segmentIndex]?.connections[connectionIndex] || {};
+    lookupScheduleForConnection(segmentIndex, connectionIndex, { ...connection, airline: value });
+    updateFlightSegment(segmentIndex, connectionIndex, 'airline', value);
   };
 
   const addConnection = (segmentIndex) => {
@@ -1160,7 +1315,7 @@ export default function Bookings() {
     const airline = primaryConnection.airline || '';
     const pnr = primarySupplierSegment?.pnr || '';
     const supplierName = primarySupplierSegment?.supplier_name || '';
-    const bookingRef = nextBookingRef(bookings);
+    const bookingRef = nextBookingRef(bookings, formValues.booking_date);
 
     return selectedPaxRows.map((row) => {
       const fareSold = numeric(row.selling_price);
@@ -1441,7 +1596,7 @@ export default function Bookings() {
       return;
     }
 
-    const bookingRef = nextBookingRef(bookings);
+    const bookingRef = nextBookingRef(bookings, formValues.booking_date);
     crypticDrafts.forEach((draft) => {
       saveBooking(makeBookingPayload(draft, bookingRef));
     });
@@ -1705,6 +1860,7 @@ export default function Bookings() {
                     ['departure_terminal', 'Departure Terminal'],
                     ['arrival_terminal', 'Arrival Terminal'],
                     ['duration', 'Duration'],
+                    ['aircraft_type', 'Aircraft Equipment'],
                     ['check_in_baggage', 'Check-in Baggage'],
                     ['cabin_baggage', 'Cabin Baggage'],
                   ].map(([key, label, inputKind, type]) => (
@@ -1720,17 +1876,30 @@ export default function Bookings() {
                         key={key}
                         label={label}
                         value={connection[key]}
-                        onChange={(value) => updateFlightSegment(segmentIndex, connectionIndex, key, value)}
+                        onChange={(value) => updateConnectionAirline(segmentIndex, connectionIndex, value)}
                       />
                     ) : (
                       <label key={key}>
                         <span>{label}</span>
                         <input
                           type={type || 'text'}
-                          value={connection[key]}
+                          value={connection[key] || ''}
                           readOnly={key === 'duration'}
-                          onChange={(event) => updateFlightSegment(segmentIndex, connectionIndex, key, event.target.value)}
+                          onChange={(event) => (
+                            key === 'flight_number'
+                              ? updateFlightNumber(segmentIndex, connectionIndex, event.target.value)
+                              : updateFlightSegment(segmentIndex, connectionIndex, key, event.target.value)
+                          )}
                         />
+                        {key === 'flight_number' && scheduleLookupStatus[scheduleLookupKey(segmentIndex, connectionIndex)] === 'loading' && (
+                          <small className="field-hint">Looking up schedule...</small>
+                        )}
+                        {key === 'flight_number' && scheduleLookupStatus[scheduleLookupKey(segmentIndex, connectionIndex)] === 'found' && (
+                          <small className="field-hint">{scheduleLookupMessage[scheduleLookupKey(segmentIndex, connectionIndex)] || 'Schedule auto-filled. Fields remain editable.'}</small>
+                        )}
+                        {key === 'flight_number' && scheduleLookupStatus[scheduleLookupKey(segmentIndex, connectionIndex)] === 'not_found' && (
+                          <small className="field-hint">{scheduleLookupMessage[scheduleLookupKey(segmentIndex, connectionIndex)] || 'No schedule found.'}</small>
+                        )}
                       </label>
                     )
                   ))}
